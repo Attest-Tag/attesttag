@@ -1,0 +1,90 @@
+{{- if .Values.minio.enabled }}
+{{- if .Values.documents.s3.url }}
+{{- fail "minio.enabled and documents.s3.url are both set. One of them is the bucket this release writes to; pick it. Leave documents.s3.url empty to run the MinIO in this chart, or turn minio.enabled off to use the bucket you brought." }}
+{{- end }}
+# The MinIO this release runs: the S3-compatible bucket the documents live in, and — because a
+# bucket for documents is the database's bucket too — where the SQLite database is replicated
+# when this release has no Postgres. One node, one volume; object storage, not a cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "attest-tag.minioName" . }}
+  labels: {{- include "attest-tag.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: api
+      port: 9000
+      targetPort: api
+    - name: console
+      port: 9001
+      targetPort: console
+  selector:
+    {{- include "attest-tag.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "attest-tag.minioName" . }}
+  labels: {{- include "attest-tag.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "attest-tag.minioName" . }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "attest-tag.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: minio
+  template:
+    metadata:
+      labels:
+        {{- include "attest-tag.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: minio
+    spec:
+      securityContext: {{- toYaml .Values.minio.podSecurityContext | nindent 8 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: minio
+          image: {{ .Values.minio.image | quote }}
+          securityContext: {{- toYaml .Values.minio.securityContext | nindent 12 }}
+          args: ["server", "/data", "--console-address", ":9001"]
+          ports:
+            - name: api
+              containerPort: 9000
+            - name: console
+              containerPort: 9001
+          env:
+            - name: MINIO_ROOT_USER
+              value: {{ .Values.minio.rootUser | quote }}
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "attest-tag.secretName" . }}
+                  key: MINIO_ROOT_PASSWORD
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet: { path: /minio/health/ready, port: api }
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet: { path: /minio/health/live, port: api }
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+          resources: {{- toYaml .Values.minio.resources | nindent 12 }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [{{ .Values.minio.persistence.accessMode }}]
+        {{- with .Values.minio.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.minio.persistence.size }}
+{{- end }}

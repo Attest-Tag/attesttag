@@ -1,0 +1,64 @@
+# The fix-job worker for a `docker compose` deployment.
+#
+#   docker compose -f docker-compose.yml -f deploy/local/worker.yml up -d
+#
+# An overlay rather than a profile, because it changes the bot's own service rather than adding
+# one: there is no worker container sitting idle here. The bot creates a container per fix
+# request on the daemon below, waits for it, and removes it an hour after it finishes.
+#
+# ── Read this before you turn it on ──
+#
+# This mounts the Docker socket into the bot, and access to the Docker socket is root on the
+# host. It is the only way to run containers from a compose deployment, and it is a real
+# widening of what a compromise of the bot would be worth: everything else in this file the bot
+# could reach already, and the host was not on that list.
+#
+# The managed platforms do not need this. Cloud Run, ECS, Container Apps and Kubernetes each
+# start the worker through an API that can be scoped to "start this one job and nothing else" —
+# deploy/gcp/worker.sh, deploy/aws/worker.sh, deploy/azure/worker.sh, and the Helm chart's
+# worker.enabled. Docker's API has no such scope; it is all of it or none.
+#
+# On a machine that is yours and runs nothing else, that is a reasonable trade. On a host shared
+# with anything you would not hand over, it is not — use one of the platforms above instead.
+#
+# And the second thing, which is true of every mode: a worker checks out a repository and runs
+# that repository's own build and tests. That is the point of it, and it means the code being
+# run is the code in the repositories you connect.
+#
+# ── Settings ──
+#
+#   ATTEST_DOCKER_GID      required: the id of the group that owns the Docker socket, as a
+#                          container sees it. This prints it, on Linux, Docker Desktop and
+#                          Colima alike:
+#
+#       docker run --rm -v /var/run/docker.sock:/var/run/docker.sock alpine stat -c %g /var/run/docker.sock
+#
+#   ATTEST_WORKER_IMAGE    the worker image; pulled automatically on the first fix job
+#   WORKER_CPU             cores per job (default 2)
+#   WORKER_MEMORY          memory per job (default 4Gi) — raise it if jobs are killed for
+#                          running out of memory, which the console reports in those words
+
+services:
+  attesttag:
+    environment:
+      # `workers` resolves to docker from the socket mounted below. Pin it with `docker` if
+      # this host also looks like something else — a bot on a Kubernetes node, say.
+      WORKER_MODE: ${ATTEST_WORKER_MODE:-workers}
+      WORKER_IMAGE: ${ATTEST_WORKER_IMAGE:-ghcr.io/attest-tag/attesttag-worker:latest}
+      WORKER_CPU: ${WORKER_CPU:-2}
+      WORKER_MEMORY: ${WORKER_MEMORY:-4Gi}
+      # The compose network, so a worker can reach the bot by service name as well as over the
+      # public tunnel. `name:` at the top of docker-compose.yml is attest-tag, and compose names
+      # the default network after the project.
+      WORKER_DOCKER_NETWORK: ${ATTEST_WORKER_NETWORK:-attest-tag_default}
+    volumes:
+      # Read-write because creating a container is a write. :ro would not make this safer in any
+      # meaningful way — a read-only socket still exposes the daemon — it would just stop it
+      # working, so it is not offered as reassurance.
+      - /var/run/docker.sock:/var/run/docker.sock
+    # The bot runs as uid 10001, and on a Linux host the socket is root:docker with mode 0660, so
+    # without its group every fix job failed to reach the daemon. Required rather than guessed:
+    # the docker group's id is whatever the host's groupadd handed out, and a wrong guess fails
+    # the same way as none, on the first fix job instead of here.
+    group_add:
+      - "${ATTEST_DOCKER_GID:?ATTEST_DOCKER_GID is empty. Set it in .env to the id of the group that owns the Docker socket, which this prints: docker run --rm -v /var/run/docker.sock:/var/run/docker.sock alpine stat -c %g /var/run/docker.sock}"

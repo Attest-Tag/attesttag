@@ -1,0 +1,44 @@
+name: Bug report
+description: Something behaves differently from what it says it does.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what happened, and what you expected instead.
+    validations: { required: true }
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The image tag, or the commit you built from.
+      placeholder: "v1.0.0, or sha-abc123"
+    validations: { required: true }
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: How is it deployed
+      options: [Docker or compose, Kubernetes, Google Cloud Run, AWS, Azure, From source, Other]
+    validations: { required: true }
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Where it answers
+      options: [Slack, Microsoft Teams, Both, Not relevant]
+    validations: { required: true }
+  - type: dropdown
+    id: database
+    attributes:
+      label: Database
+      options: [SQLite, Postgres]
+    validations: { required: true }
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: >
+        Anything the server printed around the failure. Please read it through before pasting —
+        logs redact keys and tokens, but they do carry channel names, email addresses and the
+        text of messages.
+      render: text

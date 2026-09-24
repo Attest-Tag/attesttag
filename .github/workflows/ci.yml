@@ -1,0 +1,103 @@
+# The checks a pull request has to pass. Deliberately separate from evals.yml, which runs the
+# Go suite and govulncheck and is left alone; this adds the things that were never covered —
+# the console's types, whether the image still builds for both architectures, and whether the
+# build context has quietly grown back.
+name: ci
+
+# Paused. Nothing runs on a branch or a pull request for now — only by hand, from the Actions
+# tab or `gh workflow run ci`. The jobs themselves are untouched and still describe what they
+# check; restoring the automatic runs is putting the two triggers below back.
+on:
+  workflow_dispatch:
+  # pull_request:
+  # push:
+  #   branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  # Both dialects, because the repository supports both and nothing else keeps them honest.
+  # TestNoDialectSpecificSQL catches a statement written in one dialect's words before it runs;
+  # this catches the behaviour that no static check can see — the encodings pgx refuses, the
+  # aggregates Postgres asks about, the cursor rules SQLite has and Postgres does not.
+  test:
+    name: go test (${{ matrix.dialect }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dialect: [sqlite, postgres]
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: attesttag_test
+        options: >-
+          --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+        ports: ["5432:5432"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22", cache: npm, cache-dependency-path: ui/package-lock.json }
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.25", cache: true }
+      # The console is embedded with //go:embed, so it has to exist before anything compiles.
+      - run: cd ui && npm ci --no-audit --no-fund && npm run build
+      - run: go vet ./...
+      - name: go test
+        run: go test ./...
+        env:
+          TEST_DATABASE_URL: ${{ matrix.dialect == 'postgres' && 'postgres://postgres:test@localhost:5432/attesttag_test?sslmode=disable' || '' }}
+
+  console:
+    name: console types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22", cache: npm, cache-dependency-path: ui/package-lock.json }
+      - run: cd ui && npm ci --no-audit --no-fund
+      - run: cd ui && npx tsc --noEmit
+      - run: cd ui && npm run build # the static export the binary embeds
+
+  image:
+    name: image builds for both architectures
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      # The guard on .dockerignore. Without that file the context is the whole working tree —
+      # roughly 4 GB, including a signed-in browser profile under video/.auth, tenants' uploaded
+      # documents and the dotenv files. It is an allowlist, so the way it breaks is by silently
+      # excluding something the build needs; the build below is what catches that. The way it
+      # rots is by someone re-including a directory, which is what this number catches.
+      - name: Build context stays small
+        run: |
+          docker build --no-cache --progress=plain --target build -t ctx-probe . 2>&1 \
+            | tee /tmp/build.log || true
+          bytes=$(grep -oE 'transferring context: [0-9.]+[kMG]?B' /tmp/build.log \
+            | tail -1 | grep -oE '[0-9.]+[kMG]?B' \
+            | awk '/GB/{printf "%.0f", $0*1e9} /MB/{printf "%.0f", $0*1e6} /kB/{printf "%.0f", $0*1e3}')
+          echo "build context: ${bytes:-unknown} bytes"
+          if [ -z "$bytes" ]; then echo "could not read the context size from the build log" >&2; exit 1; fi
+          if [ "$bytes" -gt 26214400 ]; then
+            echo "::error::the build context is $bytes bytes, over the 25 MB ceiling — check .dockerignore" >&2
+            exit 1
+          fi
+
+      # Cross-compiled, not emulated: see the comment in release.yml. If this job becomes slow,
+      # something has broken the $BUILDPLATFORM pinning in the Dockerfile rather than needing
+      # a bigger runner.
+      - name: Build amd64 and arm64
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: false
+          build-args: |
+            GIT_COMMIT=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

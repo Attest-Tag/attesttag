@@ -1,0 +1,13 @@
+apiVersion: v2
+name: attest-tag
+description: An AI teammate for Slack that acts — and never holds a key.
+type: application
+# version is the chart's; appVersion is the image tag this chart defaults to.
+version: 0.1.0
+appVersion: "latest"
+home: https://github.com/Attest-Tag/attesttag
+sources:
+  - https://github.com/Attest-Tag/attesttag
+maintainers:
+  - name: attest_tag
+keywords: [slack, ai, bot, assistant, llm]

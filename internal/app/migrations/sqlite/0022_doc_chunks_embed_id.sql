@@ -1,0 +1,14 @@
+-- Which endpoint and model embedded a chunk.
+--
+-- A vector is only comparable with vectors from the same model: a query embedded by one model and
+-- scored against chunks embedded by another finds nothing, silently — cosine() answers -1 for
+-- vectors of different lengths, and garbage for same-length vectors from different models. Until
+-- an organisation could bring its own endpoint every chunk came from the deployment's EMBED_MODEL,
+-- so nothing recorded which model that was. Now the endpoint can change under a corpus, and the
+-- chunk has to say which one it belongs to: a search reads only the chunks embedded the way its
+-- query is, and an ingest re-embeds a chunk whose identity is not the current one even when its
+-- text has not changed (rag.go).
+--
+-- '' is the deployment's own endpoint, which is what every existing row is, so nothing is
+-- re-embedded when this runs. An organisation's own endpoint is "<host>|<embedding model>".
+alter table doc_chunks add column embed_id text not null default '';

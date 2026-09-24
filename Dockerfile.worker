@@ -1,0 +1,103 @@
+# The fix-job worker image: this binary as `attesttag worker`, git, the toolchains a repository's
+# own build and tests reach for, and the Qwen Code CLI the engine drives. A toolchain missing
+# from here does not read as missing: a repository whose `make test` shells out to `go` died
+# mid-job on `go: not found`, and the job reported it as a failing suite.
+#
+# Two layers of answer, because one image cannot be every language at one version:
+#   baked in   — Python 3.12 + uv, Node 22 + npm, Go, Rust, and a JRE-less JDK-free base. These
+#                are the common cases and are worth the pull.
+#   mise       — everything else, and every *other version* of the above, fetched per job from
+#                what the repository itself pins (.tool-versions, .nvmrc, .python-version,
+#                rust-toolchain.toml, .java-version). The fetch lands in the job cache, so the
+#                second job on a repository pays for it once (internal/worker/toolchain.go).
+# That is what makes "any repository, any language" a matter of the repository declaring itself
+# rather than of this file growing without limit.
+#
+# Debian slim rather than Alpine: PyMuPDF, numpy and pydantic-core ship glibc wheels only, and
+# building MuPDF from source on musl is a half-hour that often fails.
+#
+# Build: docker build -f Dockerfile.worker -t attesttag-worker .   (or deploy/gcp/worker.sh)
+FROM golang:1.25.13-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+# The worker never serves the console, but cmd/attesttag imports ui, whose //go:embed all:out
+# needs at least one file to match. A placeholder is enough and costs nothing: relying on the
+# committed ui/out/index.html instead meant the build worked locally and died under
+# deploy/gcp/worker.sh, where .gcloudignore strips ui/out from the source upload. mkdir -p leaves a
+# real console alone when one is in the context.
+RUN mkdir -p ui/out && touch ui/out/.embed-placeholder
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /attesttag ./cmd/attesttag
+
+FROM python:3.12-slim-bookworm
+ARG QWEN_CODE_VERSION=0.22.3
+ARG RUST_VERSION=1.98.1
+# libssl-dev and pkg-config are here for the crates and wheels that link against OpenSSL.
+# git-lfs and the submodule/tag work in cloneRepo; unzip and xz for what mise unpacks; the rest
+# is what native extensions in every ecosystem link against.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git git-lfs curl ca-certificates build-essential pkg-config libffi-dev libssl-dev make tini \
+      unzip xz-utils zip zstd cmake ninja-build \
+    && git lfs install --system --skip-repo \
+    && rm -rf /var/lib/apt/lists/*
+# Node 22: the Qwen Code CLI runs on it, and so do a repository's `npm ci` and `npm test`.
+COPY --from=node:22-bookworm-slim /usr/local/bin/node /usr/local/bin/node
+COPY --from=node:22-bookworm-slim /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+ && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+ && npm install -g --no-audit --no-fund "@qwen-code/qwen-code@${QWEN_CODE_VERSION}" \
+ && npm cache clean --force \
+ && qwen --version
+COPY --from=ghcr.io/astral-sh/uv:0.10 /uv /uvx /usr/local/bin/
+# Poetry and Pipenv alongside uv: between them these three lock most of the Python world, and a
+# repository locked with one of them is not served by having the other two. They are a few
+# megabytes each, installed as isolated tools so they cannot collide with a project's own
+# dependencies. UV_TOOL_BIN_DIR puts their entry points somewhere already on PATH.
+ENV UV_TOOL_BIN_DIR=/usr/local/bin UV_TOOL_DIR=/usr/local/uv-tools
+RUN uv tool install poetry && uv tool install pipenv \
+ && chmod -R a+rX "$UV_TOOL_DIR" \
+ && poetry --version && pipenv --version
+# Go from the official image rather than a pinned tarball: one line covers amd64 and the arm64 of
+# a laptop build, and /usr/local/go/bin is where the worker's baseEnv already looks. GOTOOLCHAIN
+# is auto there, so a repository that asks for a newer Go fetches it into the job's module cache.
+COPY --from=golang:1.25.13-bookworm /usr/local/go /usr/local/go
+# Rust: the minimal profile plus rustfmt and clippy, because a repository's `make test` tends to
+# run those two before `cargo test`. Both homes sit outside any HOME — the worker gives each job
+# its own — and rustup's proxies are found on PATH.
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --no-modify-path --profile minimal --default-toolchain "$RUST_VERSION" -c rustfmt -c clippy \
+ && rm -rf "$RUSTUP_HOME/downloads" "$CARGO_HOME/registry" \
+ && chmod -R a+rX "$RUSTUP_HOME" "$CARGO_HOME" \
+ && /usr/local/go/bin/go version \
+ && /usr/local/cargo/bin/cargo --version && /usr/local/cargo/bin/cargo clippy --version
+# mise: the toolchain manager for everything not baked in above. It installs into the job's own
+# cache directory at run time (MISE_DATA_DIR, set by the worker), so nothing here is version
+# state — this is only the binary.
+ARG MISE_VERSION=v2026.8.4
+# Debian calls x86_64 "amd64"; mise calls it "x64". The two agree on arm64, which is why a laptop
+# build passed while Cloud Build — and Cloud Run, which is what actually matters — 404'd on the
+# download. -f means curl fails loudly rather than writing the 404 page to /usr/local/bin/mise.
+RUN arch="$(dpkg --print-architecture)" \
+ && case "$arch" in amd64) arch=x64 ;; esac \
+ && curl -fsSL "https://github.com/jdx/mise/releases/download/${MISE_VERSION}/mise-${MISE_VERSION}-linux-${arch}" \
+      -o /usr/local/bin/mise \
+ && chmod 755 /usr/local/bin/mise \
+ && mise --version
+# Two accounts. The worker itself runs as root so that it can drop privileges for the parts of a
+# job that run a repository's own code — dependency installs, the tests, the engine — which run
+# as `sandbox`. That user cannot read the worker's environment (the job token) or the token git
+# is handed for clone and push; it owns only the job directory it is given. It owns the rustup
+# directory too: a repository that pins its toolchain in rust-toolchain.toml has rustup fetch it
+# mid-build, and one container runs one job, so nothing else shares that directory.
+RUN useradd -u 10002 -m sandbox && mkdir -p /work && chown root:root /work && chmod 755 /work \
+ && chown -R sandbox:sandbox "$RUSTUP_HOME"
+COPY --from=build /attesttag /app/attesttag
+WORKDIR /work
+# Only ATTEST_JOB_ID, ATTEST_BOT_URL and ATTEST_JOB_TOKEN arrive per execution (Cloud Run env
+# overrides); the spec and every secret come back over the claim call.
+ENV WORKER_DIR=/work WORKER_MODE=cloudrun WORKER_MAX_WALL=55m WORKER_SANDBOX_UID=10002 HOME=/root \
+    DOTNET_CLI_TELEMETRY_OPTOUT=1 DO_NOT_TRACK=1 \
+    PATH=/usr/local/go/bin:/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin
+ENTRYPOINT ["tini", "--", "/app/attesttag", "worker"]

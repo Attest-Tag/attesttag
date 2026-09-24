@@ -1,0 +1,191 @@
+# attest_tag, self-hosted.
+#
+#   ./deploy/local/bootstrap.sh          # writes .env and generates MASTER_KEY
+#   docker compose --profile quicktunnel up -d
+#   docker compose logs quicktunnel         # the https URL to paste into your Slack app
+#
+# One container and one volume is the whole thing. The database is SQLite on that volume and
+# the binary serves the console itself, so there is nothing else to operate. That is a real
+# deployment, not a demo — it is what the hosted service ran on for months.
+#
+# Bring your own storage when you want it, by setting these in .env; nothing else changes:
+#
+#   DATABASE_URL     a Postgres server instead of the SQLite file
+#   DOCS_S3_URL      an S3-compatible bucket instead of the documents volume — which also
+#   DOCS_S3_KEY_ID   streams the SQLite database into that bucket and restores it on boot,
+#   DOCS_S3_SECRET   so one container can lose its disk without losing the deployment
+#
+# Or run them here, in this file, with no account anywhere. Each is a profile and a second
+# compose file, because a compose file cannot say "set this variable only under that profile":
+#
+#   Postgres        -f docker-compose.yml -f deploy/local/postgres.yml --profile postgres
+#   MinIO           -f docker-compose.yml -f deploy/local/minio.yml    --profile minio
+#   both            both -f flags, both profiles
+#
+# And one more overlay, which is not storage: deploy/local/worker.yml turns on "fix this and
+# raise a PR", by letting the bot start a container per fix job on this machine's Docker daemon.
+# It mounts the Docker socket into the bot, which is root on the host — read the top of that
+# file before adding it.
+#
+# Tired of typing that? Put it in .env, which compose reads for its own settings too:
+#
+#   COMPOSE_FILE=docker-compose.yml:deploy/local/postgres.yml:deploy/local/minio.yml
+#   COMPOSE_PROFILES=postgres,minio,quicktunnel
+#
+# and then plain `docker compose up -d` is the whole command.
+#
+# The profiles are the ways of getting a public https address, which is not optional: Slack
+# will not deliver events to localhost and will not accept an http redirect URL, and there is
+# no Socket Mode fallback in this codebase.
+#
+#   --profile quicktunnel   a cloudflared quick tunnel. No account, no domain, no DNS. The
+#                           hostname changes on every restart, so re-verify the Slack Request
+#                           URL each time — for evaluating, not for keeping.
+#   --profile tunnel        a named Cloudflare tunnel. Free, stable hostname, works behind NAT
+#                           with no inbound ports. Paste CLOUDFLARE_TUNNEL_TOKEN into .env.
+#   --profile caddy         you own a domain and this machine has a public address. Caddy gets
+#                           a Let's Encrypt certificate on its own.
+
+name: attest-tag
+
+services:
+  attesttag:
+    image: ${ATTEST_IMAGE:-ghcr.io/attest-tag/attesttag}:${ATTEST_VERSION:-latest}
+    restart: unless-stopped
+    env_file: [.env]
+    volumes:
+      - data:/data # the SQLite database
+      - docs:/app/docs # documents indexed for search_docs
+    # Loopback only. The way in is a tunnel or a proxy, never a port open to the world: the
+    # console holds sessions and the Slack endpoints authenticate by signature, both of which
+    # assume https in front of them.
+    ports:
+      - "127.0.0.1:${ATTEST_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    # The write lease wants about nine seconds to be released cleanly on the way down, and
+    # Docker's default of ten leaves no room for the rest of the shutdown.
+    stop_grace_period: 30s
+
+  # Postgres in this compose file, for somebody who wants it without a managed instance. The
+  # profile only starts it: the bot uses it because deploy/local/postgres.yml sets DATABASE_URL,
+  # which is why the two always go together. Without them, DATABASE_URL from your own .env points
+  # at whatever you brought, and with neither it is SQLite on the volume.
+  postgres:
+    profiles: [postgres]
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: attesttag
+      # `:?` and not `:-`. A default here was a password published in this repository, and the
+      # shape of the bug was that it applied to an *empty* value as well as an unset one — which
+      # is exactly what selfhost.env.example ships, so copying the template instead of running
+      # bootstrap.sh gave you the documented one. Compose now refuses to start and says so.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is empty. Run ./deploy/local/bootstrap.sh, which writes .env and generates one}
+      POSTGRES_DB: attesttag
+    volumes:
+      # /var/lib/postgresql, NOT /var/lib/postgresql/data. The 18 images store the cluster in a
+      # major-version subdirectory so that pg_upgrade --link has no mount point in its way, and
+      # a volume mounted at the old path is refused outright — "there appears to be PostgreSQL
+      # data in /var/lib/postgresql/data (unused mount/volume)", exit 1, restart loop. The bot
+      # waits on service_healthy, so that takes the whole stack down with it.
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U attesttag"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # MinIO in this compose file, for somebody who wants an S3 bucket without a cloud account.
+  # Under this profile the documents live in it — and so does a continuous replica of the SQLite
+  # database, because the bucket named for documents is the database's bucket too
+  # (internal/app/replica_target.go). One node, one volume; it is object storage, not a cluster.
+  minio:
+    profiles: [minio]
+    image: quay.io/minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      # The user keeps its default: a username is not the secret.
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-attesttag}
+      # MinIO refuses anything shorter than eight characters. bootstrap.sh generates one, and
+      # this refuses to start without it — the bucket holds the documents and the database
+      # replica both, so a known password on it is the whole deployment.
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is empty. Run ./deploy/local/bootstrap.sh, which writes .env and generates one}
+    volumes:
+      - minio-data:/data
+    ports:
+      # Loopback, like the bot: 9000 is the S3 API and 9001 is MinIO's own console, which is
+      # worth having when you want to look at what was stored.
+      - "127.0.0.1:${MINIO_PORT:-9000}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001"
+
+  # One shot: create the bucket, prove the credentials can write, read and delete in it, and say
+  # whether the store enforces the conditional writes the single-writer lease needs. Then exit.
+  # It is the bot's own image and its own `bucket-init` command — nothing further to pull — and
+  # it waits for MinIO to answer rather than racing its boot.
+  minio-init:
+    profiles: [minio]
+    image: ${ATTEST_IMAGE:-ghcr.io/attest-tag/attesttag}:${ATTEST_VERSION:-latest}
+    restart: "no"
+    depends_on: [minio]
+    command: ["bucket-init", "-wait", "90s"]
+    environment:
+      DOCS_S3_URL: "s3://${MINIO_BUCKET:-attesttag}/docs?endpoint=http://minio:9000&region=us-east-1"
+      DOCS_S3_KEY_ID: ${MINIO_ROOT_USER:-attesttag}
+      DOCS_S3_SECRET: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is empty. Run ./deploy/local/bootstrap.sh, which writes .env and generates one}
+
+  # ── Getting a public https address: pick one ──
+
+  quicktunnel:
+    profiles: [quicktunnel]
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    depends_on: [attesttag]
+    command: tunnel --no-autoupdate --url http://attesttag:8080
+    # `docker compose logs quicktunnel` prints the https://*.trycloudflare.com address. It is
+    # different every time this container starts, which is why this profile is for trying the
+    # thing out rather than running it.
+
+  tunnel:
+    profiles: [tunnel]
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    depends_on: [attesttag]
+    command: tunnel --no-autoupdate run
+    environment:
+      # From the Cloudflare dashboard when you create the named tunnel. Required by this
+      # profile; it is not a `:?` guard because compose interpolates every service in the
+      # file whether or not its profile is active, which would break a plain `up`.
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+
+  caddy:
+    profiles: [caddy]
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on: [attesttag]
+    ports: ["80:80", "443:443", "443:443/udp"]
+    environment:
+      # The domain pointed at this machine. Required by this profile — see the note above
+      # for why it is not enforced here.
+      ATTEST_DOMAIN: ${ATTEST_DOMAIN:-}
+      # Optional. The Caddyfile's whole `email` line when ATTEST_ACME_EMAIL is set, and nothing
+      # when it is not: Caddy refuses to start on the option with no address after it, which is
+      # what an empty ATTEST_ACME_EMAIL used to give it.
+      ATTEST_ACME_EMAIL_OPTION: ${ATTEST_ACME_EMAIL:+email ${ATTEST_ACME_EMAIL}}
+    volumes:
+      - ./deploy/local/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  data:
+  docs:
+  postgres-data:
+  minio-data:
+  caddy-data:
+  caddy-config:

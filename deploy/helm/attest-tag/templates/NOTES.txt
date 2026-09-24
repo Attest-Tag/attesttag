@@ -1,0 +1,59 @@
+attest_tag is installed as {{ include "attest-tag.fullname" . }}.
+
+{{- $base := include "attest-tag.baseURL" . }}
+{{- if $base }}
+
+  Console:  {{ $base }}/admin/
+  Slack:    BASE_URL={{ $base }} ./deploy/slack/manifest.sh
+            paste the output at api.slack.com/apps -> Create New App -> From a manifest
+{{- else }}
+
+  ! Neither ingress.host nor config.ADMIN_BASE_URL is set, so this deployment does not know
+    its own public address. Password-reset, verification and invitation links will be built
+    from whichever Host header reaches it first. Set one of them and upgrade.
+{{- end }}
+
+Watch it come up:
+
+  kubectl rollout status {{ if eq (include "attest-tag.stateful" .) "true" }}statefulset{{ else }}deployment{{ end }}/{{ include "attest-tag.fullname" . }} -n {{ .Release.Namespace }}
+
+Readiness is /admin/, not /health: /health answers as soon as the process is listening, while
+everything else returns 503 until the database is open. A pod that is Running but not Ready is
+usually still opening or restoring the database.
+
+{{- if not .Values.existingSecret }}
+
+Secrets were created by this chart from values, which means they are in Helm's release history
+in plain text. For anything real, manage a Secret yourself — External Secrets, Sealed Secrets,
+SOPS — and set existingSecret to its name.
+{{- end }}
+
+MASTER_KEY seals every stored credential. Back it up somewhere outside this cluster:
+
+  kubectl get secret {{ include "attest-tag.secretName" . }} -n {{ .Release.Namespace }} \
+    -o jsonpath='{.data.MASTER_KEY}' | base64 -d
+
+{{ if eq (include "attest-tag.stateful" .) "true" -}}
+Storage: {{ if eq (include "attest-tag.usesSQLite" .) "true" }}SQLite on a volume{{ if ne (include "attest-tag.usesLocalDocs" .) "true" }}, replicated to the bucket and restored from it on boot{{ end }}{{ else }}Postgres{{ end }}, documents {{ if eq (include "attest-tag.usesLocalDocs" .) "true" }}on a volume{{ else }}in a bucket{{ end }}.
+
+Something is on a local volume, so this runs as exactly one replica — a ReadWriteOnce volume
+has one writer. Set database.url and documents.s3.url to scale; see deploy/docs/storage.md.
+{{- else -}}
+Storage: Postgres and an object store. No local state, so this is a Deployment and
+replicaCount may be raised.
+{{- end }}
+{{ if or .Values.postgres.enabled .Values.minio.enabled }}
+Running in this release:
+{{ if .Values.postgres.enabled }}  Postgres  {{ include "attest-tag.postgresName" . }}:5432, volume {{ .Values.postgres.persistence.size }}
+{{ end }}{{- if .Values.minio.enabled }}  MinIO     {{ include "attest-tag.minioName" . }}:9000, bucket {{ .Values.minio.bucket }}, volume {{ .Values.minio.persistence.size }}
+
+  Its console, when you want to look at what was stored:
+
+    kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "attest-tag.minioName" . }} 9001:9001
+{{ end }}
+One replica each, one volume each: the right size for one bot, and not high availability.
+Their passwords were generated into {{ include "attest-tag.secretName" . }} and are reused on
+every upgrade — read them with `kubectl get secret`. Neither is backed up by anything: for
+data you would be sad to lose, point database.url and documents.s3.url at a managed Postgres
+and a real bucket instead. Same chart, two values.
+{{- end }}

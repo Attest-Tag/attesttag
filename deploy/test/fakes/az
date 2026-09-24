@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+"""A fake az CLI, covering exactly the calls deploy/azure/*.sh make.
+
+Same contract as the fake aws: answer in the shape the real CLI answers, keep a registry so a
+rerun sees the first run's resources, and capture the payloads the scripts generate. The
+Container Apps spec is the one worth capturing — it is assembled by a hand-rolled YAML writer in
+containerapps.sh, so "does it come out as valid YAML with the right values" is a real question.
+
+Scenarios the harness injects:
+  FAKE_AZ_SUBSCRIPTION   the subscription guid to report
+"""
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _cloudstate import capture, counter, die, exists, flag, get, out, put, record  # noqa: E402
+
+SUBSCRIPTION = os.environ.get("FAKE_AZ_SUBSCRIPTION", "00000000-1111-2222-3333-444444444444")
+RG = "attesttag"
+
+argv = sys.argv[1:]
+record("az", argv)
+
+# az is `az <group> [<subgroup>] <command> --flags`. Everything before the first flag is the path.
+path_parts = []
+for a in argv:
+    if a.startswith("-"):
+        break
+    path_parts.append(a)
+path = " ".join(path_parts)
+query = flag(argv, "--query", "")
+name = flag(argv, "--name", "")
+
+
+def rid(*parts):
+    return "/subscriptions/%s/resourceGroups/%s/providers/%s" % (SUBSCRIPTION, RG, "/".join(parts))
+
+
+def spec_declares_identity():
+    """Did the last applied spec ask for a managed identity?
+
+    containerapps.sh adds `identity: {type: SystemAssigned}` only when WORKER_MODE is workers or
+    aca, then reads principalId back to grant it job-start rights. Deriving the answer from the
+    spec the script actually wrote is what makes that round trip testable.
+    """
+    spec = get("spec", "containerapp", "")
+    return "SystemAssigned" in spec
+
+
+# ── no-ops the scripts fire and forget ───────────────────────────────────────────────────────
+if path in ("provider register", "extension add"):
+    pass
+
+elif path == "account show":
+    out(SUBSCRIPTION)
+
+# ── resource group ───────────────────────────────────────────────────────────────────────────
+elif path == "group show":
+    if not exists("group", name):
+        die("(ResourceGroupNotFound) Resource group '%s' could not be found." % name, 3)
+
+elif path == "group create":
+    put("group", name)
+
+# ── container apps environment ───────────────────────────────────────────────────────────────
+elif path == "containerapp env show":
+    if not exists("caenv", name):
+        die("(ResourceNotFound) The Resource 'Microsoft.App/managedEnvironments/%s' was not "
+            "found." % name, 3)
+    if "id" in query:
+        out(rid("Microsoft.App/managedEnvironments", name))
+
+elif path == "containerapp env create":
+    put("caenv", name)
+
+elif path == "containerapp env storage set":
+    put("caenv-storage", flag(argv, "--storage-name"), flag(argv, "--azure-file-share-name"))
+
+# ── storage account + file share ─────────────────────────────────────────────────────────────
+elif path == "storage account show":
+    if not exists("storage", name):
+        die("(ResourceNotFound) storage account %s not found" % name, 3)
+
+elif path == "storage account create":
+    counter("az:storage-account-create")
+    put("storage", name)
+
+elif path == "storage account keys list":
+    out("ZmFrZS1zdG9yYWdlLWtleQ==")
+
+elif path == "storage share-rm show":
+    if not exists("share", name):
+        die("(ShareNotFound) share %s not found" % name, 3)
+
+elif path == "storage share-rm create":
+    put("share", name)
+
+# ── the app ──────────────────────────────────────────────────────────────────────────────────
+elif path == "containerapp show":
+    if not exists("containerapp", name):
+        die("(ResourceNotFound) The Resource 'Microsoft.App/containerApps/%s' was not found."
+            % name, 3)
+    if "identity.principalId" in query:
+        # Empty when the spec asked for no identity, which is what real az prints for a null.
+        out("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" if spec_declares_identity() else "")
+    elif "ingress.fqdn" in query:
+        out("%s.fakeregion.azurecontainerapps.io" % name)
+    elif "id" in query:
+        out(rid("Microsoft.App/containerApps", name))
+
+elif path in ("containerapp create", "containerapp update"):
+    counter("az:containerapp-%s" % path.split()[-1])
+    spec_path = flag(argv, "--yaml")
+    if spec_path and os.path.exists(spec_path):
+        body = open(spec_path).read()
+        # The spec holds every secret, so the script makes it 0600 and deletes it on the way out.
+        # Recording the mode here is how the harness checks the first half of that.
+        put("spec-mode", "containerapp", oct(os.stat(spec_path).st_mode & 0o777))
+        put("spec", "containerapp", body)
+        capture("containerapp-spec.yaml", body)
+    put("containerapp", name)
+
+# ── roles ────────────────────────────────────────────────────────────────────────────────────
+elif path == "role definition list":
+    out(get("roledef", name) or "")
+
+elif path == "role definition create":
+    body = flag(argv, "--role-definition", "{}")
+    capture("role-definition.json", body)
+    put("roledef", json.loads(body).get("Name", "unknown"), "fake-role-id")
+
+elif path == "role assignment create":
+    counter("az:role-assignment-create")
+    put("roleassign", "%s@%s" % (flag(argv, "--role"), flag(argv, "--scope")))
+
+# ── container registry ───────────────────────────────────────────────────────────────────────
+elif path == "acr show":
+    if not exists("acr", name):
+        die("(ResourceNotFound) registry %s not found" % name, 3)
+    if "id" in query:
+        out(rid("Microsoft.ContainerRegistry/registries", name))
+
+elif path == "acr create":
+    put("acr", name)
+
+elif path == "acr build":
+    counter("az:acr-build")
+    capture("acr-build-%d.txt" % counter("az:acr-build-capture"), " ".join(argv))
+    put("image", flag(argv, "--image"))
+
+# ── postgres ─────────────────────────────────────────────────────────────────────────────────
+elif path == "postgres flexible-server show":
+    if not exists("pg", name):
+        die("(ResourceNotFound) flexible server %s not found" % name, 3)
+
+elif path == "postgres flexible-server create":
+    counter("az:pg-create")
+    capture("postgres-create.txt", " ".join(
+        "<redacted>" if i and argv[i - 1] == "--admin-password" else a
+        for i, a in enumerate(argv)))
+    put("pg", name)
+
+# ── managed identity ─────────────────────────────────────────────────────────────────────────
+elif path == "identity show":
+    if not exists("identity", name):
+        die("(ResourceNotFound) identity %s not found" % name, 3)
+    if "principalId" in query:
+        out("11111111-2222-3333-4444-555555555555")
+    elif "id" in query:
+        out(rid("Microsoft.ManagedIdentity/userAssignedIdentities", name))
+
+elif path == "identity create":
+    put("identity", name)
+
+# ── jobs ─────────────────────────────────────────────────────────────────────────────────────
+elif path == "containerapp job show":
+    if not exists("job", name):
+        die("(ResourceNotFound) job %s not found" % name, 3)
+    if "id" in query:
+        out(rid("Microsoft.App/jobs", name))
+
+elif path in ("containerapp job create", "containerapp job update"):
+    counter("az:job-%s" % path.split()[-1])
+    capture("job-%s-%s.txt" % (name, path.split()[-1]), " ".join(argv))
+    put("job", name)
+
+else:
+    die("fake az: unhandled call: %s" % " ".join(argv), 2)

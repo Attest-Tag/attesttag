@@ -1,0 +1,33 @@
+-- billing_accounts.customer_id is unique, and it was unique over the empty string too. That is a
+-- deployment-wide blocker on the second organisation ever to engage with billing, and it had to be
+-- a new file rather than an edit to 0009 because production has already applied that one.
+--
+-- How it fails. customer_id is `not null default ''` and ensureBillingRow — the only INSERT into
+-- this table — does not supply it, because the Stripe customer is not known until a subscription
+-- is written. So every row is born at '', and '' is a value rather than a NULL: the unique index
+-- allows exactly one of them per deployment. The first organisation to take a credit top-up or an
+-- operator grant holds that slot for as long as it has no subscription, and the next
+-- organisation's first billing write dies on "UNIQUE constraint failed".
+--
+-- Which writes. ensureBillingRow's `on conflict (org_id) do nothing` names the org_id index only;
+-- a violation of a different unique index is an error on both dialects, and on Postgres it aborts
+-- the surrounding transaction. So it is not just a top-up (MoveCredit): a first subscription
+-- activation goes through ensureBillingRow before PutSubscription writes customer_id, and fails
+-- the same way. An organisation that already has a row is unaffected — the org_id conflict
+-- resolves before the customer_id index is consulted.
+--
+-- What it costs. applyStripeEvent's error becomes a 500, SeenBillingEvent is never reached, and
+-- Stripe retries for three days and gives up. The card has been charged and the credit is never
+-- applied, with the account left looking exactly like one that never paid.
+--
+-- The fix is to exclude the sentinel from the index rather than from the column. Storing NULL for
+-- "no Stripe customer yet" would work too — NULLs are distinct under a unique index on both
+-- dialects — but it means dropping NOT NULL, rewriting the existing rows, and changing the empty
+-- check in BillingAccountByCustomer, which is three changes to buy what one buys here.
+--
+-- What is still guaranteed is the part the webhook rests on: a real cus_… appears on at most one
+-- organisation, so BillingAccountByCustomer cannot resolve one Stripe customer onto two accounts.
+-- Rows at '' are not reachable through it at all — that lookup returns early on an empty id, which
+-- is what stops an event carrying no customer from landing on whoever holds the slot.
+drop index if exists billing_accounts_customer;
+create unique index billing_accounts_customer on billing_accounts(customer_id) where customer_id <> '';

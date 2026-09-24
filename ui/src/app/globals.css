@@ -1,0 +1,602 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* Density — the single knob for UI compactness. Every Tailwind spacing
+   utility (p-*, m-*, gap-*, h-*, w-*, size-*) is a multiple of --spacing,
+   so this scales paddings, control heights, and icon sizes together without
+   forking any component. Tailwind's default is 0.25rem (4px grid); Attest
+   runs a 3px grid for a denser feel. Generated utilities reference
+   var(--spacing) at runtime, so a subtree can opt back out by resetting it
+   (e.g. .density-comfortable { --spacing: 0.25rem }). */
+@theme {
+  --spacing: 0.1875rem;
+
+  /* Type ramp, pitched to the 3px grid. Tailwind's stock 14px `text-sm` was
+     sized for a 4px grid: against our shorter controls and 12px icons the
+     label outweighed its own glyph, which read as "the text is too big" on
+     every dense surface (nav rows, list toolbars, table cells). Dropping the
+     body step to 13px and the secondary step to 11px puts type just under the
+     icon size and keeps a clear two-step gap between them. Line heights are
+     pinned so the shorter type doesn't inherit roomier leading. */
+  --text-sm: 0.8125rem;
+  --text-sm--line-height: calc(1.125 / 0.8125);
+  --text-xs: 0.6875rem;
+  --text-xs--line-height: calc(1 / 0.6875);
+
+  /* Flat skin: a resting surface gets a hairline lift, not a drop shadow.
+     Redefining the scale value re-flattens every `shadow-sm` in the app at
+     once — Card, the list containers, the sidebar, the ~30 hand-rolled
+     `rounded-xl border bg-card shadow-sm` tiles — without touching them.
+     Overlays keep their own elevation via shadow-md/lg. */
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.04);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-sans);
+  --font-display: var(--font-sans);
+  --font-heading: var(--font-sans);
+  --font-mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+
+  /* Signature surface shadow — use `shadow-card`, never hand-written shadows */
+  --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.04);
+
+  /* Attest custom tokens — purple is reserved for AI/citation moments */
+  --color-ai: var(--ai);
+  --color-ai-hover: var(--ai-hover);
+  --color-ai-soft: var(--ai-soft);
+  --color-ai-border: var(--ai-border);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-success-text: var(--success-text);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  /* Document glyphs — the PDF mark on file tiles. Aliased to the info blue
+     (not danger red): it is decoration next to a title, not an alarm, and a
+     list of twenty rows must not read as twenty errors. Its own token so the
+     document mark can diverge from status-info without touching components. */
+  --color-doc: var(--doc);
+  --color-doc-soft: var(--doc-soft);
+  --color-cite-highlight: var(--cite-highlight);
+}
+
+:root {
+  /* "Letterhead ink & footnotes": warm paper canvas, bond-white surfaces,
+     iron-ink text, warm hairlines. Iris violet carries primary actions and
+     AI/citation moments — one saturated brand color throughout. */
+  --background: #fbfaf8;
+  --foreground: #191c2b;
+  --card: #ffffff;
+  --card-foreground: #191c2b;
+  --popover: #ffffff;
+  --popover-foreground: #191c2b;
+  --primary: #5a50c8;
+  --primary-foreground: #ffffff;
+  --secondary: #f2f1ed;
+  --secondary-foreground: #191c2b;
+  --muted: #f2f1ed;
+  --muted-foreground: #5d6170;
+  --accent: #eeedf7;
+  --accent-foreground: #33307a;
+  --destructive: #bf3b2b;
+  --border: #e8e6e1;
+  --input: #d4d2cb;
+  --ring: #5a50c8;
+  --chart-1: #191c2b;
+  --chart-2: #5a50c8;
+  --chart-3: #2e7d4f;
+  --chart-4: #a96a0b;
+  --chart-5: #bf3b2b;
+  /* Flat skin: near-square corners. The sm/md/lg/xl ramp in @theme scales off
+     this one value, so buttons land at ~3px and cards at ~6px. */
+  --radius: 0.25rem;
+  --sidebar: #fbfaf8;
+  --sidebar-foreground: #5d6170;
+  --sidebar-primary: #5a50c8;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #f0efeb;
+  --sidebar-accent-foreground: #191c2b;
+  --sidebar-border: #e8e6e1;
+  --sidebar-ring: #5a50c8;
+
+  /* Attest custom tokens */
+  --ai: #5a50c8;
+  --ai-hover: #4a41b5;
+  --ai-soft: #f2f0fb;
+  --ai-border: #d9d5f3;
+  --success: #2e7d4f;
+  --success-soft: #eaf3ee;
+  --success-text: #276b44;
+  --info: #2c5fb8;
+  --info-soft: #ebf1fa;
+  --warning: #a96a0b;
+  --warning-soft: #f9f1e0;
+  --danger: #bf3b2b;
+  --danger-soft: #f9ecea;
+  /* var-aliased, so the .dark --info values carry through without a
+     second pair of overrides below. */
+  --doc: var(--info);
+  --doc-soft: var(--info-soft);
+  --cite-highlight: rgba(90, 80, 200, 0.2);
+}
+
+/* Dark-mode-ready values; v0 ships light-only (no toggle). */
+.dark {
+  --background: #101019;
+  --foreground: #eceaf3;
+  --card: #17161f;
+  --card-foreground: #eceaf3;
+  --popover: #17161f;
+  --popover-foreground: #eceaf3;
+  --primary: #8a80e8;
+  --primary-foreground: #101019;
+  --secondary: #1d1c27;
+  --secondary-foreground: #eceaf3;
+  --muted: #1d1c27;
+  --muted-foreground: #9a97a8;
+  --accent: #232138;
+  --accent-foreground: #b3aef0;
+  --destructive: #e0604f;
+  --border: #292834;
+  --input: #363443;
+  --ring: #8a80e8;
+  --chart-1: #eceaf3;
+  --chart-2: #8a80e8;
+  --chart-3: #4caf7d;
+  --chart-4: #d99a3d;
+  --chart-5: #e0604f;
+  --sidebar: #17161f;
+  --sidebar-foreground: #9a97a8;
+  --sidebar-primary: #8a80e8;
+  --sidebar-primary-foreground: #101019;
+  --sidebar-accent: #1f1e2a;
+  --sidebar-accent-foreground: #eceaf3;
+  --sidebar-border: #292834;
+  --sidebar-ring: #8a80e8;
+
+  --ai: #8a80e8;
+  --ai-hover: #7a6fe0;
+  --ai-soft: #232045;
+  --ai-border: #3c3670;
+  --success: #4caf7d;
+  --success-soft: #14281d;
+  --success-text: #6fcb98;
+  --info: #6f9fe8;
+  --info-soft: #16233a;
+  --warning: #d99a3d;
+  --warning-soft: #2c2212;
+  --danger: #e0604f;
+  --danger-soft: #2e1613;
+  --cite-highlight: rgba(138, 128, 232, 0.25);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+    /* Geist ships the single-storey `a` and straight-tailed `l` by default, so
+       the Inter stylistic sets that used to live here have nothing to switch
+       on. Contextual alternates stay on for the arrow and fraction ligatures. */
+    font-feature-settings: "calt";
+  }
+  html {
+    @apply font-sans;
+  }
+
+  /* Tailwind v4's preflight dropped the hand cursor from buttons (v3 gave
+     every button `cursor: pointer`). Links kept theirs, so clickable buttons
+     read as inert next to them. Restore the v3 behavior once here rather than
+     sprinkling `cursor-pointer` per component; disabled controls keep the
+     arrow. */
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  /* Scrollbars — a hairline rail, not the chunky OS bar. macOS keeps
+     scrollbars permanently visible when a mouse (rather than a trackpad) is
+     attached, and the default one visually outweighs the flat borders it sits
+     inside.
+
+     The two mechanisms are mutually exclusive, hence the @supports split:
+     Chrome/Safari support ::-webkit-scrollbar and take the 6px branch, but
+     Chrome silently *ignores* those pseudo-elements on any element that also
+     sets `scrollbar-width`/`scrollbar-color` — so the standard properties are
+     fenced off for engines (Firefox) that don't do the webkit ones at all.
+
+     Opt an element out with `[scrollbar-width:none]` + `[&::-webkit-scrollbar]:hidden`
+     (see the Cases saved-view tab strip). */
+  @supports selector(::-webkit-scrollbar) {
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track,
+    ::-webkit-scrollbar-corner {
+      background: transparent;
+    }
+    ::-webkit-scrollbar-thumb {
+      border-radius: 2px;
+      background-color: color-mix(
+        in oklab,
+        var(--muted-foreground) 28%,
+        transparent
+      );
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background-color: color-mix(
+        in oklab,
+        var(--muted-foreground) 48%,
+        transparent
+      );
+    }
+  }
+  @supports not selector(::-webkit-scrollbar) {
+    * {
+      scrollbar-width: thin;
+      scrollbar-color: color-mix(
+          in oklab,
+          var(--muted-foreground) 28%,
+          transparent
+        )
+        transparent;
+    }
+  }
+}
+
+/* Citation highlight overlay in the PDF viewer */
+.cite-highlight {
+  background: var(--cite-highlight);
+  border-left: 2px solid var(--ai);
+}
+
+/* Filling a form on the page itself (PDFViewer's `formFilling`). pdf.js builds
+   a real input over every AcroForm widget and tints it so a reader can see
+   where they may type; its own tint is a saturated blue set through a 1px SVG,
+   which no token can reach — so the variable is switched off and the tint
+   restated here in the app's own colours. A field nothing will store (a
+   barcode, or one the PDF marks read-only) is disabled and left untinted, so
+   the tint means exactly "you may type here". The page under all of this is
+   white at every theme, so one pair of colours serves both. */
+.pdf-fill-fields .annotationLayer :is(input, select, textarea) {
+  --annotation-unfocused-field-background: none;
+  --input-hover-border-color: color-mix(
+    in oklab,
+    var(--primary) 55%,
+    transparent
+  );
+  background-color: color-mix(in oklab, var(--primary) 9%, transparent);
+}
+
+.pdf-fill-fields .annotationLayer :is(input, select, textarea):disabled {
+  background-color: transparent;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Assistant "working" label — a light sweep across the text while the agent
+   tool loop runs. The global reduced-motion rule below only collapses the
+   duration, which would strobe an infinite animation, so this one opts out
+   explicitly and falls back to plain muted text. */
+.text-shimmer {
+  background-image: linear-gradient(
+    90deg,
+    var(--muted-foreground) 0%,
+    var(--muted-foreground) 42%,
+    var(--ai) 50%,
+    var(--muted-foreground) 58%,
+    var(--muted-foreground) 100%
+  );
+  background-size: 200% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation: text-shimmer 1.8s linear infinite;
+}
+
+@keyframes text-shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .text-shimmer {
+    animation: none !important;
+    background-image: none;
+    color: var(--muted-foreground);
+  }
+}
+
+/* Workflow builder — the block executing right now. One bright arc travels
+   around the card's border, because a still outline is easy to miss on a block
+   that sits on a 30-second model call. The arc is a conic gradient spun through
+   an @property angle (plain custom properties can't be animated) and masked
+   down to a 2px ring, so it rides the card's own rounded edge. */
+@property --wf-run-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
+.wf-running::before {
+  content: "";
+  position: absolute;
+  inset: -1.5px;
+  border-radius: inherit;
+  padding: 2px;
+  background: conic-gradient(
+    from var(--wf-run-angle),
+    transparent 0deg,
+    transparent 190deg,
+    color-mix(in oklab, var(--info) 35%, transparent) 290deg,
+    var(--info) 352deg,
+    var(--info) 360deg
+  );
+  /* Knock the middle out so only the ring paints — the card keeps its own
+     background and the arc never crosses the block's label. */
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  animation: wf-run-sweep 1.5s linear infinite;
+  pointer-events: none;
+}
+
+@keyframes wf-run-sweep {
+  to {
+    --wf-run-angle: 360deg;
+  }
+}
+
+/* The global reduced-motion rule below only collapses the duration, which
+   would strobe an infinite sweep — hold a full, still ring instead. */
+@media (prefers-reduced-motion: reduce) {
+  .wf-running::before {
+    animation: none !important;
+    background: var(--info);
+  }
+}
+
+/* The blinking caret inside an InputOTP slot. The shadcn `input-otp` component
+   references `animate-caret-blink`, but the registry keeps the keyframes in
+   the theme rather than the component file, so adding the component alone
+   leaves a caret that renders and never blinks. */
+@theme {
+  --animate-caret-blink: caret-blink 1.25s ease-out infinite;
+}
+
+@keyframes caret-blink {
+  0%,
+  70%,
+  100% {
+    opacity: 1;
+  }
+  20%,
+  50% {
+    opacity: 0;
+  }
+}
+
+/* Vanilla shadcn: headings use the sans stack (no serif display face). */
+.font-display {
+  font-family: var(--font-sans);
+}
+
+/* Small-caps utility eyebrow — section labels, group headings. */
+.eyebrow {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+/* Marketing display scale — the sans stack at editorial sizes. Used only on
+   public marketing pages; the app keeps its own smaller type ramp. */
+.display-1 {
+  font-size: clamp(46px, 8vw, 84px);
+  line-height: 1.02;
+  letter-spacing: -0.025em;
+  font-weight: 500;
+}
+.display-2 {
+  font-size: clamp(30px, 4.5vw, 48px);
+  line-height: 1.08;
+  letter-spacing: -0.02em;
+  font-weight: 500;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Rich-text content — the Tiptap editor body and the client-facing render of
+   attorney-authored details. Tailwind's preflight strips list/heading styles,
+   so restore a minimal, on-brand set here (shared by both surfaces). */
+.rich-text {
+  font-size: 0.875rem;
+  line-height: 1.6;
+}
+.rich-text:focus {
+  outline: none;
+}
+/* The range the link popover will act on. While the popover's input holds
+   focus the browser paints no native selection in the editor, so this
+   decoration (editor-link-control.tsx) stands in for it. */
+.rich-text .link-target-hint {
+  background: color-mix(in srgb, var(--primary) 24%, transparent);
+  border-radius: 2px;
+}
+.rich-text > :first-child {
+  margin-top: 0;
+}
+.rich-text > :last-child {
+  margin-bottom: 0;
+}
+.rich-text p {
+  margin: 0.4em 0;
+}
+.rich-text h1,
+.rich-text h2,
+.rich-text h3,
+.rich-text h4 {
+  font-weight: 600;
+  line-height: 1.3;
+  margin: 0.8em 0 0.3em;
+}
+.rich-text h1 {
+  font-size: 1.25rem;
+}
+.rich-text h2 {
+  font-size: 1.125rem;
+}
+.rich-text h3 {
+  font-size: 1rem;
+}
+.rich-text ul {
+  list-style: disc;
+  padding-left: 1.25rem;
+  margin: 0.4em 0;
+}
+.rich-text ol {
+  list-style: decimal;
+  padding-left: 1.25rem;
+  margin: 0.4em 0;
+}
+.rich-text li {
+  margin: 0.15em 0;
+}
+.rich-text a {
+  position: relative;
+  color: var(--primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+/* Hovering a link shows where it points — in the editor a click edits rather
+   than navigates, so the browser's own status hint never appears. */
+.rich-text a:hover::after {
+  content: attr(href);
+  position: absolute;
+  top: calc(100% + 3px);
+  left: 0;
+  z-index: 30;
+  max-width: 22rem;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) - 2px);
+  background: var(--popover);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.08);
+  padding: 0.15rem 0.45rem;
+  font-size: 0.6875rem;
+  font-style: normal;
+  font-weight: 400;
+  color: var(--muted-foreground);
+  pointer-events: none;
+}
+.rich-text strong {
+  font-weight: 600;
+}
+.rich-text blockquote {
+  border-left: 2px solid var(--border);
+  padding-left: 0.75rem;
+  color: var(--muted-foreground);
+  margin: 0.5em 0;
+}
+/* Tables (the draft editor). Fixed layout so a long word widens its column
+   instead of the sheet; the wrapper Tiptap adds scrolls the overflow. */
+.rich-text table {
+  width: 100%;
+  margin: 0.6em 0;
+  border-collapse: collapse;
+  table-layout: fixed;
+  overflow: hidden;
+}
+.rich-text .tableWrapper {
+  overflow-x: auto;
+}
+.rich-text th,
+.rich-text td {
+  position: relative;
+  border: 1px solid var(--border);
+  padding: 0.3em 0.5em;
+  text-align: left;
+  vertical-align: top;
+}
+.rich-text th {
+  background: var(--secondary);
+  font-weight: 600;
+}
+.rich-text th p,
+.rich-text td p {
+  margin: 0;
+}
+/* ProseMirror marks cells of a drag-selection with .selectedCell. */
+.rich-text .selectedCell::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: color-mix(in oklab, var(--primary) 12%, transparent);
+}

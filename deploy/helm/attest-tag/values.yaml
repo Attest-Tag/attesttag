@@ -1,0 +1,287 @@
+# attest_tag on Kubernetes. deploy/helm/README.md has the rest, the image included.
+#
+#   kubectl create namespace attest-tag
+#   kubectl create secret generic attest-tag-secrets -n attest-tag \
+#     --from-env-file=<(grep -E '^(MASTER_KEY|SLACK_SIGNING_SECRET|SLACK_CLIENT_ID|SLACK_CLIENT_SECRET|OPENROUTER_API_KEY)=.' .env)
+#   helm install attest-tag ./deploy/helm/attest-tag -n attest-tag \
+#     --set ingress.host=bot.example.com --set existingSecret=attest-tag-secrets
+#
+# From the first release on, oci://ghcr.io/attest-tag/charts/attest-tag --version <x.y.z> is the
+# same chart, pinned to that release's images, in place of ./deploy/helm/attest-tag.
+#
+# The secrets come from the .env that deploy/local/bootstrap.sh wrote, whose MASTER_KEY you have
+# backed up somewhere else: it seals every stored credential and nothing recovers a lost one.
+# Read `replicaCount` before anything else.
+
+image:
+  repository: ghcr.io/attest-tag/attesttag
+  # Pin the moving minor (e.g. "1.4") in anything you care about: a restart then brings
+  # security fixes and never a surprise migration. Empty falls back to the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# ── Storage decides everything else ──
+#
+# Three shapes, and which one you get depends on where the storage comes from.
+#
+#   Nothing configured   SQLite on a volume, documents on a volume. One replica, a StatefulSet,
+#                        and nothing to operate. This is the default and it is a real deployment,
+#                        not a demo — it is what the hosted service ran on for months.
+#
+#   postgres.enabled     The chart runs them: a Postgres StatefulSet and a MinIO StatefulSet in
+#   minio.enabled        this release, with their own volumes and generated passwords. The bot
+#                        itself then keeps nothing locally, so it is a Deployment and
+#                        replicaCount may be raised. Nothing to sign up for, one `helm install`.
+#
+#   database.url and     The same shape, with storage somebody else operates: a managed Postgres
+#   documents.s3 set     and any S3-compatible bucket. Fewer moving parts in this cluster, and
+#                        backups that are not yours to run.
+#
+# What makes more than one replica safe is not the absence of volumes — it is that the routine
+# scheduler claims each routine on its row, the singleton loops sit behind leader leases, and the
+# rate limits count in the database.
+#
+# Half and half works too — Postgres with documents on a volume, say — but it still pins you to
+# one replica, because a ReadWriteOnce volume has one writer. The chart works this out for you
+# and refuses a combination that would corrupt something, with an explanation.
+#
+# One bucket and no Postgres is the useful middle: a bucket for the documents — brought or run
+# here — also streams the SQLite database into it and restores it on boot, so the one replica
+# survives losing its volume. Still one replica: replication is durability, not clustering.
+replicaCount: 1
+
+database:
+  # postgres://user:pass@host:5432/attesttag?sslmode=require
+  # Empty means SQLite on the data volume below. Set it and no database volume is created.
+  # Prefer putting this in your own Secret and naming it in existingSecret.
+  url: ""
+
+documents:
+  s3:
+    # s3://bucket/prefix?endpoint=https://…&region=auto
+    # Empty means the documents volume below. Works with S3, R2, MinIO, Spaces, B2, Wasabi.
+    # Setting this also replicates the SQLite database into the same bucket, unless
+    # database.url is set — in which case Postgres holds the rows and nothing is replicated.
+    url: ""
+    keyId: ""
+    secret: ""
+
+# ── Or let the chart run them, for a cluster with nothing else to lean on ──
+#
+# Each is one StatefulSet, one ReadWriteOnce volume and one replica. That is the right size for
+# what they hold here and it is not a highly available anything: the database is one Postgres
+# and the bucket is one MinIO, so a node failure is downtime until Kubernetes reschedules them.
+# For anything you would be sad to lose, a managed Postgres and a real bucket above are the
+# better answer, and they are the same chart with two values set.
+
+postgres:
+  # Run a Postgres in this release. Mutually exclusive with database.url.
+  enabled: false
+  image: postgres:18-alpine
+  # Empty generates one on install and reads it back from this release's Secret on upgrade, so
+  # it stays the same password. Set it to bring your own.
+  password: ""
+  persistence:
+    size: 10Gi
+    storageClass: ""
+    accessMode: ReadWriteOnce
+  # The alpine image's postgres user is uid 70, and the volume has to be writable by it.
+  podSecurityContext:
+    fsGroup: 70
+  # Deliberately not `runAsNonRoot` and not `drop: [ALL]`. This image starts as root, runs initdb
+  # and then drops to uid 70 itself, and dropping needs SETUID and SETGID — take those away and
+  # the container fails to start, which is a worse outcome than the one this would prevent. What
+  # is left still holds: no new privileges, and the default syscall filter.
+  securityContext:
+    allowPrivilegeEscalation: false
+    seccompProfile:
+      type: RuntimeDefault
+  resources: {}
+
+minio:
+  # Run a MinIO in this release. Mutually exclusive with documents.s3.url.
+  enabled: false
+  image: quay.io/minio/minio:latest
+  bucket: attesttag
+  rootUser: attesttag
+  # Empty generates one, the same way postgres.password does. MinIO refuses anything under
+  # eight characters.
+  rootPassword: ""
+  persistence:
+    size: 50Gi
+    storageClass: ""
+    accessMode: ReadWriteOnce
+  podSecurityContext:
+    fsGroup: 1000
+    runAsUser: 1000
+    runAsGroup: 1000
+  # MinIO needs no capabilities and already runs as 1000 above; this says so where the cluster
+  # can enforce it.
+  securityContext:
+    runAsNonRoot: true
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: [ALL]
+    seccompProfile:
+      type: RuntimeDefault
+  resources: {}
+
+# ── The settings the deployment cannot work without ──
+#
+# Everything here becomes a Secret, unless existingSecret names one you manage yourself with
+# External Secrets, Sealed Secrets or SOPS — which is the better answer for anything real,
+# since values passed with --set end up in Helm's release history.
+existingSecret: ""
+secrets:
+  SLACK_SIGNING_SECRET: ""
+  SLACK_CLIENT_ID: ""
+  SLACK_CLIENT_SECRET: ""
+  OPENROUTER_API_KEY: ""
+  # Seals every stored credential. Generate with `openssl rand -base64 32` and back it up
+  # somewhere other than this cluster — losing it means reconnecting everything by hand.
+  MASTER_KEY: ""
+  # Optional.
+  RESEND_API_KEY: ""
+  OPERATOR_SECRET: ""
+  HEALTH_SECRET: ""
+  # Self-serve billing. Both or neither — with only one set, billing switches itself off at
+  # startup rather than half-working. See config.STRIPE_BANDS below for what is on sale.
+  STRIPE_SECRET_KEY: ""
+  STRIPE_WEBHOOK_SECRET: ""
+  # Microsoft Teams: the client secret of the bot's Entra app. Set it with config.MSTEAMS_APP_ID
+  # and config.MSTEAMS_TENANT_ID, or not at all. See guide/msteams.md.
+  MSTEAMS_APP_PASSWORD: ""
+
+# Non-secret settings. ADMIN_BASE_URL is filled in from ingress.host when you leave it empty.
+config:
+  ADMIN_BASE_URL: ""
+  # band=<stripe price id>:<amount in minor units>, in the order the console offers them. Empty
+  # means this deployment sells no plans, which is what a self-host wants.
+  STRIPE_BANDS: ""
+  ALLOWED_EMAIL_DOMAINS: ""
+  # first-run: the first sign-up founds the deployment, everybody after is invited.
+  SIGNUP_MODE: "first-run"
+  TZ_NAME: "UTC"
+  LOG_LEVEL: "info"
+  MAIL_FROM: ""
+  # Microsoft Teams. The bot's app id and the directory it is registered in; both appear in the
+  # app package every tenant installs, so neither is a secret. SingleTenant unless the Azure Bot
+  # resource says MultiTenant.
+  MSTEAMS_APP_ID: ""
+  MSTEAMS_TENANT_ID: ""
+  MSTEAMS_APP_TYPE: ""
+  # "organizations" offers Sign in with Microsoft to any work account, a tenant id to one
+  # directory only. Register https://<ingress.host>/api/auth/microsoft/callback on the app first.
+  MSTEAMS_SIGNIN: ""
+# Anything else from .env.example, verbatim.
+extraEnv: {}
+
+# ── Volumes, created only when something needs them ──
+#
+# The database volume MUST be ReadWriteOnce on a real block device — not NFS, not SMB, so not
+# EFS and not Azure Files. SQLite on a network filesystem corrupts quietly and is noticed later.
+# The documents volume is ordinary file I/O and does not care.
+persistence:
+  data:
+    size: 8Gi
+    storageClass: ""
+    accessMode: ReadWriteOnce
+  docs:
+    size: 8Gi
+    storageClass: ""
+    accessMode: ReadWriteOnce
+
+# ── The fix-job worker ("fix this and raise a PR") ──
+#
+# Off by default, and off means the tool is not offered at all. Turning it on lets the bot create
+# a Job in this namespace for each fix request, running the worker image against a repository it
+# has been given access to. Read deploy/docs/platforms.md#the-fix-job-worker first: a worker
+# checks out a repository and runs that repository's own build and tests.
+#
+# What it adds to the cluster: a Role and a RoleBinding letting *this release's* service account
+# create, watch and delete Jobs in one namespace — and nothing else, no cluster-scoped anything.
+# The worker pods themselves get a service account with no permissions and no mounted token.
+worker:
+  enabled: false
+  image:
+    repository: ghcr.io/attest-tag/attesttag-worker
+    # Empty falls back to the chart's appVersion, the same as image.tag above.
+    tag: ""
+  # Where the Jobs are created: empty, or this release's own namespace, which is the only one the
+  # chart grants the bot. Any other name is refused at render, however that namespace is set up;
+  # to run the jobs somewhere else, install the release there.
+  namespace: ""
+  # A second, heavier worker image for the ecosystems that are minutes of cold install away on
+  # the base one: "java=<image>,java-gradle=<image>,dotnet=<image>". A repository whose ecosystem
+  # is not named here runs on worker.image.
+  jobNames: ""
+  # The node architecture a worker pod is pinned to, as kubernetes.io/arch. The published worker
+  # images are linux/amd64 only, and on an arm64 node one fails to start with an exec format
+  # error; "any" pins nothing, for a worker image you built for every architecture you run.
+  arch: amd64
+  imagePullSecret: ""
+  resources:
+    cpu: "2"
+    memory: 4Gi
+  serviceAccount:
+    create: true
+    name: ""
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: true
+  className: ""
+  # Must match ADMIN_BASE_URL, and must be https: Slack refuses to deliver to anything else.
+  host: ""
+  annotations: {}
+  # cert-manager.io/cluster-issuer: letsencrypt-prod
+  tls:
+    enabled: true
+    secretName: ""
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    memory: 2Gi
+
+# The image already runs as uid 10001 and owns nothing else. fsGroup is what lets it write to
+# the mounted volumes on clusters that do not chown them for you.
+#
+# runAsNonRoot and runAsUser are said here as well as in the image, and that is the point: a
+# securityContext that leaves them out is a pod whose only protection against running as root is
+# the Dockerfile, so a rebuilt or substituted image takes it away with nothing to notice. Said
+# here, the cluster refuses to start a container that would.
+podSecurityContext:
+  fsGroup: 10001
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]
+  seccompProfile:
+    type: RuntimeDefault
+  # Left writable, and not idly: Litestream keeps working files beside the database and
+  # pdftotext writes temporaries. Turning this on means giving both of them an emptyDir first,
+  # which is a change that fails on the cluster rather than in the render — the opposite of what
+  # this chart is for.
+  readOnlyRootFilesystem: false
+
+# The write lease wants about nine seconds to be released cleanly on the way down.
+terminationGracePeriodSeconds: 45
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}

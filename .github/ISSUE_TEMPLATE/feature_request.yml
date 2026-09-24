@@ -1,0 +1,17 @@
+name: Feature request
+description: Something it should do and does not.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: >
+        The problem, rather than the solution. What you were trying to get done, and where the
+        software got in the way.
+    validations: { required: true }
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you think would fix it
+      description: Optional. A rough idea is fine.

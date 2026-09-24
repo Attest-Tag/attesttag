@@ -1,0 +1,74 @@
+# What `docker build .` is allowed to see.
+#
+# This is an ALLOWLIST: deny everything, then name what the build stages actually read. A
+# denylist is one new directory away from being wrong again, and the thing it would leak is
+# video/.auth/ — a signed-in Chrome profile, which is a live credential. The working tree is
+# about 4 GB; the build needs about 20 MB of it.
+#
+# BuildKit matches each path against every pattern, last match wins, and `!x/**` re-includes
+# files whose parent was excluded by `**` — unlike .gitignore, where that does not work.
+#
+# (.gcloudignore is the same idea for `gcloud run deploy --source`, and .gitignore for git.
+# Three files, three readers; none of them reads the others.)
+
+**
+
+# ── Go build (stage: build) ──
+# `COPY go.mod go.sum ./` then `COPY . .`
+!go.mod
+!go.sum
+!cmd/**
+!internal/**
+# The console is embedded by ui/embed.go's //go:embed, so package ui must compile.
+!ui/embed.go
+# Same again for the guide: internal/app/assistant_guide.go imports package guide, and
+# guide/embed.go embeds *.md from its own directory, so the markdown is a build input and not
+# documentation here. Without it the Go build fails with "package attesttag/guide is not in std",
+# which reads like a module problem and is really this file.
+!guide/embed.go
+!guide/*.md
+
+# ── Console build (stage: uibuild) ──
+# `COPY ui/package.json ui/package-lock.json ./` then `COPY ui/ ./`
+!ui/package.json
+!ui/package-lock.json
+!ui/src/**
+!ui/next.config.ts
+!ui/tsconfig.json
+!ui/postcss.config.mjs
+!ui/components.json
+!ui/eslint.config.mjs
+!ui/next-env.d.ts
+
+# ── Restated after the allowlist, so no future `!x/**` can pull these back in ──
+# Secrets and live data first: a signed-in browser profile, real tenant documents, the
+# development database, and the dotenv files that hold every key. The `**/` forms matter:
+# `!internal/**` above re-includes everything under internal/, and internal/app/.env (a
+# test-generated dotenv) would otherwise ride into the build context and `COPY . .`. Root-only
+# patterns did not catch it.
+video/**
+docs/org-*/**
+**/.env*
+**/*.db
+**/*.db-*
+**/bot.log
+# Private keys, certs and credential files at any depth.
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*credentials*.json
+**/*service-account*.json
+# The security audits: a map of the product's attack surface. Never in a build layer.
+security-review/**
+# Big and unnecessary: node_modules, Next.js caches, the local binary, listing screenshots,
+# eval fixtures. (The marketing site is not here at all — it is its own repository.)
+**/node_modules
+**/.next
+ui/out
+ui/tsconfig.tsbuildinfo
+/attesttag
+assets/**
+evals/**
+.git/**
+**/.DS_Store

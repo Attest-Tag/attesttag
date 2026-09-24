@@ -1,0 +1,22 @@
+-- What a turn's tokens were, not just how many there were.
+--
+-- usage has recorded tokens_in and tokens_out since the beginning, and both hide the number that
+-- actually answers a question about cost. Of tokens_in, the part a provider served from its own
+-- prompt cache is charged at roughly a tenth; of tokens_out, the part the model spent reasoning
+-- is charged in full for text nobody ever sees, because the reasoning trace is asked for with
+-- exclude and discarded. Both were already coming back on every response and both were written to
+-- a log line and dropped, so the only way to ask "did the cache breakpoints pay" or "what does
+-- REASONING=low cost across a month" was to scrape Cloud Run logs — which retain for thirty days
+-- and do not join to an organisation.
+--
+-- Neither column is money and neither is summed into a bill: cost_usd is what the provider
+-- charged and already has the discount in it. These two are for deciding whether to keep paying
+-- for the arrangement that produced it.
+--
+-- Default 0 rather than null. A row from before this migration genuinely does not know, and so
+-- does a row written by the fix-job worker, which reports usage over the wire in a shape with no
+-- room for either; a rate computed over both is a rate over turns that had the chance to hit a
+-- cache, plus turns that were never asked. That is a floor, and a floor is the safe direction for
+-- a number whose whole job is to talk somebody out of an optimisation that is not working.
+alter table usage add column cached_in integer not null default 0;
+alter table usage add column tokens_reasoning integer not null default 0;

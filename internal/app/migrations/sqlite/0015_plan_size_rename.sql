@@ -1,0 +1,32 @@
+-- "band" becomes "size", in the two columns that carry it.
+--
+-- The word came from EMPLOYEE BANDS: a bracket an account fell into according to the headcount it
+-- declared, in the way a salary or a tax band works. Nothing falls into these any more. Since
+-- 0013_active_users.sql the ladder is counted in users the product itself counts, and since the
+-- console started selling them a customer PICKS one — "Up to 25 users" — and pays for it. A band
+-- is something you are sorted into; a size is something you choose. The screen was using the first
+-- word for the second thing.
+--
+-- "tier" was the obvious replacement and is not available: it is already the user-facing word for
+-- approval tiers (approvers.go, the Approvers page), and one word meaning two things in one
+-- product is how a support answer ends up being wrong about which one it meant.
+--
+-- WHAT IS NOT RENAMED, and it is the part worth reading. The audit_log action strings stay as they
+-- are: billing.band_changed, billing.band_change_scheduled, billing.band_change_cancelled. Those
+-- are rows already written, not identifiers. Renaming them splits the history at the deploy — ask
+-- for the old spelling and you lose everything after it, ask for the new one and you lose
+-- everything before — and an audit log that answers "nothing happened" for half its range is worse
+-- than one whose verb is a word the product no longer uses. The code around them says size; the
+-- stored verb still says band, on purpose.
+--
+-- Also deliberately unrenamed: the ledger kind 'included' and the Stripe metadata key on
+-- subscriptions already at Stripe. The metadata is read with a fallback (activateSubscription
+-- takes plan_size, then band) because live subscriptions carry the old key and nothing on this
+-- side can rewrite what Stripe is holding.
+--
+-- rename column rather than add-copy-drop: SQLite has had it since 3.25 and Postgres forever, it
+-- keeps the data in place, and it leaves no dead column behind — which is the failure mode
+-- connections.secret_fp taught us, where a column existed in one dialect and not the other and
+-- every read of the table fell over in silence.
+alter table billing_accounts rename column band to size;
+alter table billing_accounts rename column allowance_band to allowance_size;

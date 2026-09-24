@@ -1,0 +1,276 @@
+# Publish a release from a v* tag: the bot image, the fix-job worker images, the Helm chart, and
+# the GitHub release that names them — the images every deploy path pulls by default
+# (ghcr.io/attest-tag/attesttag), and the chart the Kubernetes guide installs.
+#
+# Multi-arch here costs almost nothing, and the reason is worth knowing before anyone
+# "optimises" it: the binary is CGO_ENABLED=0 with pure-Go SQLite (modernc.org/sqlite), so Go
+# cross-compiles. The Dockerfile pins its node and golang stages to $BUILDPLATFORM and passes
+# $TARGETARCH to `go build`, which means linux/arm64 is built by an amd64 runner at native
+# speed. No QEMU, no arm64 runner, no per-architecture jobs to merge afterwards.
+#
+# Everything goes to GHCR and is signed there. There used to be an optional Docker Hub mirror, for
+# a Cloudflare Containers target that could not pull from GHCR; deploy/ has no such target, and
+# the mirror was unsigned and documented nowhere, so it went.
+name: release
+
+# A release is cut by pushing a v* tag, and only that. workflow_dispatch was removed on purpose:
+# it built whatever branch it was run from (its `tag` input was never used) and could move :latest
+# and the :major/:minor tags to a branch head. Who may create a v* tag is controlled by a tag
+# ruleset on the repository.
+on:
+  push:
+    tags: ["v*"]
+
+# Read-only by default; the jobs that publish ask for what they need, and only they. The test job
+# runs npm ci and go test with no more than read, so a compromised dependency cannot reach the
+# registry or the signing identity.
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # The suite gates the release. A tag that cannot pass its own tests should not become an
+  # image that every deploy script pulls by default.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22", cache: npm, cache-dependency-path: ui/package-lock.json }
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.25", cache: true }
+      # The console is embedded with //go:embed, so it has to exist before anything compiles.
+      - run: cd ui && npm ci --no-audit --no-fund && npm run build
+      - run: go vet ./...
+      - run: go test ./...
+
+  bot:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # push to GHCR
+      id-token: write # keyless cosign signing
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Work out the tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository }}
+          # A deploy template pins the moving minor (:1.4), so a restart brings security fixes
+          # and never a surprise migration. :latest only on a real release, never a prerelease.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            GIT_COMMIT=${{ github.sha }}
+            VERSION=${{ github.ref_name }}
+            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
+
+      # What somebody checks before trusting a container from a repository they just found.
+      - uses: sigstore/cosign-installer@v3
+      - name: Sign
+        run: |
+          # GHCR image paths are lowercase; github.repository keeps the owner's case (Attest-Tag),
+          # which cosign would reject. Lowercase it here — the same reason metadata-action does.
+          cosign sign --yes "${REGISTRY}/${GITHUB_REPOSITORY,,}@${DIGEST}"
+        env:
+          REGISTRY: ${{ env.REGISTRY }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+
+  # The fix-job workers are amd64 only, deliberately. The image is 2.5-5 GB and its arm64 build
+  # pulls a different Rust toolchain, a different mise binary and a different .NET SDK — a second
+  # long build and a second class of "the download 404'd" failure, for a feature that defaults to
+  # off. Every dispatcher copes: the Cloud Run, ECS and Container Apps scripts build or run amd64,
+  # the Kubernetes one pins its pods to amd64 nodes (WORKER_K8S_ARCH), and an arm64 Docker host
+  # builds its own from Dockerfile.worker.
+  worker:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # push to GHCR
+      id-token: write # keyless cosign signing — the worker runs untrusted repository code, so its
+        # image is signed and given an SBOM like the bot's, which it previously was not.
+    outputs:
+      digest: ${{ steps.base.outputs.digest }}
+      jvm-digest: ${{ steps.buildjvm.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # GHCR paths are lowercase; github.repository keeps the owner's case (Attest-Tag). The
+      # metadata-action below lowercases on its own, but the BASE build-arg and the cosign calls
+      # take a plain string, so compute the lowercase image names once here.
+      - id: names
+        run: |
+          echo "worker=${REGISTRY}/${GITHUB_REPOSITORY,,}-worker" >> "$GITHUB_OUTPUT"
+          echo "jvm=${REGISTRY}/${GITHUB_REPOSITORY,,}-worker-jvm" >> "$GITHUB_OUTPUT"
+        env:
+          REGISTRY: ${{ env.REGISTRY }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.names.outputs.worker }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+
+      # The labels are what GHCR links a package to this repository by
+      # (org.opencontainers.image.source), and the version and revision it was built from. Without
+      # them the worker packages were orphans, unlike the bot's.
+      - id: base
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.worker
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=worker
+          cache-to: type=gha,mode=max,scope=worker
+          provenance: mode=max
+          sbom: true
+
+      # Java and .NET repositories run on a heavier image built from the one above.
+      - id: metajvm
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.names.outputs.jvm }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+
+      - id: buildjvm
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.worker.jvm
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            BASE=${{ steps.names.outputs.worker }}@${{ steps.base.outputs.digest }}
+          tags: ${{ steps.metajvm.outputs.tags }}
+          labels: ${{ steps.metajvm.outputs.labels }}
+          cache-from: type=gha,scope=worker-jvm
+          cache-to: type=gha,mode=max,scope=worker-jvm
+          provenance: mode=max
+          sbom: true
+
+      - uses: sigstore/cosign-installer@v3
+      - name: Sign the worker images
+        run: |
+          cosign sign --yes "${{ steps.names.outputs.worker }}@${{ steps.base.outputs.digest }}"
+          cosign sign --yes "${{ steps.names.outputs.jvm }}@${{ steps.buildjvm.outputs.digest }}"
+
+  # The chart deploy/helm/README.md installs, published beside the images it runs. It is packaged
+  # with the tag as both its version and its appVersion, so a chart pulled from here runs the
+  # images this release pushed rather than whatever :latest is when a pod restarts — the copy in
+  # the repository says `latest`, having no release to name. After both image jobs, because a chart
+  # must never name an image that was not published.
+  chart:
+    needs: [bot, worker]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # push to GHCR
+      id-token: write # keyless cosign signing, as for the images
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - uses: sigstore/cosign-installer@v3
+      # helm is on the runner image. GHCR paths are lowercase and github.repository_owner keeps
+      # the owner's case (Attest-Tag), hence the ,, as for the images.
+      - name: Package, push and sign the chart
+        env:
+          REGISTRY: ${{ env.REGISTRY }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          repo="${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}/charts"
+          helm package deploy/helm/attest-tag --version "$version" --app-version "$version"
+          printf '%s' "$TOKEN" | helm registry login "$REGISTRY" --username "$GITHUB_ACTOR" --password-stdin
+          pushed="$(helm push "attest-tag-${version}.tgz" "oci://${repo}" 2>&1)"
+          printf '%s\n' "$pushed"
+          digest="$(printf '%s\n' "$pushed" | sed -n 's/^Digest: //p')"
+          [ -n "$digest" ] || { echo "helm push printed no digest to sign" >&2; exit 1; }
+          cosign sign --yes "${repo}/attest-tag@${digest}"
+
+  # The GitHub release, last, so that it never names an image or a chart that failed to publish.
+  # GitHub writes the notes from the pull requests merged since the previous tag, and what to pull
+  # goes in front of them. A security fix's reporter is credited in its advisory (SECURITY.md).
+  release:
+    needs: [bot, worker, chart]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release; this job runs nothing but gh
+    steps:
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REGISTRY: ${{ env.REGISTRY }}
+          DIGEST: ${{ needs.bot.outputs.digest }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          image="${REGISTRY}/${GITHUB_REPOSITORY,,}"
+          chart="oci://${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}/charts/attest-tag"
+          cat > notes.md <<NOTES
+          **Images**, signed by this workflow with cosign:
+
+          - \`${image}:${version}\` for linux/amd64 and linux/arm64, \`${DIGEST}\`
+          - \`${image}-worker:${version}\` and \`${image}-worker-jvm:${version}\`, linux/amd64 only
+
+          \`\`\`bash
+          cosign verify ${image}@${DIGEST} \\
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}" \\
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          \`\`\`
+
+          **Helm chart**: \`helm install attest-tag ${chart} --version ${version}\`
+          NOTES
+          # A tag with a hyphen (v1.2.0-rc1) is a prerelease, as it is for the :latest tag above.
+          flags=()
+          case "$GITHUB_REF_NAME" in *-*) flags+=(--prerelease) ;; esac
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "$GITHUB_REF_NAME" --notes-file notes.md --generate-notes "${flags[@]}"

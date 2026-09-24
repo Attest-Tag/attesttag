@@ -1,0 +1,30 @@
+#!/usr/bin/env python3
+"""A fake docker, so the deploy scripts can be run without building or pushing anything.
+
+build/pull/push/tag/login are recorded and succeed. `docker build` is the slowest real step in
+both AWS scripts and proves nothing about the deploy logic, which is what is under test here.
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _cloudstate import counter, out, record  # noqa: E402
+
+argv = sys.argv[1:]
+record("docker", argv)
+
+# Real docker reads the password it was promised. Exiting without draining the pipe sends
+# SIGPIPE to `aws ecr get-login-password` on the left of it, and the scripts run with pipefail,
+# so the whole deploy aborts with an exit code that has nothing to do with the deploy — and only
+# sometimes, depending on which side wins the race.
+if "--password-stdin" in argv:
+    try:
+        sys.stdin.read()
+    except OSError:
+        pass
+
+if argv and argv[0] in ("build", "buildx", "pull", "push", "tag", "login"):
+    counter("docker:%s" % argv[0])
+elif argv and argv[0] == "--version":
+    out("Docker version 00.0.0-fake, build fake")
+sys.exit(0)

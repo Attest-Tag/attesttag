@@ -1,0 +1,38 @@
+.git
+.env*
+**/.env*
+*.db
+*.db-*
+**/*.db
+**/*.db-*
+bot.log
+/attesttag
+# Private keys, certs and credential files: never in a build context.
+*.pem
+*.key
+*.p12
+*.pfx
+*credentials*.json
+*service-account*.json
+ui/node_modules
+ui/.next
+ui/out
+assets
+# Claude Code session state and worktrees, macOS metadata, and the pentest output — none of
+# which belong in a Cloud Build source upload.
+.claude/
+.DS_Store
+__pycache__/
+strix_runs/
+# The walkthrough recorder is a tool, not part of the service: its node_modules, its renders,
+# and above all video/.auth/ — a signed-in Chrome profile, which is a credential — must never
+# reach a build context. (.gitignore covers git; this file is the only thing gcloud reads.)
+video
+video/**
+# Tenants' own uploaded documents (the seed files at docs/ root are checked in and wanted).
+# A source deploy uploads the build context and `COPY . .` puts it in a build layer; a
+# customer's documents belong in the bucket the service mounts, not in an image layer.
+docs/org-*/
+# The security audits: a map of the product's attack surface, useful to exactly one audience
+# on the outside. It has no business in a build context either.
+security-review

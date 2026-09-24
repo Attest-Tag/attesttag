@@ -1,0 +1,64 @@
+-- Two kinds of credit, told apart at last.
+--
+-- A top-up is money the customer paid. It is on credit_ledger, it is never swept, and it does not
+-- expire — 0009_billing.sql is right about all of that and none of it changes here.
+--
+-- What a plan band includes is a different thing wearing the same clothes. It is part of a fee
+-- rather than a purchase, and it belongs to the month it was billed for: $100 a month means $100
+-- THIS month, not $100 added to a pile that grows for a customer who underspends. guide/billing.md
+-- said "nothing expires at the month boundary", which was true of the only kind of credit that
+-- existed when it was written and is not true of this one.
+--
+-- 0009_billing.sql also says the fee is set by "headcount as the customer declares it -- never
+-- seats, nothing counts anybody". That has not been true since 0013_active_users.sql, and an
+-- applied migration cannot be edited (migrations.go refuses to boot on one that changed), so the
+-- correction lives here: bands are counted in users, and active_users is the count.
+--
+-- WHY THIS IS NOT ON THE LEDGER. It would be the obvious place and it is the wrong one, twice
+-- over. The ledger is the record of money taken and money spent, which is why nothing is allowed
+-- to sweep it; an allowance is neither. And expiry would have to be written as a negative row —
+-- "-$73.42, unused" — every month, for every subscriber, in that same unsweepable table, which
+-- buys an unreadable statement in exchange for arithmetic that four columns do exactly.
+--
+-- The four columns hold one period's allowance:
+--
+--   allowance_micros          what is left of it, and what a turn spends first
+--   allowance_granted_micros  what the period started with, so "$73 of $100" is honest after a
+--                             mid-period upgrade moved the second figure
+--   allowance_period_end      when it lapses. Expiry is this comparison and nothing else: there
+--                             is no scheduled job whose failure would hand somebody a free month
+--   allowance_band            what it was granted for, so a band change can tell "the period
+--                             rolled" from "they moved up mid-month" and top up rather than reset
+--
+-- SPEND ORDER is allowance first, then prepaid credit. The expiring money goes first because it
+-- is the money that expires; the alternative spends a customer's own balance while an allowance
+-- they had already paid for inside the fee evaporates beside it.
+--
+-- WHAT STAYS EXACTLY AS IT WAS. credit_balance_micros is still a cache of
+-- sum(credit_ledger) - (lifetime_debit_micros - debit_rolled_micros), and lifetime_debit_micros
+-- still counts only spend that came out of prepaid credit. Allowance-funded spend touches neither.
+-- That is deliberate: it is what keeps the invariant above exact and the statement reconcilable,
+-- and it is why the console shows allowance usage as its own figure rather than as a ledger line.
+--
+-- METERING. An account with a live allowance is metered even if it has never bought credit,
+-- because otherwise "includes $100" is decoration that nothing ever holds anyone to. Note what
+-- this does NOT do: it does not set credit_enforced. That flag means "this account has bought
+-- credit, so the floor applies from here on" and never goes back to 0; setting it from an
+-- allowance would leave an account whose subscription later ended with the floor on, no allowance
+-- and a zero balance, which is a bricked workspace. The floor applies when credit_enforced is 1
+-- OR the allowance period is live, and the second half lapses on its own.
+alter table billing_accounts add column allowance_micros         integer not null default 0;
+alter table billing_accounts add column allowance_granted_micros integer not null default 0;
+alter table billing_accounts add column allowance_period_end     text not null default '';
+alter table billing_accounts add column allowance_band           text not null default '';
+
+-- Existing subscribers get their allowance on the next webhook that names them, whichever it is:
+-- SyncAllowance runs from subscription events, invoice payment, the console's band change, the
+-- operator's comp, and the hourly billing loop as the catch-all. Nothing is backfilled here
+-- because the band's included figure lives in STRIPE_BANDS, which is configuration this file
+-- cannot read.
+--
+-- The ledger rows the first version of this feature wrote (kind 'included', one per invoice) are
+-- left exactly where they are. They are real credit that was really granted and really spendable,
+-- and rewriting history to match a newer model would be the one edit to this table nothing is
+-- allowed to make. The kind stays readable; it is simply never written again.

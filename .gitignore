@@ -1,0 +1,51 @@
+.env*
+!.env.example
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+/attesttag
+bot.log
+
+# Private keys, certificates and credential files. The GitHub App setup hands the operator a
+# .pem, and none of these should ever be sweep-able into a commit by `git add .`.
+*.pem
+*.key
+*.p12
+*.pfx
+*credentials*.json
+*service-account*.json
+
+ui/node_modules
+ui/.next
+ui/out
+
+# macOS finder metadata
+.DS_Store
+# Claude Code local session state and worktrees
+.claude/
+
+# Per-organisation document storage (DOCS_DIR default is ./docs). The seed documents at the
+# root are checked in; everything under docs/org-<id>/ is a tenant's own uploaded files.
+docs/org-*/
+
+# The walkthrough recorder (video/). Its renders are tens of MB apiece and are re-made
+# whenever a narration line changes, so they reach the site through `npm run video:publish`
+# rather than through git. Nothing it writes belongs in this repository any more: the site
+# lives in attesttag-website, and the posters and chapter manifests are committed there,
+# beside the page that imports them.
+video/out/
+video/node_modules
+video/.auth/
+video/.video-work/
+video/video-out/
+*.mp4
+
+# The security audits (security-review/). A report is a map of the attack surface with working
+# reproductions in it, and two earlier ones reached the history before this line existed — which
+# is why publishing means a fresh repository rather than this one. Never commit another.
+security-review/
+
+# Python bytecode from deploy/test's fake cloud CLIs.
+__pycache__/
+strix_runs/

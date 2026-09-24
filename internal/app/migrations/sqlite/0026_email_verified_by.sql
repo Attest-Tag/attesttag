@@ -1,0 +1,22 @@
+-- How an account's address came to be confirmed, and, when an invitation confirmed it, which
+-- organisation's.
+--
+-- email_verified was one bit set by five different things: a link we mailed (verification or
+-- password reset), redeeming an invitation addressed to that mailbox, Slack's own email_verified
+-- claim, single sign-on at a DNS-proved domain, and a Microsoft or Slack sign-up through an
+-- invitation whose address matched the one the provider reported. Most of what reads the bit only
+-- needs to know somebody stands behind the address. A share link limited to an email domain needs
+-- more: it lets whoever holds it join an organisation as a colleague at that domain, so the proof
+-- has to be one the redeemer cannot arrange. Two of the five can be arranged — an invitation's
+-- link comes back to whoever sent it, and anybody who founds an organisation can invite any
+-- address and redeem the link themselves; and a Slack workspace's claim is whatever its own admin
+-- or SAML IdP says — so the bit alone let a stranger through a domain link (invitationRefusal).
+--
+--   email_verified_by   'mail' | 'sso' | 'invite' | 'slack', or '' for an address confirmed before
+--                       this was recorded, or never confirmed. A domain link accepts mail, sso,
+--                       an invitation from its own organisation, and '' — that last by decision
+--                       (2026-09-23): nothing recorded how those addresses were confirmed, and
+--                       they keep working as they did.
+--   email_verified_org  for 'invite', the organisation whose invitation it was; 0 otherwise.
+alter table users add column email_verified_by text not null default '';
+alter table users add column email_verified_org integer not null default 0;

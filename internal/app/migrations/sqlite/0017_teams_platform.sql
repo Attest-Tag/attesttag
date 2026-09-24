@@ -1,0 +1,16 @@
+-- Which chat platform a connected workspace is on.
+--
+-- A row in teams has only ever been a Slack workspace, installed over Slack's OAuth, with its bot
+-- token sealed in bot_token_enc. Microsoft Teams arrives as a second kind of row: a customer's
+-- tenant, whose team_id is "msteams:" followed by the tenant id, and whose bot credential belongs to
+-- the deployment rather than to the install — so bot_token_enc stays empty on it.
+--
+-- ChatRegistry reads this to decide which transport to build for a workspace, and refuses a
+-- platform it does not know rather than guessing. Answering a Teams tenant through a Slack client
+-- is the same failure as answering one workspace with another's token, and this registry exists
+-- to make that one impossible.
+--
+-- Every existing row is a Slack install, which is what the default says. Nothing updates the
+-- column after the insert: a workspace does not change platform, and the two kinds of team_id
+-- cannot collide, so an upsert can never meet a row of the other kind.
+alter table teams add column platform text not null default 'slack';

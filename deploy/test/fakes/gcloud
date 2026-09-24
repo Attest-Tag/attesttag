@@ -1,0 +1,62 @@
+#!/usr/bin/env python3
+"""A fake gcloud, so deploy/gcp/*.sh can be run without a Google Cloud project.
+
+Every call is recorded and succeeds, as if each resource the script asks after already existed.
+Its create branches are one gcloud line apiece with nothing of ours in them; what is under test is
+the policy it deploys with, so `run deploy` keeps its argv for the harness to read.
+
+Scenarios the harness injects:
+  FAKE_GCLOUD_NEW_PROJECT   a project nothing has been made in. A service account exists only once
+                            it has been created, and a binding that names one that does not is
+                            refused, as IAM refuses it — which is what stopped worker.sh when it ran
+                            before cloudrun.sh had made the bot's account.
+"""
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _cloudstate import capture, die, exists, flag, out, put, record  # noqa: E402
+
+NEW_PROJECT = os.environ.get("FAKE_GCLOUD_NEW_PROJECT") == "1"
+
+argv = sys.argv[1:]
+record("gcloud", argv)
+
+# `secrets versions add|create --data-file=-` reads the secret from stdin. Exiting without draining
+# the pipe sends SIGPIPE to the printf feeding it, and the script runs with pipefail.
+if "--data-file=-" in argv:
+    try:
+        sys.stdin.read()
+    except OSError:
+        pass
+
+
+def account_exists(email):
+    return not NEW_PROJECT or exists("service-account", email)
+
+
+words = [a for a in argv if not a.startswith("-")]
+if words[:3] == ["config", "get-value", "project"]:
+    out("fake-project")
+elif words[:2] == ["storage", "ls"]:
+    out("gs://fake-bucket/docs/README.md")  # a bucket that already has its documents
+elif words[:2] == ["run", "deploy"]:
+    capture("run-deploy.json", json.dumps(argv))
+elif words[:3] == ["run", "services", "describe"]:
+    out("https://attesttag-fake-uc.a.run.app")
+elif words[:3] == ["iam", "service-accounts", "create"]:
+    put("service-account", "%s@%s.iam.gserviceaccount.com" % (words[3], flag(argv, "--project", "fake-project")))
+elif words[:3] == ["iam", "service-accounts", "describe"]:
+    if not account_exists(words[3]):
+        die("ERROR: (gcloud.iam.service-accounts.describe) NOT_FOUND: Unknown service account", 1)
+elif "add-iam-policy-binding" in words:
+    # The member, and for a binding on an account itself, the account the binding is on.
+    member = flag(argv, "--member", "")
+    named = [member.split(":", 1)[1]] if member.startswith("serviceAccount:") else []
+    if words[:3] == ["iam", "service-accounts", "add-iam-policy-binding"]:
+        named.append(words[3])
+    for email in named:
+        if not account_exists(email):
+            die("ERROR: (gcloud) INVALID_ARGUMENT: Service account %s does not exist." % email, 1)
+sys.exit(0)

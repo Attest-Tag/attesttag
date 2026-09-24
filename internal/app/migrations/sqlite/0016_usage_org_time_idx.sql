@@ -1,0 +1,12 @@
+-- usage has never had an index, and the overview reads it four times on every page load:
+-- turns today, turns over seven days, the month's spend, and the month grouped by channel. Each
+-- of those is a sequential scan of every turn every tenant has ever been billed for, and the
+-- table only grows.
+--
+-- The overview's charts add two more — the last 30 days grouped by day, and the month grouped by
+-- model — which is the point at which "it has always scanned" stops being an argument for
+-- leaving it alone.
+--
+-- (org_id, created_at) is the shape all six ask for: one organisation, one window, in the order
+-- the window is read. It also narrows RecentTurns, which has been scanning to list the last 200.
+create index usage_org_time on usage(org_id, created_at);

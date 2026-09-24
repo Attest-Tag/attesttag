@@ -1,0 +1,31 @@
+# Builds the fix-job worker images (Dockerfile.worker, and Dockerfile.worker.jvm on top of it) on
+# Cloud Build. `gcloud run deploy --source` cannot pick a Dockerfile that is not at the root,
+# hence this config; deploy/gcp/worker.sh submits it with _IMAGE set to the Artifact Registry tag.
+steps:
+  - name: gcr.io/cloud-builders/docker
+    id: base
+    args: ["build", "-f", "Dockerfile.worker", "-t", "${_IMAGE}", "."]
+  # The heavy image is the base plus the JDK, Maven, Gradle and the .NET SDK: the toolchains
+  # that are minutes of cold install away, so a JVM repository is routed here instead of paying
+  # for them on every job. Skipped when _JVM_IMAGE is empty.
+  - name: gcr.io/cloud-builders/docker
+    id: jvm
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -e
+        if [ -z "${_JVM_IMAGE}" ]; then echo "no _JVM_IMAGE: skipping the heavy worker"; exit 0; fi
+        docker build -f Dockerfile.worker.jvm --build-arg BASE=${_IMAGE} -t ${_JVM_IMAGE} .
+        docker push ${_JVM_IMAGE}
+    waitFor: ["base"]
+images: ["${_IMAGE}"]
+# An hour, not the ten-minute default. Headroom, not a fix for an observed timeout: the base
+# image carries four toolchains plus mise, and the heavy one adds a JDK and the .NET SDK on top.
+timeout: 3600s
+options:
+  machineType: E2_HIGHCPU_8
+  logging: CLOUD_LOGGING_ONLY
+substitutions:
+  _IMAGE: ""
+  _JVM_IMAGE: ""

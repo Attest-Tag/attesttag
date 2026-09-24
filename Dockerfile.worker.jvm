@@ -1,0 +1,51 @@
+# The heavy worker: the base image plus the toolchains that are minutes of cold install away and
+# so are not worth fetching per job — the JDK with Maven and Gradle, and the .NET SDK.
+#
+# A deployment routes to it by ecosystem (WORKER_JOB_NAMES="java=attesttag-worker-jvm,\
+# java-gradle=attesttag-worker-jvm,java-maven=attesttag-worker-jvm,dotnet=attesttag-worker-jvm"),
+# which the bot reads off what it already knows about the repository — the recipe an admin set,
+# or the one the first job worked out (jobs.go, workerFor). Everything else — the pipeline, the
+# sandbox split, the entrypoint — is inherited, so this file stays a list of packages.
+#
+# Build: deploy/gcp/worker.sh builds both images; set WORKER_JVM=0 to skip this one.
+ARG BASE=attesttag-worker:latest
+FROM ${BASE}
+ARG JAVA_VERSION=21
+ARG GRADLE_VERSION=8.14
+ARG DOTNET_CHANNEL=9.0
+USER root
+# Temurin's apt repository, which is where a reproducible JDK comes from on Debian. The key is
+# kept armored under signed-by rather than dearmored into a keyring: apt has read .asc directly
+# since bookworm, and the base image is python:slim, which ships no gpg to dearmor it with.
+# libicu is what .NET's globalization wants further down; installing it here saves a second
+# apt round trip.
+RUN curl -fsSL https://packages.adoptium.net/artifactory/api/gpg/key/public \
+      -o /usr/share/keyrings/adoptium.asc \
+ && echo "deb [signed-by=/usr/share/keyrings/adoptium.asc] https://packages.adoptium.net/artifactory/deb bookworm main" \
+      > /etc/apt/sources.list.d/adoptium.list \
+ && apt-get update && apt-get install -y --no-install-recommends \
+      "temurin-${JAVA_VERSION}-jdk" maven libicu72 \
+ && rm -rf /var/lib/apt/lists/* \
+ && ln -s "/usr/lib/jvm/temurin-${JAVA_VERSION}-jdk-$(dpkg --print-architecture)" /usr/lib/jvm/current
+# Temurin installs under an arch-suffixed path. JAVA_HOME points at a symlink made from what dpkg
+# actually says rather than at a hardcoded amd64, so this file does not have to know which machine
+# built it — the same mistake the base image's mise download made, found the same way.
+ENV JAVA_HOME=/usr/lib/jvm/current
+# Gradle for the repositories that do not ship a wrapper; the ones that do use their own.
+RUN curl -fsSL "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" -o /tmp/gradle.zip \
+ && unzip -q /tmp/gradle.zip -d /opt && rm /tmp/gradle.zip \
+ && ln -s "/opt/gradle-${GRADLE_VERSION}/bin/gradle" /usr/local/bin/gradle \
+ && gradle --version >/dev/null
+RUN curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh \
+ && bash /tmp/dotnet-install.sh --channel "${DOTNET_CHANNEL}" --install-dir /usr/local/dotnet --no-path \
+ && rm /tmp/dotnet-install.sh \
+ && ln -s /usr/local/dotnet/dotnet /usr/local/bin/dotnet \
+ && dotnet --info >/dev/null
+ENV DOTNET_ROOT=/usr/local/dotnet \
+    PATH=/usr/local/dotnet:/usr/local/go/bin:/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin
+# The sandbox user runs the repository's build, so it needs to be able to write the caches these
+# toolchains insist on keeping under HOME. The worker points them into the job cache (proc.go);
+# this is only about the directories the installers created as root.
+RUN mkdir -p /usr/local/dotnet && chmod -R a+rX /usr/local/dotnet "/opt/gradle-${GRADLE_VERSION}"
+WORKDIR /work
+ENTRYPOINT ["tini", "--", "/app/attesttag", "worker"]

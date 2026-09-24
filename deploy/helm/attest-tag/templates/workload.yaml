@@ -1,0 +1,247 @@
+{{- $stateful := eq (include "attest-tag.stateful" .) "true" -}}
+{{- $sqlite := eq (include "attest-tag.usesSQLite" .) "true" -}}
+{{- $localDocs := eq (include "attest-tag.usesLocalDocs" .) "true" -}}
+{{- if and $stateful (gt (int .Values.replicaCount) 1) }}
+{{- fail (printf "replicaCount is %d, but this release keeps state on a local volume (%s%s). A ReadWriteOnce volume has exactly one writer, so a second replica does not scale this deployment — it corrupts it. Either set postgres.enabled and minio.enabled to run them in this release, or point database.url and documents.s3.url at a server and a bucket you brought; then replicaCount may be raised."
+    (int .Values.replicaCount)
+    (ternary "SQLite database" "" $sqlite)
+    (ternary (ternary ", documents" "documents" $sqlite) "" $localDocs)) }}
+{{- end }}
+apiVersion: apps/v1
+{{- if $stateful }}
+# A StatefulSet rather than a Deployment, for the rolling update: it terminates the old pod
+# before creating the new one, which is exactly the single-writer property a local volume needs.
+# A Deployment's default rollout would briefly run two pods against one database.
+kind: StatefulSet
+{{- else }}
+# No local state: Postgres and an object store, so this is an ordinary Deployment and may be
+# scaled. What makes that safe is not the absence of volumes — it is that the routine scheduler
+# claims each routine on its row, the singleton loops sit behind leader leases, and the rate
+# limits count in the database (singleton.go, limits.go).
+kind: Deployment
+{{- end }}
+metadata:
+  name: {{ include "attest-tag.fullname" . }}
+  labels: {{- include "attest-tag.labels" . | nindent 4 }}
+spec:
+  {{- if $stateful }}
+  serviceName: {{ include "attest-tag.fullname" . }}
+  replicas: 1
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+  {{- else }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels: {{- include "attest-tag.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "attest-tag.selectorLabels" . | nindent 8 }}
+      annotations:
+        # Roll the pods when the configuration changes, rather than leaving them serving the
+        # old values until something else happens to restart them.
+        checksum/config: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "attest-tag.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.worker.enabled }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext: {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- if .Values.minio.enabled }}
+      # A MinIO that has just been created has no bucket in it, and the bot does not make one:
+      # on a real provider that would need a permission nobody should have to grant. So the same
+      # image runs its own `bucket-init` first — it waits for MinIO, creates the bucket, and
+      # proves these credentials can write, read and delete before the bot opens anything.
+      initContainers:
+        - name: bucket-init
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+          args: ["bucket-init", "-wait", "120s"]
+          env:
+            - name: DOCS_S3_URL
+              value: {{ include "attest-tag.minioURL" . | quote }}
+            - name: DOCS_S3_KEY_ID
+              value: {{ .Values.minio.rootUser | quote }}
+            - name: DOCS_S3_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "attest-tag.secretName" . }}
+                  key: MINIO_ROOT_PASSWORD
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+      {{- end }}
+      containers:
+        - name: attest-tag
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - secretRef:
+                name: {{ include "attest-tag.secretName" . }}
+          env:
+            {{- if .Values.postgres.enabled }}
+            # The password is read from the Secret and the URL is assembled around it by the
+            # kubelet, so the connection string with the password in it exists nowhere but this
+            # container's environment.
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "attest-tag.secretName" . }}
+                  key: POSTGRES_PASSWORD
+            - name: DATABASE_URL
+              value: "postgres://attesttag:$(POSTGRES_PASSWORD)@{{ include "attest-tag.postgresName" . }}:5432/attesttag?sslmode=disable"
+            {{- end }}
+            {{- if .Values.minio.enabled }}
+            - name: DOCS_S3_URL
+              value: {{ include "attest-tag.minioURL" . | quote }}
+            - name: DOCS_S3_KEY_ID
+              value: {{ .Values.minio.rootUser | quote }}
+            - name: DOCS_S3_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "attest-tag.secretName" . }}
+                  key: MINIO_ROOT_PASSWORD
+            {{- end }}
+            {{- if $sqlite }}
+            - name: DB_PATH
+              value: /data/attesttag.db
+            {{- else }}
+            # This release was told its rows are in Postgres — database.url, even a placeholder
+            # beside an existingSecret, or postgres.enabled — so it has no data volume. Said to the
+            # binary as well, which otherwise reads a DATABASE_URL missing from the Secret as
+            # "SQLite at DB_PATH": every pod opening its own empty file on a disk that dies with it,
+            # and serving as if it were a new install.
+            - name: REQUIRE_POSTGRES
+              value: "1"
+            {{- end }}
+            {{- if $localDocs }}
+            - name: DOCS_DIR
+              value: /app/docs
+            {{- end }}
+            {{- if .Values.worker.enabled }}
+            # The bot creates a batch/v1 Job per fix request. It talks to the API server with
+            # its own mounted service account token, which the Role in worker-rbac.yaml scopes
+            # to Jobs in this namespace, so there is no credential to configure here.
+            # `workers` rather than `k8s`: the bot reads KUBERNETES_SERVICE_HOST, which every
+            # pod has, and pinning a platform the chart can only ever be running on adds a
+            # second place for the answer to live.
+            - name: WORKER_MODE
+              value: workers
+            - name: WORKER_IMAGE
+              value: {{ include "attest-tag.workerImage" . | quote }}
+            - name: WORKER_K8S_NAMESPACE
+              value: {{ .Values.worker.namespace | default .Release.Namespace | quote }}
+            - name: WORKER_CPU
+              value: {{ .Values.worker.resources.cpu | quote }}
+            - name: WORKER_MEMORY
+              value: {{ .Values.worker.resources.memory | quote }}
+            - name: WORKER_K8S_ARCH
+              value: {{ .Values.worker.arch | default "any" | quote }}
+            {{- with (include "attest-tag.workerServiceAccountName" .) }}
+            - name: WORKER_K8S_SERVICE_ACCOUNT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.worker.imagePullSecret }}
+            - name: WORKER_K8S_PULL_SECRET
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.worker.jobNames }}
+            - name: WORKER_JOB_NAMES
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
+            - name: PORT
+              value: "8080"
+            {{- with (include "attest-tag.baseURL" .) }}
+            - name: ADMIN_BASE_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- range $k, $v := .Values.config }}
+            {{- if and $v (ne $k "ADMIN_BASE_URL") }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+            {{- end }}
+            {{- range $k, $v := .Values.extraEnv }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          # /health answers from the moment the process is listening, before the database is
+          # open — it is a liveness check and nothing more. Everything else 503s until the
+          # store is ready, and 503s again while draining, which is exactly what readiness
+          # wants: /admin/ therefore needs no new endpoint to mean the right thing.
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /admin/, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          startupProbe:
+            httpGet: { path: /admin/, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 5
+            # Five minutes. A cold start that restores a database replica is not quick, and a
+            # startupProbe that gives up restarts it into the same slow start forever.
+            failureThreshold: 60
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          {{- if or $sqlite $localDocs }}
+          volumeMounts:
+            {{- if $sqlite }}
+            - name: data
+              mountPath: /data
+            {{- end }}
+            {{- if $localDocs }}
+            - name: docs
+              mountPath: /app/docs
+            {{- end }}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+  {{- if $stateful }}
+  volumeClaimTemplates:
+    {{- if $sqlite }}
+    - metadata:
+        name: data
+      spec:
+        accessModes: [{{ .Values.persistence.data.accessMode }}]
+        {{- with .Values.persistence.data.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.data.size }}
+    {{- end }}
+    {{- if $localDocs }}
+    - metadata:
+        name: docs
+      spec:
+        accessModes: [{{ .Values.persistence.docs.accessMode }}]
+        {{- with .Values.persistence.docs.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.docs.size }}
+    {{- end }}
+  {{- end }}

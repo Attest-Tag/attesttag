@@ -1,0 +1,19 @@
+-- The one column the SQLite schema has and this dialect never got.
+--
+-- secret_fp was added to migrate()'s list of ADD COLUMNs, and that list is the SQLite-only
+-- path: OpenStore runs migrate() only when the store is not Postgres, on the reasoning that no
+-- Postgres database predates the versioned baseline. That is true of the baseline and false of
+-- every column added to the list after it was frozen. This is such a column — repositories
+-- started being grouped by the credential that opens them well after Postgres 6/6 — so a
+-- Postgres database was built without it and had no way to acquire it.
+--
+-- What it cost, because the shape of the failure is worth recording: connCols ends in
+-- coalesce(secret_fp,''), so it is in *every* read of the connections table. All of them
+-- failed with 42703, and Bundles() discarded that error, so the console answered 200 with an
+-- empty connection list and drew every bundle as holding no credentials — with the bundle's
+-- own name, instructions and tool packs beside it, because those come from a different table
+-- and were fine. Nothing was logged and nothing was lost; the rows were unreadable, not gone.
+--
+-- Empty is what the column means on a row connected before it existed and on every app-backed
+-- row, which is the SQLite default too, so a row imported at the cutover means what it meant.
+alter table connections add column secret_fp text not null default '';

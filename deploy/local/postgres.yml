@@ -1,0 +1,13 @@
+# Wires the bot to the Postgres in docker-compose.yml's `postgres` profile.
+#
+#   docker compose -f docker-compose.yml -f deploy/local/postgres.yml --profile postgres up -d
+#
+# Two files rather than one, because DATABASE_URL has to be absent for the SQLite default to
+# work and present for this — and a compose file cannot express "set this only under a profile".
+services:
+  attesttag:
+    environment:
+      DATABASE_URL: postgres://attesttag:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is empty. Run ./deploy/local/bootstrap.sh, which writes .env and generates one}@postgres:5432/attesttag?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy

@@ -1,0 +1,14 @@
+-- Deliberately empty: the twin of ../postgres/0007_connection_secret_fp.sql, which adds
+-- connections.secret_fp to a dialect that never received it.
+--
+-- SQLite has the column already, on every database of either age. A database created fresh
+-- gets it from migrate(), which runs after the migrations on this dialect and always has; one
+-- created before the column existed got it from the same place the first time it booted on a
+-- version that named it. There is nothing here to do, and SQLite cannot express the ADD COLUMN
+-- conditionally anyway — it has no "if not exists" — so running one would break every database
+-- that already has it.
+--
+-- The file exists because a version has to name the same change in both dialects, which
+-- TestMigrationsArePairedAcrossDialects enforces, and because a version missing from one set
+-- is the very thing this pair is fixing. A migration with no statements records its version
+-- and does nothing else.

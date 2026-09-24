@@ -1,0 +1,33 @@
+name: evals
+
+# Paused, as ci.yml is. Nothing runs on a branch or a pull request for now — only by hand.
+# Restoring the automatic runs is putting the two triggers below back.
+on:
+  workflow_dispatch:
+  # push:
+  #   branches: [main]
+  # pull_request:
+
+# Read-only, said here rather than inherited. Without a permissions block the repository default
+# applies, which on many repositories is a read-write GITHUB_TOKEN — handed to a job that runs
+# `npm`/`go` on whatever a pull request contains.
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.25" }
+      - run: go vet ./... && go test ./...
+      - name: Known vulnerabilities
+        # Pinned, not @latest. `go run <module>@latest` on a pull request's own checkout resolves
+        # and executes whatever that module published this morning; a version bumped on purpose
+        # is a line in a diff instead.
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+
+  # Real Slack evals require an already-installed staging workspace and a public
+  # HTTP receiver sharing the eval database. Run them on that staging host (see
+  # evals/README.md); an ephemeral runner cannot receive the app's callbacks.

@@ -1,0 +1,15 @@
+-- Whether this channel's allow rules are consulted on a turn a forwarded email started.
+--
+-- allowedByRule refuses on that lane unconditionally today, and the reasoning is in the code: a
+-- rule is a sentence an admin wrote in good faith about the work a channel does, the checker is
+-- never shown where a proposed action came from, and read together those two would let somebody
+-- outside the company file whatever the rule covers with no person involved at any point.
+--
+-- This column is the missing half of that argument — an admin saying, per channel, that they
+-- mean the rules for mail too. It is off until asked for, and two narrowings come with it: the
+-- checker is shown only the destination of an email turn's write and never the body the model
+-- composed from a stranger's mail, and a fix job is never eligible whatever this says.
+--
+-- Inherited the way email_intake is: channel, then workspace, then account, narrowest wins, and
+-- unset everywhere means off.
+alter table scopes add column email_auto_writes text default 'inherit';  -- inherit | on | off

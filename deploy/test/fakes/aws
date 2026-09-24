@@ -1,0 +1,284 @@
+#!/usr/bin/env python3
+"""A fake awscli v2, covering exactly the calls deploy/aws/*.sh make.
+
+It is not an AWS emulator and does not try to be. It answers each call in the shape the real CLI
+answers it — tab-separated text for `--output text`, JSON for `--output json`, a non-zero exit
+for a resource that does not exist — and keeps a registry so that a rerun sees what the first run
+built. That is enough to run both scripts end to end and assert on what they did.
+
+What it deliberately does NOT prove: that AWS accepts these flags and field names. Only a real
+account proves that. See deploy/test/README.md.
+
+Scenarios the harness injects:
+  FAKE_AWS_CERT_STATUS      ISSUED (default) or PENDING_VALIDATION
+  FAKE_AWS_SUBNETS          tab-separated subnet ids; empty means none
+  FAKE_AWS_NO_DEFAULT_VPC   1 to answer None to describe-vpcs
+"""
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _cloudstate import capture, counter, die, exists, flag, get, out, put, record  # noqa: E402
+
+ACCOUNT = "123456789012"
+REGION = os.environ.get("AWS_REGION", "us-east-1")
+
+argv = sys.argv[1:]
+record("aws", argv)
+if not argv:
+    die("usage: aws <service> <operation>")
+
+service, op, rest = argv[0], (argv[1] if len(argv) > 1 else ""), argv
+query = flag(rest, "--query", "")
+
+
+def arn(*parts):
+    return ":".join(("arn", "aws") + parts)
+
+
+# ── sts ──────────────────────────────────────────────────────────────────────────────────────
+if service == "sts" and op == "get-caller-identity":
+    out(ACCOUNT)
+
+# ── ec2 ──────────────────────────────────────────────────────────────────────────────────────
+elif service == "ec2" and op == "describe-vpcs":
+    out("None" if os.environ.get("FAKE_AWS_NO_DEFAULT_VPC") else "vpc-0fakedefault")
+
+elif service == "ec2" and op == "describe-subnets":
+    # Real AWS separates --output text list items with tabs; the script pipes that through tr.
+    out(os.environ.get("FAKE_AWS_SUBNETS", "subnet-0aaa\tsubnet-0bbb"))
+
+elif service == "ec2" and op == "describe-security-groups":
+    name = ""
+    for i, a in enumerate(rest):
+        if a.startswith("Name=group-name,Values="):
+            name = a.split("=", 2)[2]
+    # A filter that matches nothing yields null, which --output text prints as None, exit 0.
+    out(get("sg", name) or "None")
+
+elif service == "ec2" and op == "create-security-group":
+    name = flag(rest, "--group-name")
+    out(put("sg", name, "sg-0%03d" % (abs(hash(name)) % 1000)))
+
+elif service == "ec2" and op == "authorize-security-group-ingress":
+    pass  # idempotent in the script via `|| true`; duplicates are the normal case on a rerun
+
+# ── s3api ────────────────────────────────────────────────────────────────────────────────────
+elif service == "s3api" and op == "head-bucket":
+    if not exists("bucket", flag(rest, "--bucket")):
+        die("An error occurred (404) when calling the HeadBucket operation: Not Found")
+
+elif service == "s3api" and op == "create-bucket":
+    counter("s3:create-bucket")
+    put("bucket", flag(rest, "--bucket"))
+
+elif service == "s3api" and op == "put-public-access-block":
+    put("bucket-pab", flag(rest, "--bucket"))
+
+# ── iam ──────────────────────────────────────────────────────────────────────────────────────
+elif service == "iam" and op == "get-user":
+    name = flag(rest, "--user-name")
+    if not exists("user", name):
+        die("An error occurred (NoSuchEntity) when calling the GetUser operation: "
+            "The user with name %s cannot be found." % name)
+
+elif service == "iam" and op == "create-user":
+    put("user", flag(rest, "--user-name"))
+
+elif service == "iam" and op == "create-access-key":
+    # The one call that must happen exactly once for the life of the deployment. A rerun that
+    # reaches here has already broken the deployment: the old key is what is in Secrets Manager.
+    n = counter("iam:create-access-key")
+    out(json.dumps({"id": "AKIAFAKEFAKEFAKE%04d" % n, "secret": "fake-s3-secret-%04d" % n}))
+
+elif service == "iam" and op == "put-user-policy":
+    capture("iam-user-policy-%s.json" % flag(rest, "--policy-name"), flag(rest, "--policy-document", ""))
+
+elif service == "iam" and op == "get-role":
+    name = flag(rest, "--role-name")
+    if not exists("role", name):
+        die("An error occurred (NoSuchEntity) when calling the GetRole operation: "
+            "Role %s not found." % name)
+    if "Role.Arn" in query:
+        out(arn("iam", "", ACCOUNT, "role/" + name))
+
+elif service == "iam" and op == "create-role":
+    put("role", flag(rest, "--role-name"))
+    capture("iam-trust-%s.json" % flag(rest, "--role-name"), flag(rest, "--assume-role-policy-document", ""))
+
+elif service == "iam" and op == "attach-role-policy":
+    put("role-attached", "%s/%s" % (flag(rest, "--role-name"), flag(rest, "--policy-arn")))
+
+elif service == "iam" and op == "put-role-policy":
+    capture("iam-role-policy-%s-%s.json" % (flag(rest, "--role-name"), flag(rest, "--policy-name")),
+            flag(rest, "--policy-document", ""))
+
+# ── secretsmanager ───────────────────────────────────────────────────────────────────────────
+elif service == "secretsmanager" and op == "describe-secret":
+    sid = flag(rest, "--secret-id")
+    if not exists("secret", sid):
+        die("An error occurred (ResourceNotFoundException) when calling the DescribeSecret "
+            "operation: Secrets Manager cannot find the specified secret.")
+    if "ARN" in query:
+        out(arn("secretsmanager", REGION, ACCOUNT, "secret:%s-AbCdEf" % sid))
+
+elif service == "secretsmanager" and op == "create-secret":
+    sid = flag(rest, "--name")
+    counter("secretsmanager:create-secret:%s" % sid)
+    put("secret", sid, flag(rest, "--secret-string", ""))
+    capture("secret-%s.json" % sid.replace("/", "_"), flag(rest, "--secret-string", ""))
+
+elif service == "secretsmanager" and op == "put-secret-value":
+    sid = flag(rest, "--secret-id")
+    put("secret", sid, flag(rest, "--secret-string", ""))
+    capture("secret-%s.json" % sid.replace("/", "_"), flag(rest, "--secret-string", ""))
+
+elif service == "secretsmanager" and op == "get-secret-value":
+    sid = flag(rest, "--secret-id")
+    if not exists("secret", sid):
+        die("An error occurred (ResourceNotFoundException) when calling the GetSecretValue "
+            "operation: Secrets Manager cannot find the specified secret.")
+    out(get("secret", sid))
+
+# ── ecr ──────────────────────────────────────────────────────────────────────────────────────
+elif service == "ecr" and op == "describe-repositories":
+    name = flag(rest, "--repository-names")
+    if not exists("ecr", name):
+        die("An error occurred (RepositoryNotFoundException) when calling the "
+            "DescribeRepositories operation: The repository with name %s does not exist." % name)
+
+elif service == "ecr" and op == "create-repository":
+    put("ecr", flag(rest, "--repository-name"))
+
+elif service == "ecr" and op == "get-login-password":
+    out("fake-ecr-password")
+
+# ── acm ──────────────────────────────────────────────────────────────────────────────────────
+elif service == "acm" and op == "list-certificates":
+    out(get("cert-for-domain", os.environ.get("DOMAIN", ""), "None"))
+
+elif service == "acm" and op == "request-certificate":
+    domain = flag(rest, "--domain-name")
+    a = arn("acm", REGION, ACCOUNT, "certificate/fake-%05d" % (abs(hash(domain)) % 100000))
+    put("cert-for-domain", domain, a)
+    put("cert", a, domain)
+    out(a)
+
+elif service == "acm" and op == "describe-certificate":
+    status = os.environ.get("FAKE_AWS_CERT_STATUS", "ISSUED")
+    if "Certificate.Status" in query:
+        out(status)
+    else:
+        # --output table for the validation CNAME. Shape does not matter; the script just prints it.
+        out("|  _acme-challenge.example.com  |  fake.acm-validations.aws.  |")
+
+# ── elbv2 ────────────────────────────────────────────────────────────────────────────────────
+elif service == "elbv2" and op == "describe-load-balancers":
+    if "--names" in rest:
+        name = flag(rest, "--names")
+        if not exists("alb", name):
+            die("An error occurred (LoadBalancerNotFound) when calling the "
+                "DescribeLoadBalancers operation: Load balancers '[%s]' not found" % name)
+        out(get("alb", name))
+    else:
+        out("attesttag-fake-1234567890.%s.elb.amazonaws.com" % REGION)
+
+elif service == "elbv2" and op == "create-load-balancer":
+    name = flag(rest, "--name")
+    counter("elbv2:create-load-balancer")
+    out(put("alb", name, arn("elasticloadbalancing", REGION, ACCOUNT,
+                             "loadbalancer/app/%s/fake" % name)))
+
+elif service == "elbv2" and op == "describe-target-groups":
+    name = flag(rest, "--names")
+    if not exists("tg", name):
+        die("An error occurred (TargetGroupNotFound) when calling the DescribeTargetGroups "
+            "operation: Target groups '[%s]' not found" % name)
+    out(get("tg", name))
+
+elif service == "elbv2" and op == "create-target-group":
+    name = flag(rest, "--name")
+    capture("target-group-%s.txt" % name, " ".join(rest))
+    out(put("tg", name, arn("elasticloadbalancing", REGION, ACCOUNT,
+                            "targetgroup/%s/fake" % name)))
+
+elif service == "elbv2" and op == "modify-target-group-attributes":
+    capture("target-group-attributes.txt", " ".join(rest))
+
+elif service == "elbv2" and op == "describe-listeners":
+    port = "443" if "443" in query else "80"
+    out(get("listener", port) or "None")
+
+elif service == "elbv2" and op == "create-listener":
+    port = flag(rest, "--port")
+    counter("elbv2:create-listener:%s" % port)
+    capture("listener-%s.txt" % port, " ".join(rest))
+    put("listener", port, arn("elasticloadbalancing", REGION, ACCOUNT, "listener/app/fake/%s" % port))
+
+# ── rds ──────────────────────────────────────────────────────────────────────────────────────
+elif service == "rds" and op == "describe-db-subnet-groups":
+    if not exists("db-subnet-group", flag(rest, "--db-subnet-group-name")):
+        die("An error occurred (DBSubnetGroupNotFoundFault) when calling the "
+            "DescribeDBSubnetGroups operation: DBSubnetGroup not found.")
+
+elif service == "rds" and op == "create-db-subnet-group":
+    put("db-subnet-group", flag(rest, "--db-subnet-group-name"))
+
+elif service == "rds" and op == "describe-db-instances":
+    ident = flag(rest, "--db-instance-identifier")
+    if not exists("db", ident):
+        die("An error occurred (DBInstanceNotFound) when calling the DescribeDBInstances "
+            "operation: DBInstance %s not found." % ident)
+    if "Endpoint.Address" in query:
+        out("%s.fake0abcdefg.%s.rds.amazonaws.com" % (ident, REGION))
+
+elif service == "rds" and op == "create-db-instance":
+    counter("rds:create-db-instance")
+    capture("rds-create-db-instance.txt", " ".join(
+        "<redacted>" if i and rest[i - 1] == "--master-user-password" else a
+        for i, a in enumerate(rest)))
+    put("db", flag(rest, "--db-instance-identifier"))
+
+elif service == "rds" and op == "wait":
+    pass
+
+# ── logs ─────────────────────────────────────────────────────────────────────────────────────
+elif service == "logs":
+    put("log-group", flag(rest, "--log-group-name"))
+
+# ── ecs ──────────────────────────────────────────────────────────────────────────────────────
+elif service == "ecs" and op == "describe-task-definition":
+    family = flag(rest, "--task-definition")
+    if not exists("taskdef", family):
+        die("An error occurred (ClientException) when calling the DescribeTaskDefinition "
+            "operation: Unable to describe task definition.")
+
+elif service == "ecs" and op == "register-task-definition":
+    body = flag(rest, "--cli-input-json", "{}")
+    family = json.loads(body).get("family", "unknown")
+    n = counter("ecs:register:%s" % family)
+    capture("taskdef-%s-%d.json" % (family, n), body)
+    put("taskdef", family, n)
+    out(arn("ecs", REGION, ACCOUNT, "task-definition/%s:%d" % (family, n)))
+
+elif service == "ecs" and op == "describe-clusters":
+    out("ACTIVE" if exists("cluster", flag(rest, "--clusters")) else "None")
+
+elif service == "ecs" and op == "create-cluster":
+    put("cluster", flag(rest, "--cluster-name"))
+
+elif service == "ecs" and op == "describe-services":
+    out("ACTIVE" if exists("service", flag(rest, "--services")) else "None")
+
+elif service == "ecs" and op in ("create-service", "update-service"):
+    name = flag(rest, "--service-name") or flag(rest, "--service")
+    counter("ecs:%s" % op)
+    capture("ecs-%s.txt" % op, " ".join(rest))
+    put("service", name)
+
+elif service == "ecs" and op == "wait":
+    pass
+
+else:
+    die("fake aws: unhandled call: %s" % " ".join(argv), 2)

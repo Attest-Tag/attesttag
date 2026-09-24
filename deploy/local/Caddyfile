@@ -1,0 +1,26 @@
+# Caddy in front of attest_tag, for a machine with a public address and a domain pointed at it.
+# Caddy gets and renews the certificate on its own; there is nothing to configure for TLS.
+#
+# Set ATTEST_DOMAIN in .env, then: docker compose --profile caddy up -d
+#
+# ATTEST_ACME_EMAIL is optional: the contact address Caddy gives the certificate authority when it
+# registers, which Caddy recommends in case a certificate ever runs into trouble. It arrives as
+# ATTEST_ACME_EMAIL_OPTION, which docker-compose.yml makes the whole `email` line or nothing at
+# all — Caddy refuses to start on an `email` with no address after it, and a Caddyfile cannot
+# leave a line out on its own. {$...} is replaced before the file is parsed, so it may stand for
+# a whole line or for none.
+
+{
+	{$ATTEST_ACME_EMAIL_OPTION}
+}
+
+{$ATTEST_DOMAIN} {
+	# X-Forwarded-Proto is what tells the bot it is behind TLS, which decides whether session
+	# cookies are marked Secure and whether HSTS goes out. reverse_proxy sets it.
+	reverse_proxy attesttag:8080
+
+	# A document upload can be large and slow; the bot bounds the read itself.
+	request_body {
+		max_size 100MB
+	}
+}

@@ -1,0 +1,11 @@
+-- Email intake: whether a mail forwarded to this channel's Slack address becomes a turn.
+--
+-- Slack's "send emails to Slack" posts a forwarded mail as Slackbot, with no text at all: the
+-- subject is the file's title and the body is a filetype:"email" file hanging off the message.
+-- Nobody in the workspace typed it, nobody is waiting in the thread, and whoever wrote it is
+-- outside the company — so this is off until a channel asks for it, and asking is an admin's
+-- decision (the Configure page can only ever switch it off).
+--
+-- Inherited the way read_all is: channel, then workspace, then account, narrowest wins, and unset
+-- everywhere means off.
+alter table scopes add column email_intake text default 'inherit';  -- inherit | on | off

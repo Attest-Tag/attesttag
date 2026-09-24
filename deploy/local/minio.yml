@@ -1,0 +1,24 @@
+# Wires the bot to the MinIO in docker-compose.yml's `minio` profile.
+#
+#   docker compose -f docker-compose.yml -f deploy/local/minio.yml --profile minio up -d
+#
+# Two files rather than one, for the same reason postgres.yml is a second file: DOCS_S3_URL has
+# to be absent for the documents volume to be used and present for this, and a compose file
+# cannot express "set this only under a profile".
+#
+# Setting it does two jobs, which is the point of the design rather than an accident: documents
+# go to the bucket, and the SQLite database is streamed into the same bucket and restored from it
+# when the container starts with an empty volume. Add deploy/local/postgres.yml as well and the
+# database moves to Postgres instead, at which point nothing is replicated because nothing local
+# is authoritative.
+services:
+  attesttag:
+    environment:
+      DOCS_S3_URL: "s3://${MINIO_BUCKET:-attesttag}/docs?endpoint=http://minio:9000&region=us-east-1"
+      DOCS_S3_KEY_ID: ${MINIO_ROOT_USER:-attesttag}
+      DOCS_S3_SECRET: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is empty. Run ./deploy/local/bootstrap.sh, which writes .env and generates one}
+    depends_on:
+      # Not just "minio is up": the bucket has to exist and the credentials have to work before
+      # the bot opens anything, and minio-init exits 0 only when both are true.
+      minio-init:
+        condition: service_completed_successfully

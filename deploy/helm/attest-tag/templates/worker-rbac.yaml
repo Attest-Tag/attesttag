@@ -1,0 +1,58 @@
+{{- if .Values.worker.enabled }}
+{{- $ns := .Values.worker.namespace | default .Release.Namespace }}
+{{- /* Refused whatever has been set up in the other namespace: this is the only place the
+       chart grants the bot anything, so it renders no other value. The message used to suggest
+       creating the Role there by hand, which this same check then refused. */}}
+{{- if ne $ns .Release.Namespace }}
+{{- fail (printf "worker.namespace is %q but this release is in %q, and the chart grants the bot Jobs only in its own namespace. Leave worker.namespace empty, and the fix jobs run beside the bot in %q, or install the release into %q." $ns .Release.Namespace .Release.Namespace $ns) }}
+{{- end }}
+---
+# What the bot may do with the worker, and it is the whole list: create a Job, look at it,
+# delete it. Namespaced, so nothing here reaches another namespace, and there is no
+# ClusterRole — a bot that can create Jobs anywhere in the cluster is a different risk from one
+# that can create them beside itself.
+#
+# `delete` is what cancelling a fix job is: the Job goes, and with background propagation the
+# pod goes with it. Without it, Cancel in the console would report success and leave the worker
+# running to completion.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "attest-tag.fullname" . }}-worker
+  namespace: {{ $ns }}
+  labels: {{- include "attest-tag.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "attest-tag.fullname" . }}-worker
+  namespace: {{ $ns }}
+  labels: {{- include "attest-tag.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "attest-tag.fullname" . }}-worker
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "attest-tag.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- if .Values.worker.serviceAccount.create }}
+---
+# The worker's own account, which is granted nothing anywhere. It exists so that the identity a
+# worker pod runs under is explicitly empty rather than the namespace's `default` account, which
+# on many clusters is not. automountServiceAccountToken is off here *and* set on the pod spec the
+# bot writes (internal/app/jobs_k8s.go), because either one alone is one upgrade away from
+# silently flipping back.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "attest-tag.workerServiceAccountName" . }}
+  namespace: {{ $ns }}
+  labels: {{- include "attest-tag.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+{{- end }}
+{{- end }}

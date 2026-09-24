@@ -1,0 +1,16 @@
+-- Which share link a verification link is waiting to join through.
+--
+-- A password sign-up through a link limited to an email domain does not join at once: the address
+-- was typed, not proved, so the join waits on our confirmation mail (handleSignup). It used to wait
+-- on a copy of the link's organisation, role and maker written onto the verification token, and
+-- the click in the mailbox joined from that copy — so the link's use limit never bound, a link
+-- withdrawn or expired in the meantime still let the person in, and nothing about the link was
+-- read again. The verification link now names the share link itself, by the hash its row is stored
+-- under, and handleVerify reads and spends that link when the mail is answered.
+--
+-- The hash, not the row's id: SQLite hands a deleted row's id to the next insert, and the expiry
+-- sweep deletes rows, so an id remembered for a day can come to name a different link. A hash is
+-- the link's own and is never reused. It is no more of a secret than the column it copies.
+--
+-- '' is a verification link waiting on nothing, which is every existing row.
+alter table email_tokens add column invite_hash text not null default '';

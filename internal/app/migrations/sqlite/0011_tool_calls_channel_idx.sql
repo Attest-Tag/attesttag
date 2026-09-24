@@ -1,0 +1,12 @@
+-- tool_calls has never had an index, and until now nothing asked it a question that needed one:
+-- LogToolCall appends, and the console reads one thread at a time.
+--
+-- ChannelToolNames asks a new one on the first turn of every thread — which MCP servers has this
+-- channel been calling lately — and it is on the path of a turn rather than of a page somebody
+-- opened. On a table that only ever grows, and in the deployment that now runs on Postgres with
+-- months of rows in it, that is a sequential scan per turn.
+--
+-- (team_id, channel, created_at) serves that query outright. It also narrows ThreadToolNames,
+-- which has been scanning the whole table since the beginning to read back one thread; the
+-- thread_ts filter is applied to a channel's rows instead of to everybody's.
+create index tool_calls_channel on tool_calls(team_id, channel, created_at);
