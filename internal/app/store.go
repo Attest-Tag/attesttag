@@ -759,13 +759,13 @@ func (s *Store) AddRoutine(ctx context.Context, r Routine) (int64, error) {
 	return id, err
 }
 
-const routineCols = `select id, coalesce(org_id,0), coalesce(team_id,''), channel, cron, tz, prompt, coalesce(created_by,''), enabled, coalesce(next_run,''), coalesce(last_run,''), coalesce(last_error,''), coalesce(notify,'always'), coalesce(notify_when,''), coalesce(last_status,''), coalesce(steps,'[]'), coalesce(finish,'answer'), coalesce(model,''), coalesce(run_lease,0), coalesce(auto_confirm,0) from routines`
+const routineCols = `id, coalesce(org_id,0), coalesce(team_id,''), channel, cron, tz, prompt, coalesce(created_by,''), enabled, coalesce(next_run,''), coalesce(last_run,''), coalesce(last_error,''), coalesce(notify,'always'), coalesce(notify_when,''), coalesce(last_status,''), coalesce(steps,'[]'), coalesce(finish,'answer'), coalesce(model,''), coalesce(run_lease,0), coalesce(auto_confirm,0)`
 
 // Routines lists one organisation's routines, optionally narrowed to a channel. A channel id is
 // not an organisation: Slack Connect puts the same channel in two workspaces, so the org is the
 // predicate and the channel only refines it.
 func (s *Store) Routines(ctx context.Context, orgID int64, channel string) ([]Routine, error) {
-	q := routineCols + ` where org_id=?`
+	q := `select ` + routineCols + ` from routines where org_id=?`
 	args := []any{orgID}
 	if channel != "" {
 		q += ` and channel=?`
@@ -778,7 +778,7 @@ func (s *Store) Routines(ctx context.Context, orgID int64, channel string) ([]Ro
 // is deliberately deployment-wide: one process fires every tenant's routines, and each row
 // carries the organisation that everything after this is scoped by.
 func (s *Store) DueRoutines(ctx context.Context) ([]Routine, error) {
-	return scanRoutines(s.db.QueryContext(ctx, routineCols+` order by id`))
+	return scanRoutines(s.db.QueryContext(ctx, `select `+routineCols+` from routines order by id`))
 }
 
 func scanRoutines(rows *sql.Rows, err error) ([]Routine, error) {
@@ -946,21 +946,21 @@ func (s *Store) AddRoutineRun(ctx context.Context, r RoutineRun) (int64, error) 
 	return id, nil
 }
 
-const routineRunCols = `select id, routine_id, coalesce(org_id,0), coalesce(team_id,''), coalesce(channel,''), coalesce(thread_ts,''),
+const routineRunCols = `id, routine_id, coalesce(org_id,0), coalesce(team_id,''), coalesce(channel,''), coalesce(thread_ts,''),
 	coalesce(status,''), coalesce(reason,''), coalesce(output,''), coalesce(error,''),
-	coalesce(tokens_in,0), coalesce(tokens_out,0), coalesce(cost_usd,0), coalesce(started_at,''), coalesce(finished_at,''), coalesce(ms,0) from routine_runs`
+	coalesce(tokens_in,0), coalesce(tokens_out,0), coalesce(cost_usd,0), coalesce(started_at,''), coalesce(finished_at,''), coalesce(ms,0)`
 
 // RoutineRuns is one routine's history, newest first.
 func (s *Store) RoutineRuns(ctx context.Context, orgID, routineID int64, limit int) ([]RoutineRun, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 200
 	}
-	return scanRoutineRuns(s.db.QueryContext(ctx, routineRunCols+` where org_id=? and routine_id=? order by id desc limit ?`, orgID, routineID, limit))
+	return scanRoutineRuns(s.db.QueryContext(ctx, `select `+routineRunCols+` from routine_runs where org_id=? and routine_id=? order by id desc limit ?`, orgID, routineID, limit))
 }
 
 // RoutineRunByID is one run with its output untruncated.
 func (s *Store) RoutineRunByID(ctx context.Context, orgID, runID int64) (*RoutineRun, error) {
-	rs, err := scanRoutineRuns(s.db.QueryContext(ctx, routineRunCols+` where org_id=? and id=?`, orgID, runID))
+	rs, err := scanRoutineRuns(s.db.QueryContext(ctx, `select `+routineRunCols+` from routine_runs where org_id=? and id=?`, orgID, runID))
 	if err != nil {
 		return nil, err
 	}
@@ -1575,7 +1575,7 @@ type ToolCallRow struct {
 	Private bool
 }
 
-const toolCallCols = `select id, coalesce(team_id,''), created_at, coalesce(channel,''), coalesce(thread_ts,''), name, coalesce(args,''), coalesce(result,''), ok, ms from tool_calls`
+const toolCallCols = `id, coalesce(team_id,''), created_at, coalesce(channel,''), coalesce(thread_ts,''), name, coalesce(args,''), coalesce(result,''), ok, ms`
 
 func scanToolCall(rows *sql.Rows) (ToolCallRow, error) {
 	var t ToolCallRow
@@ -1589,7 +1589,7 @@ func scanToolCall(rows *sql.Rows) (ToolCallRow, error) {
 // errored, which is what the console's error filter reads: filtering here rather than in
 // the browser means a failure stays reachable however many successful calls came after it.
 func (s *Store) RecentToolCalls(ctx context.Context, orgID int64, channel string, limit int, failedOnly bool, since string) ([]ToolCallRow, error) {
-	q := toolCallCols + ` where org_id=?`
+	q := `select ` + toolCallCols + ` from tool_calls where org_id=?`
 	args := []any{orgID}
 	if channel != "" {
 		q += ` and channel=?`
@@ -1622,7 +1622,7 @@ func (s *Store) RecentToolCalls(ctx context.Context, orgID int64, channel string
 // ToolCall returns one call with its full result. The organisation is part of the lookup rather
 // than a check on the row afterwards, so a miss is indistinguishable from a wrong id.
 func (s *Store) ToolCall(ctx context.Context, orgID, id int64) (ToolCallRow, error) {
-	rows, err := s.db.QueryContext(ctx, toolCallCols+` where org_id=? and id=?`, orgID, id)
+	rows, err := s.db.QueryContext(ctx, `select `+toolCallCols+` from tool_calls where org_id=? and id=?`, orgID, id)
 	if err != nil {
 		return ToolCallRow{}, err
 	}
