@@ -3,6 +3,8 @@
 How the process is put together, what each file in it is for, and what the
 database holds.
 
+<picture><source media="(prefers-color-scheme: dark)" srcset="../assets/diagrams/architecture-dark.svg"><img src="../assets/diagrams/architecture-light.svg" alt="attest_tag architecture: trust boundaries and the check each hop passes"></picture>
+
 ```
 Slack (signed webhooks)      Microsoft Teams (Bot Framework)      Console, API and links (HTTP, :8080)
   │ /slack/events              │ /msteams/messages                  │ /admin/ /api/ /v1/ /configure/ /setup/
