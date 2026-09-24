@@ -8,12 +8,15 @@
 #   - added lines: the shapes of real credentials (fake test fixtures are shaped differently);
 #   - both: every string in .git/info/public-denylist, one per line — the identifiers of your
 #     own deployment (cloud project, service URL, database instance, workspace ids). It lives
-#     under .git/ so the list of what must stay private is never itself committed.
+#     under .git/ so the list of what must stay private is never itself committed, and it is the
+#     main checkout's .git/ even when the push comes from a linked worktree.
 #
 # Enable once per clone with `make hooks`. `git push --no-verify` skips it; don't.
 
 z40=0000000000000000000000000000000000000000
-deny="$(git rev-parse --git-dir)/info/public-denylist"
+common=$(git rev-parse --git-common-dir) # a worktree's own --git-dir is .git/worktrees/<name>
+case "$common" in /*) ;; *) common="$PWD/$common" ;; esac # relative (".git") in the main checkout
+deny="$common/info/public-denylist"
 fail=0
 
 say() { printf 'pre-push: %s\n' "$*" >&2; fail=1; }
