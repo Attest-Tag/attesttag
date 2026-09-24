@@ -329,6 +329,15 @@ type ProxyResponse struct {
 	// code searches a minute, try again in 40 seconds" is a thing a model can act on, where a
 	// bare 403 reads as "this credential cannot do that" and the model stops asking for good.
 	RetryAfter time.Duration
+	// Account is the person's own address when Conn spends their sign-in, so a reply can say
+	// whose Drive it searched instead of assuming.
+	Account string
+	// Others are the other connections in the channel that cover this URL, best first. Only a
+	// shared host has any, and they are what a retry with connection set can choose between.
+	Others []string
+	// Skipped names the asker's own connection when it covered the URL but they had not signed
+	// in, and a shared one answered instead. The answer is what the shared credential sees.
+	Skipped string
 }
 
 // retryAfterHint reads the two ways a service says when to come back: Retry-After, in seconds or as
@@ -684,6 +693,44 @@ func connByName(covering []*Connection, want string) *Connection {
 // connection the channel was not granted, and cannot widen what the chosen one permits: the
 // host, prefix and method checks below have already run by the time a name is consulted.
 func (p *Proxy) MatchNamed(acc *Access, method string, u *url.URL, want string) (*Connection, string) {
+	cov, why := coveringConns(acc, method, u)
+	if len(cov) == 0 {
+		return nil, why
+	}
+	if want == "" {
+		return cov[0].conn, ""
+	}
+	covering := make([]*Connection, len(cov))
+	for i, c := range cov {
+		covering[i] = c.conn
+	}
+	if conn := connByName(covering, want); conn != nil {
+		return conn, ""
+	}
+	names := make([]string, len(covering))
+	for i, c := range covering {
+		names[i] = strconv.Quote(c.Name)
+	}
+	return nil, fmt.Sprintf("blocked by the proxy: this channel has no connection called %q for %s. The ones that cover it are %s. "+
+		"Use one of those names exactly, or leave connection out to use %q.", want, u.Hostname(), strings.Join(names, ", "), covering[0].Name)
+}
+
+// coveringConns is every connection in the channel that covers a URL, the one to use when
+// nobody names one first. Empty with a reason means blocked; empty without one means a
+// credential-less domain covers it.
+//
+// The order is what decides whose credential goes out, so it is not left to rank alone. Rank
+// says where a connection was granted, which is no answer to "which of these is this URL for":
+// a Drive service account granted to the channel, with no path prefixes, outranked the
+// workspace's Google connection and answered every Calendar call on www.googleapis.com with a
+// token that only held the drive scope — a 403 that no amount of reconnecting could fix. So:
+//
+//  1. the longest matching path prefix first, and a connection that claims the whole host last:
+//     /calendar/v3 says more about a calendar URL than "anything on www.googleapis.com" does;
+//  2. then a person's own account before a shared credential, because "my Drive" means the
+//     asker's, and the asker's token can see only what they already can;
+//  3. then rank, as before.
+func coveringConns(acc *Access, method string, u *url.URL) ([]coverage, string) {
 	host := u.Hostname()
 	// A path is matched by prefix and then sent exactly as written, so a "." or ".." in it means
 	// the prefix that was checked and the path the service actually serves are two different
@@ -702,20 +749,19 @@ func (p *Proxy) MatchNamed(acc *Access, method string, u *url.URL, want string) 
 	// Drive connection block a calendar booking the Google connection was allowed to make.
 	// Nothing is widened by this: each connection still permits exactly what it permitted.
 	outside := ""
-	// Every connection in this channel that covers the URL, in the order Match always preferred
-	// them. Collected rather than returned on sight so a name can choose between them; with no
-	// name the first is taken, which is the connection that would have been returned before.
-	var covering []*Connection
+	var cands []coverage
 	for _, r := range acc.Rules {
 		for _, h := range r.Conn.AllowedHosts {
 			if !hostMatch(h, host) {
 				continue
 			}
+			spec := 0
 			if len(r.Conn.PathPrefixes) > 0 {
 				ok := false
 				for _, pfx := range r.Conn.PathPrefixes {
 					if strings.HasPrefix(u.Path, pfx) {
 						ok = true
+						spec = max(spec, len(pfx))
 					}
 				}
 				if !ok {
@@ -739,23 +785,19 @@ func (p *Proxy) MatchNamed(acc *Access, method string, u *url.URL, want string) 
 					continue
 				}
 			}
-			covering = append(covering, r.Conn)
+			cands = append(cands, coverage{r.Conn, spec})
 			break // this connection covers the URL; its other hosts cannot say otherwise
 		}
 	}
-	if len(covering) > 0 {
-		if want == "" {
-			return covering[0], ""
-		}
-		if conn := connByName(covering, want); conn != nil {
-			return conn, ""
-		}
-		names := make([]string, len(covering))
-		for i, c := range covering {
-			names[i] = strconv.Quote(c.Name)
-		}
-		return nil, fmt.Sprintf("blocked by the proxy: this channel has no connection called %q for %s. The ones that cover it are %s. "+
-			"Use one of those names exactly, or leave connection out to use %q.", want, host, strings.Join(names, ", "), covering[0].Name)
+	if len(cands) > 0 {
+		// Stable, so connections equal on both counts keep the rank order Rules is sorted in.
+		sort.SliceStable(cands, func(i, j int) bool {
+			if cands[i].spec != cands[j].spec {
+				return cands[i].spec > cands[j].spec
+			}
+			return isPersonal(cands[i].conn) && !isPersonal(cands[j].conn)
+		})
+		return cands, ""
 	}
 	for _, d := range acc.Domains {
 		if hostMatch(d.Host, host) {
@@ -767,6 +809,16 @@ func (p *Proxy) MatchNamed(acc *Access, method string, u *url.URL, want string) 
 	}
 	return nil, fmt.Sprintf("blocked by the proxy: host %s is not allowed in this channel. An admin can add it as a connection or a domain in the console.", host)
 }
+
+// coverage is one connection covering a URL, and how closely.
+type coverage struct {
+	conn *Connection
+	spec int // length of the longest prefix that matched; 0 for a connection with none
+}
+
+// isPersonal is a connection that spends the asker's own sign-in rather than a credential the
+// channel shares.
+func isPersonal(c *Connection) bool { return c != nil && c.CredType == "oauth_user" }
 
 // callAudit is the identity half of an audit row: which workspace, channel, thread and person a
 // tool call belongs to. Every path that runs a call on somebody's behalf builds it from the Call
@@ -854,6 +906,40 @@ func (p *Proxy) Do(ctx context.Context, orgID int64, acc *Access, req ProxyReque
 		audit.Blocked = why
 		p.store.LogProxy(ctx, orgID, audit)
 		return nil, errors.New(why)
+	}
+	covering, _ := coveringConns(acc, method, u)
+	spec := 0
+	for _, c := range covering {
+		if c.conn == conn {
+			spec = c.spec
+		}
+	}
+	account, skipped := "", ""
+	if isPersonal(conn) {
+		uc, _ := p.userConnection(ctx, orgID, conn, audit)
+		if uc != nil {
+			account = uc.Account
+		} else if req.Connection == "" && !isWrite(method) {
+			// Their own account was the first choice and they have not connected it. A read can
+			// still be answered by a shared credential covering the same URL, so long as the
+			// answer says whose view it is. A write cannot: doing it as someone else is a
+			// different act from the one they asked for, so that still asks them to connect.
+			// Only a stand-in claiming this path as closely will do: a service account that
+			// covers the whole host was ranked below their account because it is not meant for
+			// this URL, and answering with its 403 would hide the Connect link they need.
+			for _, c := range covering {
+				if !isPersonal(c.conn) && c.spec == spec {
+					skipped, conn = conn.Name, c.conn
+					break
+				}
+			}
+		}
+	}
+	var others []string
+	for _, c := range covering {
+		if c.conn != conn {
+			others = append(others, c.conn.Name)
+		}
 	}
 	// A matched connection means a credential is about to be injected. It must not travel in
 	// cleartext: an http upstream that redirects to https has already had the request — headers
@@ -943,7 +1029,20 @@ func (p *Proxy) Do(ctx context.Context, orgID int64, acc *Access, req ProxyReque
 		text += fmt.Sprintf("\n\n[truncated: the response is larger than %d bytes; narrow it with the API's own paging or filters]", limit)
 	}
 	return &ProxyResponse{Status: resp.StatusCode, Body: redact(text), Conn: conn, Truncated: truncated,
-		RetryAfter: retryAfterHint(resp.Header, time.Now())}, nil
+		RetryAfter: retryAfterHint(resp.Header, time.Now()), Account: account, Others: others, Skipped: skipped}, nil
+}
+
+// userConnection is the asker's own sign-in on a personal connection, or nil when they have not
+// made one. It is the row userToken reads, looked at here only to say whose it is.
+func (p *Proxy) userConnection(ctx context.Context, orgID int64, conn *Connection, audit ProxyAudit) (*UserConnection, error) {
+	if audit.Requester == "" {
+		return nil, nil
+	}
+	uc, err := p.store.UserConnection(ctx, orgID, conn.ID, audit.TeamID, audit.Requester)
+	if err != nil || uc == nil || len(uc.secretEnc) == 0 {
+		return nil, err
+	}
+	return uc, nil
 }
 
 // scrubSecrets removes the connection's own credential values from a response body, in case
