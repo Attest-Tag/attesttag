@@ -1,10 +1,15 @@
-.PHONY: build ui test test-deploy evals run deploy worker-build worker-deploy worker-deploy-aws worker-deploy-azure
+.PHONY: build ui hooks test test-deploy evals run deploy worker-build worker-deploy worker-deploy-aws worker-deploy-azure
 
 build: ui
 	go build -o attesttag ./cmd/attesttag
 
 ui:
 	cd ui && npm ci --no-audit --no-fund && npm run build
+
+# The pre-push check: this repository is public, so a push that would publish a secret, a
+# dotenv file or one of your deployment's identifiers is refused before it leaves (.githooks/).
+hooks:
+	git config core.hooksPath .githooks
 
 test:
 	go vet ./... && go test -skip TestEvals ./...
