@@ -173,7 +173,9 @@ are sent from the next round on. A message that names the connection ("create a 
 task…"), or a thread that already called its tools, loads them before the first call so no
 round is spent asking. Auth is a bearer token or OAuth 2.0 authorization code per the MCP spec: resource
 discovery, authorization-server metadata, dynamic client registration when needed, PKCE, and
-automatic refresh. Sign in from the console with the Connect dialog.
+automatic refresh. Every request carries the token the connection holds at that moment, so a
+renewed one is in use from the next call, and a reply over 10 MiB fails the call that asked for
+it. Sign in from the console with the Connect dialog.
 
 **Test connection** in the Connect dialog performs a real handshake against the server url
 (initialize + `tools/list`) and reports the tools it found, so a wrong url or a rejected token

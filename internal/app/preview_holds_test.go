@@ -137,15 +137,15 @@ func TestAPreviewRunsNoMCPWrite(t *testing.T) {
 	a := &Agent{store: st, tools: map[string]Tool{}, mcp: hub, settings: newSettingsCache(st, cfg), llm: NewLLM(cfg),
 		slacks: testRegistry(&Chat{}), loc: time.UTC}
 
-	for i, tc := range []struct {
+	for _, tc := range []struct {
 		name, writes string
 		rules        []string
 	}{
 		{"writes automatic", "auto", nil},
 		{"an allow rule covering it", "", []string{"Filing tickets is expected."}},
 	} {
-		conn := &Connection{ID: int64(10 + i), Name: "Desk", CredType: "mcp", Writes: tc.writes, AllowedHosts: []string{"example.com"},
-			secretEnc: seal(Secret{MCPURL: ts.URL, Token: "tok"})}
+		conn := storedMCPConn(t, st, orgID, &Connection{Name: "Desk", CredType: "mcp", Writes: tc.writes, AllowedHosts: []string{"example.com"},
+			secretEnc: seal(Secret{MCPURL: ts.URL, Token: "tok"})})
 		call := func(preview bool) *Call {
 			return &Call{OrgID: orgID, Channel: "C1", ThreadTS: "1.1", UserID: "U1", Kind: "channel", Preview: preview,
 				Session: &Session{}, Streamer: &Streamer{failed: true},

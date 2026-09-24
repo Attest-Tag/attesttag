@@ -48,8 +48,8 @@ func TestMCPCallAuditNamesTheWorkspace(t *testing.T) {
 	hub, st, seal := mcpTestHub(t)
 	a := &Agent{store: st, tools: map[string]Tool{}, mcp: hub, settings: newSettingsCache(st, Config{}),
 		slacks: testRegistry(&Chat{}), loc: time.UTC}
-	conn := &Connection{ID: 7, Name: "Acme MCP", CredType: "mcp", Writes: "auto", AllowedHosts: []string{"example.com"},
-		secretEnc: seal(Secret{MCPURL: ts.URL + "/mcp", Token: "tok"})}
+	conn := storedMCPConn(t, st, orgID, &Connection{Name: "Acme MCP", CredType: "mcp", Writes: "auto", AllowedHosts: []string{"example.com"},
+		secretEnc: seal(Secret{MCPURL: ts.URL + "/mcp", Token: "tok"})})
 	c := &Call{TeamID: "T1", OrgID: orgID, Channel: "C1", ThreadTS: "111.1", UserID: "U1", Kind: "channel",
 		Text: "list the documents", Session: &Session{}, Streamer: &Streamer{failed: true},
 		Access: &Access{Rules: []Rule{{Conn: conn}}, ToolPacks: map[string]bool{}}}
