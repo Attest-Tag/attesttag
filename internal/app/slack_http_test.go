@@ -282,7 +282,9 @@ func TestSlackHTTPMissingSecretAndDatabaseFailure(t *testing.T) {
 	}
 }
 
-func TestSlackDeliveryRestartLeaseAndConcurrentClaim(t *testing.T) {
+// A delivery is a row, so it outlives the process that accepted it. SQLite only, because
+// reopening needs the path; on Postgres the row lives in a server that never went away.
+func TestSlackDeliverySurvivesRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "inbox.db")
 	st, err := OpenStore(path)
 	if err != nil {
@@ -298,33 +300,66 @@ func TestSlackDeliveryRestartLeaseAndConcurrentClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	var wg sync.WaitGroup
-	claims := make(chan *slackDelivery, 8)
-	errs := make(chan error, 8)
-	for range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			d, err := st.claimSlackDelivery(ctx)
-			if err != nil {
-				errs <- err
-			}
-			if d != nil {
-				claims <- d
-			}
-		}()
+	if d, err := st.claimSlackDelivery(ctx); err != nil || d == nil || d.Key != "event:T_A:E1" {
+		t.Fatalf("delivery lost across a restart: %+v %v", d, err)
 	}
-	wg.Wait()
-	close(claims)
-	close(errs)
-	for err := range errs {
-		t.Error(err)
+}
+
+// One delivery, one claim. Each round releases every claimer on the same instant, the way the
+// dispatch goroutines line up when they poll in step, and on Postgres that used to hand one row
+// to two of them: both ran the turn, and the bot answered one mention twice. SQLite runs this
+// process's queries on one connection and cannot fail it, so the Postgres leg is what counts.
+func TestSlackDeliveryConcurrentClaimAndLease(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+	for round := range 20 {
+		key := fmt.Sprintf("event:T_A:E%d", round)
+		if err := st.enqueueSlackDelivery(ctx, key, 1, "T_A", "event", []byte("sealed")); err != nil {
+			t.Fatal(err)
+		}
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		claims := make(chan *slackDelivery, 8)
+		errs := make(chan error, 8)
+		for range 8 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				d, err := st.claimSlackDelivery(ctx)
+				if err != nil {
+					errs <- err
+				}
+				if d != nil {
+					claims <- d
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+		close(claims)
+		close(errs)
+		for err := range errs {
+			t.Fatal(err)
+		}
+		if len(claims) != 1 {
+			t.Fatalf("round %d: %d dispatchers claimed %s at once", round, len(claims), key)
+		}
+		if err := st.finishSlackDelivery(ctx, <-claims); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if len(claims) != 1 {
-		t.Fatalf("%d concurrent claims", len(claims))
+
+	// A lease that runs out puts the delivery back in the queue, and the claimant that lost it
+	// can no longer finish it out from under the one that holds it now.
+	if err := st.enqueueSlackDelivery(ctx, "event:T_A:E_lease", 1, "T_A", "event", []byte("sealed")); err != nil {
+		t.Fatal(err)
 	}
-	old := <-claims
-	st.db.Exec(`update slack_deliveries set lease_until=0`)
+	old, err := st.claimSlackDelivery(ctx)
+	if err != nil || old == nil {
+		t.Fatal("delivery not claimed", err)
+	}
+	st.db.Exec(`update slack_deliveries set lease_until=0 where delivery_key=?`, old.Key)
 	d, err := st.claimSlackDelivery(ctx)
 	if err != nil || d == nil {
 		t.Fatal("expired lease not recoverable", err)
@@ -333,7 +368,7 @@ func TestSlackDeliveryRestartLeaseAndConcurrentClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	var done int64
-	st.db.QueryRow(`select done_at from slack_deliveries`).Scan(&done)
+	st.db.QueryRow(`select done_at from slack_deliveries where delivery_key=?`, old.Key).Scan(&done)
 	if done != 0 {
 		t.Fatal("stale claimant finished new lease")
 	}
