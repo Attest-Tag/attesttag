@@ -98,6 +98,9 @@ changes the page in the same pull request.
 Small and single-purpose travels fastest. Please:
 
 - run `make test` and, if you touched `ui/`, `cd ui && npx tsc --noEmit`
+- run `make hooks` once per clone: the pre-push check refuses a push carrying a credential, a
+  dotenv file, a file `.gitignore` excludes, or any identifier you list in
+  `.git/info/public-denylist` (your own cloud project, service URL and the like)
 - add a test when you fix a bug — the test is how the fix stays fixed
 - say in the description what you saw go wrong, not only what you changed
 

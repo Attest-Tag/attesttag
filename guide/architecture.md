@@ -176,7 +176,6 @@ Slack (signed webhooks)      Microsoft Teams (Bot Framework)      Console, API a
 | `docker-compose.yml` | the single-machine deployment, with profiles for a tunnel, Caddy, Postgres and MinIO |
 | `deploy/` | one folder per platform — `local/` (compose overlays and launchd), `gcp/` (Cloud Run: the bot and the worker job), `aws/` (ECS Fargate), `azure/` (Container Apps), `helm/` (Kubernetes) — over shared `docs/`, `env/` and `slack/`, `plan.sh`, and `test/`, which runs the AWS and Azure scripts against fake CLIs |
 | `evals/` | eval cases and how to run them |
-| `video/` | the recorder behind the console's walkthroughs |
 | `Makefile` | `make ui`, `make build`, `make test`, and the Cloud Run deploy targets |
 | `LICENSE` | MIT |
 

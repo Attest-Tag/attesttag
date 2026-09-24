@@ -113,7 +113,7 @@ func TestNewGitHubAppRefusesHalfAConfiguration(t *testing.T) {
 
 	t.Run("an id but a broken key", func(t *testing.T) {
 		clear(t)
-		t.Setenv("GITHUB_APP_ID", "4941055")
+		t.Setenv("GITHUB_APP_ID", "1234567")
 		t.Setenv("GITHUB_APP_SLUG", "attesttag")
 		t.Setenv("GITHUB_APP_PRIVATE_KEY_B64", "nonsense")
 		if _, err := newGitHubApp(); err == nil {
@@ -126,7 +126,7 @@ func TestNewGitHubAppRefusesHalfAConfiguration(t *testing.T) {
 	// at boot beats discovering it on somebody's first install.
 	t.Run("a key and an id but no OAuth client", func(t *testing.T) {
 		clear(t)
-		t.Setenv("GITHUB_APP_ID", "4941055")
+		t.Setenv("GITHUB_APP_ID", "1234567")
 		t.Setenv("GITHUB_APP_SLUG", "attesttag")
 		t.Setenv("GITHUB_APP_PRIVATE_KEY_B64", b64)
 		app, err := newGitHubApp()
@@ -146,7 +146,7 @@ func TestNewGitHubAppRefusesHalfAConfiguration(t *testing.T) {
 
 	t.Run("complete", func(t *testing.T) {
 		clear(t)
-		t.Setenv("GITHUB_APP_ID", "4941055")
+		t.Setenv("GITHUB_APP_ID", "1234567")
 		t.Setenv("GITHUB_APP_SLUG", "attesttag")
 		t.Setenv("GITHUB_APP_PRIVATE_KEY_B64", b64)
 		t.Setenv("GITHUB_APP_CLIENT_ID", "Iv23liEXAMPLE0000000")
@@ -169,7 +169,7 @@ func TestNewGitHubAppRefusesHalfAConfiguration(t *testing.T) {
 // back-dated iat is what buys room for a clock that drifts.
 func TestAppJWTIsSignedAndWithinGitHubsWindow(t *testing.T) {
 	key, b64, _ := testAppKey(t)
-	app := &githubApp{id: "4941055", slug: "attesttag"}
+	app := &githubApp{id: "1234567", slug: "attesttag"}
 	var err error
 	if app.key, err = parseGitHubAppKey(b64, ""); err != nil {
 		t.Fatal(err)
@@ -205,7 +205,7 @@ func TestAppJWTIsSignedAndWithinGitHubsWindow(t *testing.T) {
 	if hdr.Alg != "RS256" {
 		t.Errorf("alg = %q, want RS256", hdr.Alg)
 	}
-	if claims.Iss != "4941055" {
+	if claims.Iss != "1234567" {
 		t.Errorf("iss = %q, want the app id", claims.Iss)
 	}
 	if claims.Iat != now.Add(-time.Minute).Unix() {
