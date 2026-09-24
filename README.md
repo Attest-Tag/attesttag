@@ -27,6 +27,8 @@ it may reach, per channel, from a console at `/admin/`.
 the edge by a proxy, so a tool call reaches the service it is for and the model sees the answer,
 never the secret.
 
+![How attest_tag works: Slack, Teams, the admin console and API or MCP clients connect to one Go binary, which reaches the model provider, outside services and an isolated fix worker. Keys stay sealed, and every write waits for a person to confirm it.](assets/diagrams/how-attest-tag-works.webp)
+
 ## Run it
 
 ```bash
@@ -130,6 +132,17 @@ where to get each.
 - **Assumes tool output is hostile.** Prompt-injection framing, credential isolation,
   human-in-the-loop writes, approval tiers a requester cannot approve from by default, SSRF guards, and an
   audit row for every turn, tool call and proxied request. → [Guardrails](guide/security.md)
+
+## Architecture
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/diagrams/architecture-dark.svg">
+  <img src="assets/diagrams/architecture-light.svg" alt="attest_tag architecture: the checks at ingress, the turn loop, the tools, the credential proxy's steps, what stays private to one person, the audit log, the isolated fix-job worker, third-party services and storage, with one tool call numbered from end to end">
+</picture>
+
+One tool call from end to end, and the check each hop has to pass.
+[Architecture](guide/architecture.md) has the process, the files and the schema behind it, and
+[Guardrails](guide/security.md) has every check in full.
 
 ## Documentation
 
