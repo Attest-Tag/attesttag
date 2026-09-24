@@ -18,7 +18,9 @@ bot.log
 
 ui/node_modules
 ui/.next
-ui/out
+# The console build, except the one placeholder //go:embed needs to compile (ui/embed.go).
+ui/out/*
+!ui/out/index.html
 
 # macOS finder metadata
 .DS_Store
@@ -29,16 +31,14 @@ ui/out
 # root are checked in; everything under docs/org-<id>/ is a tenant's own uploaded files.
 docs/org-*/
 
-# The walkthrough recorder (video/). Its renders are tens of MB apiece and are re-made
-# whenever a narration line changes, so they reach the site through `npm run video:publish`
-# rather than through git. Nothing it writes belongs in this repository any more: the site
-# lives in attesttag-website, and the posters and chapter manifests are committed there,
-# beside the page that imports them.
-video/out/
-video/node_modules
-video/.auth/
-video/.video-work/
-video/video-out/
+# Not code, and nothing a self-hoster needs to build or run the service: the walkthrough
+# recorder (video/), the logo explorations and the Slack Marketplace screenshots with their
+# generator. They stay on the maintainers' disks. This repository is public, so what it holds
+# is the source and what building it needs — see the pre-push check in .githooks/.
+video/
+assets/icon-options/
+assets/marketplace/
+assets/attest-tag-icon.png
 *.mp4
 
 # The security audits (security-review/). A report is a map of the attack surface with working

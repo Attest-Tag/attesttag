@@ -205,7 +205,7 @@ fi
 # volumes, secrets, scale and ingress have to agree with each other and a half-applied update
 # is how you get a replica with no documents. Secret values live in this file, so it is created
 # mode 600 and removed on the way out however this script ends.
-SPEC="$(mktemp -t attesttag-spec)"
+SPEC="$(mktemp "${TMPDIR:-/tmp}/attesttag-spec.XXXXXX")" # GNU mktemp needs the X's; BSD does not
 trap 'rm -f "$SPEC"' EXIT INT TERM
 chmod 600 "$SPEC"
 

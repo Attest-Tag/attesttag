@@ -5,7 +5,7 @@ CONTRIBUTING.md has an example of the shape. A one-line message is fine for a on
 
 ## Checks
 
-- [ ] `make test` passes (CI does not run on pull requests yet, so this is on you)
+- [ ] `make test` passes (CI runs it too, against SQLite and Postgres)
 - [ ] It also passes against Postgres (`TEST_DATABASE_URL`), if this touches SQL
 - [ ] `cd ui && npx tsc --noEmit` passes, if this touches the console
 - [ ] A bug fix comes with a test that fails without it

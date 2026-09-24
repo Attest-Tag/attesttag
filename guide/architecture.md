@@ -3,6 +3,8 @@
 How the process is put together, what each file in it is for, and what the
 database holds.
 
+<picture><source media="(prefers-color-scheme: dark)" srcset="../assets/diagrams/architecture-dark.svg"><img src="../assets/diagrams/architecture-light.svg" alt="attest_tag architecture: trust boundaries and the check each hop passes"></picture>
+
 ```
 Slack (signed webhooks)      Microsoft Teams (Bot Framework)      Console, API and links (HTTP, :8080)
   │ /slack/events              │ /msteams/messages                  │ /admin/ /api/ /v1/ /configure/ /setup/
@@ -176,7 +178,6 @@ Slack (signed webhooks)      Microsoft Teams (Bot Framework)      Console, API a
 | `docker-compose.yml` | the single-machine deployment, with profiles for a tunnel, Caddy, Postgres and MinIO |
 | `deploy/` | one folder per platform — `local/` (compose overlays and launchd), `gcp/` (Cloud Run: the bot and the worker job), `aws/` (ECS Fargate), `azure/` (Container Apps), `helm/` (Kubernetes) — over shared `docs/`, `env/` and `slack/`, `plan.sh`, and `test/`, which runs the AWS and Azure scripts against fake CLIs |
 | `evals/` | eval cases and how to run them |
-| `video/` | the recorder behind the console's walkthroughs |
 | `Makefile` | `make ui`, `make build`, `make test`, and the Cloud Run deploy targets |
 | `LICENSE` | MIT |
 

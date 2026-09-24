@@ -3,7 +3,9 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -11,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -46,6 +49,17 @@ func (h *mcpHub) forget(id int64) {
 	h.mu.Unlock()
 }
 
+// drop evicts one session that has stopped working, if it is still the one cached: another call
+// may already have dialled its replacement.
+func (h *mcpHub) drop(id int64, mc *mcpConn) {
+	h.mu.Lock()
+	if h.conns[id] == mc {
+		delete(h.conns, id)
+	}
+	h.mu.Unlock()
+	mc.session.Close()
+}
+
 // mcpURLCheck is the SSRF guard applied to every MCP request; tests swap it to reach a loopback server.
 var mcpURLCheck = checkURL
 
@@ -57,7 +71,11 @@ var mcpURLCheck = checkURL
 var mcpBaseTransport = publicTransport
 
 type bearerTransport struct {
-	token  string
+	// token is asked for on every request, not once when the session is dialled. The hub keeps
+	// a session for ten minutes and freshMCPToken renews a token only in its last two, so a
+	// session dialled on a token with five minutes left went on sending it for five minutes
+	// after it had expired, and every call in that time was refused.
+	token  func(context.Context) (string, error)
 	origin *url.URL
 	base   http.RoundTripper
 }
@@ -66,46 +84,109 @@ func (t *bearerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	if err := mcpURLCheck(r.URL); err != nil {
 		return nil, err
 	}
-	if t.token != "" {
+	token, err := t.token(r.Context())
+	if err != nil {
+		return nil, err
+	}
+	if token != "" {
 		if !sameOrigin(t.origin, r.URL) {
 			return nil, fmt.Errorf("MCP credential origin mismatch")
 		}
 		r = r.Clone(r.Context())
-		r.Header.Set("Authorization", "Bearer "+t.token)
+		r.Header.Set("Authorization", "Bearer "+token)
 	}
-	return t.base.RoundTrip(r)
+	resp, err := t.base.RoundTrip(r)
+	if err != nil {
+		return nil, err
+	}
+	// The SDK reads a JSON reply, and the body of an error, with io.ReadAll: nothing but this
+	// stops a server sending one as large as this process's memory, and the process serves every
+	// tenant. An event stream is left whole, because the SDK bounds it one event at a time
+	// (MaxEventSize, in mcpDial) and the standing GET stream lasts as long as the session.
+	if !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+		resp.Body = &replyCap{body: resp.Body, r: io.LimitReader(resp.Body, proxyMaxRead+1)}
+	}
+	return resp, nil
 }
 
-// endpoint resolves a connection's MCP server url and the token to send: the stored bearer
-// token, or a fresh one from the hub's OAuth-aware token source when it has one.
-func (h *mcpHub) endpoint(ctx context.Context, orgID int64, c *Connection) (endpoint, token string, err error) {
+// replyCap fails a reply that runs past proxyMaxRead, and says so. io.LimitReader alone would end
+// it quietly, and the SDK would then fail to decode half a message without saying why.
+type replyCap struct {
+	body io.ReadCloser
+	r    io.Reader // body, limited to one byte past the cap
+	read int64
+}
+
+func (c *replyCap) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	if c.read += int64(n); c.read > proxyMaxRead {
+		return 0, fmt.Errorf("the MCP server's reply is over %d MiB", proxyMaxRead>>20)
+	}
+	return n, err
+}
+
+func (c *replyCap) Close() error { return c.body.Close() }
+
+// endpoint resolves a connection's MCP server url, and the credential its requests carry. The
+// credential is asked for once here too, so a connection nobody can sign in to says so plainly
+// rather than as a failure somewhere inside the SDK's handshake.
+func (h *mcpHub) endpoint(ctx context.Context, orgID int64, c *Connection) (string, func(context.Context) (string, error), error) {
 	s, err := h.proxy.secret(c)
 	if err != nil {
-		return "", "", err
+		return "", nil, err
 	}
 	if s.MCPURL == "" {
-		return "", "", fmt.Errorf("connection %s has no MCP server url", c.Name)
+		return "", nil, fmt.Errorf("connection %s has no MCP server url", c.Name)
 	}
-	token = s.Token
-	if h.token != nil {
-		if t, err := h.token(ctx, orgID, c); err != nil {
-			return "", "", fmt.Errorf("mcp auth %s: %w", c.Name, err)
-		} else if t != "" {
-			token = t
-		}
+	token := func(ctx context.Context) (string, error) { return h.credential(ctx, orgID, c) }
+	if _, err := token(ctx); err != nil {
+		return "", nil, err
 	}
 	return s.MCPURL, token, nil
 }
 
+// credential is the token one request carries: the stored bearer token, or a fresh one from the
+// hub's OAuth-aware token source when it has one. It reads the connection's row each time,
+// because freshMCPToken writes a renewed token to the row and not to the copy it was handed: the
+// copy a session was dialled from, like the one the resolver caches, keeps the token that
+// expired and the refresh token spent renewing it, which a provider that rotates them refuses.
+func (h *mcpHub) credential(ctx context.Context, orgID int64, c *Connection) (string, error) {
+	if c.ID != 0 { // a connection tested before it is saved has no row, only the copy
+		cur, err := h.proxy.store.Connection(ctx, orgID, c.ID)
+		if err != nil {
+			return "", err
+		}
+		if cur == nil {
+			return "", fmt.Errorf("connection %s no longer exists", c.Name)
+		}
+		c = cur
+	}
+	s, err := h.proxy.secret(c)
+	if err != nil {
+		return "", err
+	}
+	token := s.Token
+	if h.token != nil {
+		t, err := h.token(ctx, orgID, c)
+		if err != nil {
+			return "", fmt.Errorf("mcp auth %s: %w", c.Name, err)
+		}
+		if t != "" {
+			token = t
+		}
+	}
+	return token, nil
+}
+
 // mcpDial opens a streamable-HTTP session (initialize) and lists the server's tools.
 // The caller owns the returned session.
-func mcpDial(ctx context.Context, endpoint, token string) (*mcp.ClientSession, []*mcp.Tool, error) {
+func mcpDial(ctx context.Context, endpoint string, token func(context.Context) (string, error)) (*mcp.ClientSession, []*mcp.Tool, error) {
 	origin, err := url.Parse(endpoint)
 	if err != nil {
 		return nil, nil, err
 	}
 	client := mcp.NewClient(&mcp.Implementation{Name: "attesttag", Version: "0.2"}, nil)
-	transport := &mcp.StreamableClientTransport{Endpoint: endpoint,
+	transport := &mcp.StreamableClientTransport{Endpoint: endpoint, MaxEventSize: proxyMaxRead,
 		HTTPClient: &http.Client{Timeout: 60 * time.Second, CheckRedirect: rejectRedirect, Transport: &bearerTransport{token: token, origin: origin, base: mcpBaseTransport()}}}
 	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -510,6 +591,16 @@ func (h *mcpHub) call(ctx context.Context, orgID int64, c *Connection, tool stri
 	audit.MS = time.Since(start).Milliseconds()
 	h.proxy.store.LogProxy(ctx, orgID, audit)
 	if err != nil {
+		// The SDK gives up on a session whose transport has failed — a reply over the cap is one
+		// such failure, a server that hung up is another — and fails every later call on it
+		// without sending it. So the session is dropped and the next call dials afresh, rather than
+		// failing for what is left of its ten minutes. Not when the server answered with an error
+		// of its own, or the turn stopped waiting: the session is fine then, and a new one would
+		// only cost the handshake.
+		var refused *jsonrpc.Error
+		if !errors.As(err, &refused) && ctx.Err() == nil {
+			h.drop(c.ID, mc)
+		}
 		return "", err
 	}
 	var b strings.Builder

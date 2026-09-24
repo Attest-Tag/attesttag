@@ -1,0 +1,247 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1184" width="1000" height="1184" role="img" aria-labelledby="t d">
+  <title id='t'>attest_tag architecture</title><desc id='d'>How a request moves through attest_tag: signed ingress, the turn loop, tools, the credential proxy that injects keys the model never sees, the per-person private zone, the audit log, the isolated fix-job worker, third-party services and storage.</desc>
+  <style>
+    text{font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace;font-size:12px;fill:#9198a1}
+    .h{fill:#f0f6fc;font-weight:700;font-size:13px}
+    .ink{fill:#f0f6fc}
+    .f{font-size:11px;fill:#9198a1}
+    .ok{fill:#3fb950}
+    .zl{font-size:11px;font-weight:700;letter-spacing:1px;fill:#656c76}
+    .pl{font-size:11px;font-weight:700;letter-spacing:1px;fill:#ab7df8}
+    .pl2{font-size:11px;font-weight:700;letter-spacing:1px;fill:#f0f6fc}
+    .sh{fill:#f0f6fc;font-weight:700;font-size:13px}
+    .sm{fill:#9198a1;font-size:11px}
+    .sb{fill:#f0f6fc}
+    .bdgt{fill:#0d1117;font-size:11px;font-weight:700}
+    .bdg{fill:#4493f8;stroke:#0d1117;stroke-width:2}
+    .bx{fill:#151b23;stroke:#3d444d;stroke-width:1}
+    .lay{fill:#151b23;stroke:#3d444d;stroke-width:1}
+    .kly{fill:#1f1a10;stroke:#9e6a03;stroke-width:1.2}
+    .kbx{fill:#1f1a10;stroke:#9e6a03;stroke-width:1}
+    .st{fill:#0d1117;stroke:#9e6a03;stroke-width:1}
+    .strip{fill:#262c36;stroke:#3d444d;stroke-width:1}
+    .zb{fill:none;stroke:#656c76;stroke-width:1;stroke-dasharray:6 4}
+    .pz{fill:#1c1528;stroke:#ab7df8;stroke-width:1.2;stroke-dasharray:6 4}
+    .proc{fill:none;stroke:#f0f6fc;stroke-width:1.2}
+    .l,.ls,.lc{stroke:#4493f8;stroke-width:1.5;fill:none}
+    .ls{stroke:#9e6a03;stroke-width:1.2}
+    .lk{stroke:#d29922;stroke-width:1.5;fill:none}
+    .lp{stroke:#ab7df8;stroke-width:1.5;fill:none}
+    .me{fill:#4493f8} .mk{fill:#d29922} .mp{fill:#ab7df8}
+  </style>
+  <defs>
+    <marker id="e" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L8 4L0 8z" class="me"/></marker>
+    <marker id="k" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L8 4L0 8z" class="mk"/></marker>
+    <marker id="p" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L8 4L0 8z" class="mp"/></marker>
+  </defs>
+  <rect width="1000" height="1184" fill="#0d1117"/>
+  <rect x="32" y="196" width="648" height="948" rx="8" class="proc"/><text x="60" y="1132" class="pl2">ATTESTTAG · ONE GO PROCESS</text><text x="270.2006" y="1132" class="f">cmd/attesttag · a single binary</text>
+  <text x="20" y="34" class="h">attest_tag · architecture</text>
+  <text x="20" y="56" class="f">trust boundaries, and the check each hop has to pass</text>
+  <path d="M712 22H738" class="l" marker-end="url(#e)"/>
+  <text x="746" y="26" class="f">request · data</text>
+  <path d="M850 22H876" class="lk" marker-end="url(#k)"/>
+  <text x="884" y="26" class="f">carries a key</text>
+  <rect x="712" y="34" width="26" height="13" rx="3" class="zb"/>
+  <text x="746" y="45" class="f">trust boundary</text>
+  <text x="856" y="45" class="f"><tspan class="ok">✓</tspan></text>
+  <text x="884" y="45" class="f">check in code</text>
+  <circle cx="725" cy="60" r="9" class="bdg"/>
+  <text x="725" y="64" class="bdgt" text-anchor="middle">1</text>
+  <text x="746" y="64" class="f">one tool call</text>
+  <rect x="850" y="53" width="26" height="13" rx="3" class="pz"/>
+  <text x="884" y="64" class="f">per person</text>
+  <rect x="20" y="80" width="668" height="86" rx="8" class="zb"/>
+  <text x="34" y="97" class="zl">INTERNET · UNTRUSTED</text>
+  <rect x="36" y="104" width="150" height="50" rx="5" class="bx"/>
+  <text x="50" y="125" class="h">Slack</text>
+  <text x="50" y="143" class="f">mentions · DMs</text>
+  <rect x="198" y="104" width="150" height="50" rx="5" class="bx"/>
+  <text x="212" y="125" class="h">Microsoft Teams</text>
+  <text x="212" y="143" class="f">channels · chats</text>
+  <rect x="360" y="104" width="150" height="50" rx="5" class="bx"/>
+  <text x="374" y="125" class="h">Browser</text>
+  <text x="374" y="143" class="f">admin console</text>
+  <rect x="522" y="104" width="150" height="50" rx="5" class="bx"/>
+  <text x="536" y="125" class="h">API / MCP client</text>
+  <text x="536" y="143" class="f">scripts · agents</text>
+  <rect x="60" y="228" width="612" height="150" rx="6" class="lay"/>
+  <text x="76" y="250" class="h">ingress</text>
+  <text x="142.7911" y="250" class="f">HTTP :8080 · bot.go · headers.go</text>
+  <text x="76" y="274" class="ink">/slack/events</text>
+  <text x="229" y="274" class="b"><tspan class="ok">✓</tspan> HMAC-SHA256 over the raw body, 5-minute window</text>
+  <text x="76" y="293" class="ink">/slack/interactions</text>
+  <text x="229" y="293" class="b"><tspan class="ok">✓</tspan> same signature · Confirm by asker or approver</text>
+  <text x="76" y="312" class="ink">/msteams/messages</text>
+  <text x="229" y="312" class="b"><tspan class="ok">✓</tspan> Bot Framework JWT: Microsoft keys, issuer, audience</text>
+  <text x="76" y="331" class="ink">/admin/  /api/</text>
+  <text x="229" y="331" class="b"><tspan class="ok">✓</tspan> session · 2FA · SSO · CSRF · roles · throttling</text>
+  <text x="76" y="350" class="ink">/v1/  /mcp</text>
+  <text x="229" y="350" class="b"><tspan class="ok">✓</tspan> hashed keys with the maker's access · OAuth + PKCE</text>
+  <text x="76" y="369" class="ink">every route</text>
+  <text x="229" y="369" class="b"><tspan class="ok">✓</tspan> org isolation · CSP · HSTS · no framing</text>
+  <rect x="60" y="406" width="612" height="116" rx="6" class="lay"/>
+  <text x="76" y="428" class="h">turn loop</text>
+  <text x="158.4457" y="428" class="f">agent.go · routing.go · repeat_guard.go</text>
+  <text x="76" y="452" class="b"><tspan class="ok">✓</tspan> Slack delivery sealed (AES-GCM) in an inbox, deduplicated by id</text>
+  <text x="76" y="471" class="b"><tspan class="ok">✓</tspan> context rebuilt from the thread on every turn</text>
+  <text x="76" y="490" class="b"><tspan class="ok">✓</tspan> tool output wrapped as data; fake tool-result tags stripped</text>
+  <text x="76" y="509" class="b"><tspan class="ok">✓</tspan> caps on rounds, spend and time; a 4th identical call is refused</text>
+  <rect x="60" y="550" width="612" height="116" rx="6" class="lay"/>
+  <text x="76" y="572" class="h">tools</text>
+  <text x="127.1365" y="572" class="f">tools_*.go · rag.go · sandbox.go · mcp.go</text>
+  <text x="76" y="596" class="ink">slack search · docs (RAG) · web · memory · routines · artifacts</text>
+  <text x="76" y="615" class="b"><tspan class="ok">✓</tspan> run_js: QuickJS as wasm (wazero), no syscalls, no files</text>
+  <text x="76" y="634" class="b"><tspan class="ok">✓</tspan> web fetch: ports 80/443, public hosts only</text>
+  <text x="76" y="653" class="ink">http_request · run_js fetch() · MCP → the proxy ↓</text>
+  <text x="660" y="653" class="ink" text-anchor="end">start_fix_job →</text>
+  <rect x="60" y="700" width="612" height="156" rx="6" class="kly"/>
+  <text x="76" y="722" class="h">credential proxy</text>
+  <text x="213.2368" y="722" class="f">proxy.go · outbound.go · crypto.go</text>
+  <rect x="76" y="738" width="133" height="46" rx="4" class="st"/>
+  <text x="86" y="757" class="ink">host must be</text>
+  <text x="86" y="774" class="b">allow-listed</text>
+  <rect x="225" y="738" width="133" height="46" rx="4" class="st"/>
+  <text x="235" y="757" class="ink">key sent only</text>
+  <text x="235" y="774" class="b">over https</text>
+  <rect x="374" y="738" width="133" height="46" rx="4" class="st"/>
+  <text x="384" y="757" class="ink">a write waits</text>
+  <text x="384" y="774" class="b">for Confirm</text>
+  <rect x="523" y="738" width="133" height="46" rx="4" class="st"/>
+  <text x="533" y="757" class="ink">model's auth</text>
+  <text x="533" y="774" class="b">headers dropped</text>
+  <rect x="523" y="798" width="133" height="46" rx="4" class="st"/>
+  <text x="533" y="817" class="ink">key unsealed,</text>
+  <text x="533" y="834" class="b">added at egress</text>
+  <rect x="374" y="798" width="133" height="46" rx="4" class="st"/>
+  <text x="384" y="817" class="ink">dialled only to</text>
+  <text x="384" y="834" class="b">public addresses</text>
+  <rect x="225" y="798" width="133" height="46" rx="4" class="st"/>
+  <text x="235" y="817" class="ink">one audit row</text>
+  <text x="235" y="834" class="b">per request</text>
+  <rect x="76" y="798" width="133" height="46" rx="4" class="st"/>
+  <text x="86" y="817" class="ink">reply scrubbed</text>
+  <text x="86" y="834" class="b">of secrets</text>
+  <path d="M210 761.0H224" class="ls" marker-end="url(#e)"/>
+  <path d="M359 761.0H373" class="ls" marker-end="url(#e)"/>
+  <path d="M508 761.0H522" class="ls" marker-end="url(#e)"/>
+  <path d="M589.5 785V797" class="ls" marker-end="url(#e)"/>
+  <path d="M522 821.0H508" class="ls" marker-end="url(#e)"/>
+  <path d="M373 821.0H359" class="ls" marker-end="url(#e)"/>
+  <path d="M224 821.0H210" class="ls" marker-end="url(#e)"/>
+  <circle cx="503" cy="742" r="9" class="bdg"/>
+  <text x="503" y="746" class="bdgt" text-anchor="middle">5</text>
+  <circle cx="205" cy="802" r="9" class="bdg"/>
+  <text x="205" y="806" class="bdgt" text-anchor="middle">7</text>
+  <rect x="60" y="882" width="612" height="160" rx="8" class="pz"/>
+  <text x="76" y="900" class="pl">PRIVATE TO ONE PERSON</text>
+  <text x="248.0851" y="900" class="f">personal_memory.go · oauth_user.go</text>
+  <text x="76" y="926" class="h">your notes</text>
+  <text x="372" y="926" class="h">your accounts</text>
+  <text x="76" y="947" class="b"><tspan class="ok">✓</tspan> own table, keyed to you</text>
+  <text x="76" y="966" class="b"><tspan class="ok">✓</tspan> read only on your own turns</text>
+  <text x="76" y="985" class="b"><tspan class="ok">✓</tspan> no admin, export or /v1 route</text>
+  <text x="76" y="1004" class="b"><tspan class="ok">✓</tspan> edits never logged to the org</text>
+  <text x="372" y="947" class="b"><tspan class="ok">✓</tspan> Gmail · Calendar · Drive as you</text>
+  <text x="372" y="966" class="b"><tspan class="ok">✓</tspan> token sealed, spent on your calls</text>
+  <text x="372" y="985" class="b"><tspan class="ok">✓</tspan> admins see metadata, not content</text>
+  <text x="372" y="1004" class="b"><tspan class="ok">✓</tspan> connect link: yours, 30 minutes</text>
+  <text x="76" y="1030" class="b"><tspan class="ok">✓</tspan> API keys, MCP tokens and forwarded mail can reach neither</text>
+  <rect x="60" y="1058" width="612" height="52" rx="6" class="strip"/>
+  <text x="76" y="1079" class="sh">audit log</text>
+  <text x="158.4457" y="1079" class="sm">audit.go · retention.go</text>
+  <text x="76" y="1098" class="sb">every turn, tool call, proxied request and console, /v1 or MCP write</text>
+  <path d="M111 155V226" class="l" marker-end="url(#e)"/>
+  <path d="M273 155V226" class="l" marker-end="url(#e)"/>
+  <path d="M435 155V226" class="l" marker-end="url(#e)"/>
+  <path d="M597 155V226" class="l" marker-end="url(#e)"/>
+  <circle cx="111" cy="184" r="9" class="bdg"/>
+  <text x="111" y="188" class="bdgt" text-anchor="middle">1</text>
+  <path d="M368 379V404" class="l" marker-end="url(#e)"/>
+  <circle cx="388" cy="392.0" r="9" class="bdg"/>
+  <text x="388" y="396.0" class="bdgt" text-anchor="middle">2</text>
+  <path d="M368 523V548" class="l" marker-end="url(#e)"/>
+  <path d="M368 667V698" class="l" marker-end="url(#e)"/>
+  <circle cx="388" cy="683.0" r="9" class="bdg"/>
+  <text x="388" y="687.0" class="bdgt" text-anchor="middle">4</text>
+  <path d="M58 717H44V155" class="lc" marker-start="url(#e)" marker-end="url(#e)" stroke-dasharray="4 3"/>
+  <circle cx="44" cy="608.0" r="9" class="bdg"/>
+  <text x="44" y="612.0" class="bdgt" text-anchor="middle">5</text>
+  <rect x="712" y="88" width="268" height="244" rx="6" class="bx"/>
+  <text x="726" y="110" class="h">one tool call, end to end</text>
+  <circle cx="735" cy="134" r="9" class="bdg"/>
+  <text x="735" y="138" class="bdgt" text-anchor="middle">1</text>
+  <text x="752" y="138" class="b">signed Slack event is verified</text>
+  <circle cx="735" cy="163" r="9" class="bdg"/>
+  <text x="735" y="167" class="bdgt" text-anchor="middle">2</text>
+  <text x="752" y="167" class="b">inbox seals it; a turn starts</text>
+  <circle cx="735" cy="192" r="9" class="bdg"/>
+  <text x="735" y="196" class="bdgt" text-anchor="middle">3</text>
+  <text x="752" y="196" class="b">model sees the thread, no keys</text>
+  <circle cx="735" cy="221" r="9" class="bdg"/>
+  <text x="735" y="225" class="bdgt" text-anchor="middle">4</text>
+  <text x="752" y="225" class="b">it calls a tool via the proxy</text>
+  <circle cx="735" cy="250" r="9" class="bdg"/>
+  <text x="735" y="254" class="bdgt" text-anchor="middle">5</text>
+  <text x="752" y="254" class="b">a write waits for Confirm</text>
+  <circle cx="735" cy="279" r="9" class="bdg"/>
+  <text x="735" y="283" class="bdgt" text-anchor="middle">6</text>
+  <text x="752" y="283" class="b">key added at egress, TLS only</text>
+  <circle cx="735" cy="308" r="9" class="bdg"/>
+  <text x="735" y="312" class="bdgt" text-anchor="middle">7</text>
+  <text x="752" y="312" class="b">reply scrubbed and audited</text>
+  <rect x="712" y="394" width="268" height="140" rx="8" class="zb"/>
+  <text x="726" y="411" class="zl">THIRD PARTY</text>
+  <rect x="724" y="420" width="244" height="104" rx="5" class="bx"/>
+  <text x="738" y="442" class="h">model endpoint</text>
+  <text x="859.5822" y="442" class="f">llm.go</text>
+  <text x="738" y="462" class="b">any OpenAI-compatible API</text>
+  <text x="738" y="480" class="b">or the org's own key</text>
+  <text x="738" y="498" class="b"><tspan class="ok">✓</tspan> secrets redacted first</text>
+  <text x="738" y="516" class="b"><tspan class="ok">✓</tspan> never sees a service key</text>
+  <path d="M673 464.0H722" class="l" marker-start="url(#e)" marker-end="url(#e)"/>
+  <circle cx="696.0" cy="450.0" r="9" class="bdg"/>
+  <text x="696.0" y="454.0" class="bdgt" text-anchor="middle">3</text>
+  <rect x="712" y="550" width="268" height="180" rx="8" class="zb"/>
+  <text x="726" y="567" class="zl">ISOLATED · OWN CONTAINER</text>
+  <rect x="724" y="576" width="244" height="146" rx="5" class="bx"/>
+  <text x="738" y="598" class="h">fix-job worker</text>
+  <text x="859.5822" y="598" class="f">internal/worker</text>
+  <text x="738" y="618" class="b">clone → build → test → fix</text>
+  <text x="738" y="636" class="b">→ re-test → draft PR</text>
+  <text x="738" y="654" class="b"><tspan class="ok">✓</tspan> repo code runs as uid 10002</text>
+  <text x="738" y="672" class="b"><tspan class="ok">✓</tspan> agent holds no git token</text>
+  <text x="738" y="690" class="b"><tspan class="ok">✓</tspan> one-job token, then revoked</text>
+  <text x="738" y="708" class="b"><tspan class="ok">✓</tspan> draft PR only, never merges</text>
+  <path d="M673 649H722" class="l" marker-start="url(#e)" marker-end="url(#e)"/>
+  <path d="M946 575V525" class="l" marker-end="url(#e)"/>
+  <text x="938" y="546" class="f" text-anchor="end">its own model key</text>
+  <rect x="712" y="746" width="268" height="144" rx="8" class="zb"/>
+  <text x="726" y="763" class="zl">THIRD PARTY</text>
+  <rect x="724" y="772" width="244" height="108" rx="5" class="bx"/>
+  <text x="738" y="794" class="h">connected services</text>
+  <text x="738" y="814" class="b">GitHub (App token per call)</text>
+  <text x="738" y="832" class="b">Google · ClickUp · HubSpot</text>
+  <text x="738" y="850" class="b">34 presets · remote MCP</text>
+  <text x="738" y="868" class="b"><tspan class="ok">✓</tspan> allow-listed hosts only</text>
+  <path d="M946 723V771" class="l" marker-end="url(#e)"/>
+  <text x="938" y="742" class="f" text-anchor="end">push branch · draft PR</text>
+  <path d="M657 821.0H722" class="lk" marker-end="url(#k)"/>
+  <circle cx="696.0" cy="807.0" r="9" class="bdg"/>
+  <text x="696.0" y="811.0" class="bdgt" text-anchor="middle">6</text>
+  <rect x="712" y="902" width="268" height="218" rx="8" class="zb"/>
+  <text x="726" y="919" class="zl">STORAGE · YOURS</text>
+  <rect x="724" y="928" width="244" height="66" rx="5" class="kbx"/>
+  <text x="738" y="948" class="h">sealed at rest</text>
+  <text x="738" y="967" class="b">AES-256-GCM under MASTER_KEY</text>
+  <text x="738" y="985" class="b">service keys · tokens · inbox</text>
+  <rect x="724" y="1002" width="244" height="48" rx="5" class="bx"/>
+  <text x="738" y="1022" class="h">documents</text>
+  <text x="738" y="1040" class="b">folder · GCS · any S3 bucket</text>
+  <rect x="724" y="1060" width="244" height="48" rx="5" class="bx"/>
+  <text x="738" y="1080" class="h">database</text>
+  <text x="738" y="1098" class="b">SQLite+Litestream or Postgres</text>
+  <path d="M673 962H722" class="lp" marker-end="url(#p)" stroke-dasharray="4 3"/>
+  <path d="M673 1084.0H722" class="l" marker-start="url(#e)" marker-end="url(#e)"/>
+  <text x="20" y="1168" class="f">details: guide/security.md · guide/architecture.md</text>
+</svg>

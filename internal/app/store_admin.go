@@ -727,6 +727,13 @@ func (s *Store) ConnectionsForBundle(ctx context.Context, orgID, bundleID int64)
 	return out, err
 }
 
+// ConnectionIDsForBundle is which connections a bundle holds, for reading before DeleteBundle
+// takes them: what hangs off a connection by id outlives the row, and once the row has gone
+// these ids are the only record of which connections the bundle had.
+func (s *Store) ConnectionIDsForBundle(ctx context.Context, orgID, bundleID int64) ([]int64, error) {
+	return s.idList(ctx, `select id from connections where org_id=? and bundle_id=? order by id`, orgID, bundleID)
+}
+
 // AllConnections is every connection in one organisation, whichever bundle it sits in. For
 // the places that care what a credential can reach rather than where it is filed — picking the
 // one a Drive sync spends, say. The sealed secret rides on an unexported field either way, so

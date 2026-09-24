@@ -5,7 +5,7 @@ than you might think — a corrected sentence in the README is worth having.
 
 ## Getting it running
 
-You need **Go 1.25.13** or newer, **Node 22**, and `pdftotext` (from poppler) on your PATH for
+You need **Go 1.26** or newer, **Node 22**, and `pdftotext` (from poppler) on your PATH for
 PDF indexing. Then:
 
 ```bash
@@ -53,8 +53,8 @@ createdb attesttag_test
 TEST_DATABASE_URL="postgres://$(whoami)@localhost:5432/attesttag_test?sslmode=disable" go test ./...
 ```
 
-CI does not run on pull requests for now — the workflows are started by hand — so run these
-yourself before you open one.
+CI runs these on every pull request into `main` or `testing`, and a merge needs them green; run them
+yourself before you open one — it is quicker than waiting for a red check.
 
 A schema change is a new migration, written twice under the same number:
 `internal/app/migrations/sqlite/NNNN_name.sql` and `internal/app/migrations/postgres/NNNN_name.sql`.
@@ -98,6 +98,9 @@ changes the page in the same pull request.
 Small and single-purpose travels fastest. Please:
 
 - run `make test` and, if you touched `ui/`, `cd ui && npx tsc --noEmit`
+- run `make hooks` once per clone: the pre-push check refuses a push carrying a credential, a
+  dotenv file, a file `.gitignore` excludes, or any identifier you list in
+  `.git/info/public-denylist` (your own cloud project, service URL and the like)
 - add a test when you fix a bug — the test is how the fix stays fixed
 - say in the description what you saw go wrong, not only what you changed
 

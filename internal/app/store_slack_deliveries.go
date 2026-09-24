@@ -64,12 +64,21 @@ func (s *Store) claimSlackDelivery(ctx context.Context) (*slackDelivery, error) 
 	now := time.Now()
 	lease := now.Add(slackDeliveryLease).UnixNano()
 	var d slackDelivery
-	// A single atomic UPDATE prevents two dispatchers from claiming the same row. A claim is
-	// an attempt: a delivery that keeps failing is retired rather than re-claimed forever.
+	// A claim is an attempt: a delivery that keeps failing is retired rather than re-claimed
+	// forever.
+	//
+	// The outer where repeats the subquery's conditions, and on Postgres that is what keeps this
+	// to one claim. The subquery reads the snapshot the statement started with, so dispatchers
+	// polling in the same instant all pick the same row; each waits on the row lock of the one
+	// ahead of it and then re-checks only the outer conditions against the row as updated. With
+	// delivery_key alone there every one of them claimed it, ran the turn, and got past
+	// SeenEvent on the shared key: one mention, two answers. SQLite has one writer and never
+	// showed it.
 	err := s.db.QueryRowContext(ctx, `update slack_deliveries set lease_until=?, attempts=attempts+1
 		where delivery_key=(select delivery_key from slack_deliveries where done_at=0 and dead_at=0 and attempts<? and lease_until<=?
-		order by accepted_at limit 1)
-		returning delivery_key,team_id,org_id,kind,payload_enc,lease_until,attempts`, lease, slackDeliveryMaxAttempts, now.UnixNano()).
+		order by accepted_at limit 1) and done_at=0 and dead_at=0 and attempts<? and lease_until<=?
+		returning delivery_key,team_id,org_id,kind,payload_enc,lease_until,attempts`,
+		lease, slackDeliveryMaxAttempts, now.UnixNano(), slackDeliveryMaxAttempts, now.UnixNano()).
 		Scan(&d.Key, &d.Team, &d.OrgID, &d.Kind, &d.Payload, &d.Lease, &d.Attempts)
 	if err == sql.ErrNoRows {
 		return nil, nil

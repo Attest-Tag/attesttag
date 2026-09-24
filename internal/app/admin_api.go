@@ -123,6 +123,23 @@ func (b *Bot) changed(ctx context.Context, orgID int64) {
 	}
 }
 
+// connectionGone clears up after a connection whose row has just been deleted, by whichever
+// route deleted it — its own, or its bundle's, which takes every connection in the bundle at
+// once. The delete does none of this itself: user_connections and drive_syncs name the
+// connection with no foreign key to cascade through, and the proxy and the MCP hub cache by its
+// id in memory. So both routes come here rather than each keeping a list of its own; the
+// bundle's once had nothing on it, and left every personal grant under its connections live.
+func (b *Bot) connectionGone(ctx context.Context, orgID, connID int64) {
+	// Personal sign-ins under it go too. A token nobody can see in the console any more is
+	// still a live grant at the provider, so it is revoked rather than orphaned.
+	b.revokeAllUnder(ctx, orgID, connID)
+	// A Drive sync spends this credential and nothing else, so it goes with it rather than
+	// failing every six hours against a connection that is not there any more.
+	b.store.DeleteDriveSyncsForConnection(ctx, orgID, connID)
+	b.proxy.forgetToken(connID)
+	b.agent.mcp.forget(connID)
+}
+
 // routes registers the admin API and the embedded console.
 func (b *Bot) routes(mux *http.ServeMux, uiFS fs.FS) {
 	b.slackHTTPRoutes(mux)
@@ -864,9 +881,21 @@ func (b *Bot) routes(mux *http.ServeMux, uiFS fs.FS) {
 	mux.HandleFunc("DELETE /api/bundles/{id}", b.requirePerm(PermBundlesManage, func(w http.ResponseWriter, r *http.Request) {
 		// Named before it goes: the row is the only place the name survives.
 		bd, _ := b.store.Bundle(r.Context(), orgOf(r), pathID(r, "id"))
+		// Its connections are listed first, for the same reason: the delete takes every one of
+		// them, and once their rows are gone nothing records which connections this bundle
+		// held. Unlike the name, the list is not optional — a bundle whose connections cannot
+		// be read is left alone, since deleting it would orphan the very grants this is for.
+		conns, err := b.store.ConnectionIDsForBundle(r.Context(), orgOf(r), pathID(r, "id"))
+		if err != nil {
+			fail(w, err)
+			return
+		}
 		if err := b.store.DeleteBundle(r.Context(), orgOf(r), pathID(r, "id")); err != nil {
 			fail(w, err)
 			return
+		}
+		for _, id := range conns {
+			b.connectionGone(r.Context(), orgOf(r), id)
 		}
 		b.changed(r.Context(), orgOf(r))
 		name := ""
@@ -1000,14 +1029,7 @@ func (b *Bot) routes(mux *http.ServeMux, uiFS fs.FS) {
 			deleted.Details = auditDetails(map[string]any{"preset": cur.Preset, "bundle_id": cur.BundleID})
 		}
 		b.audit(r, "connection.deleted", deleted)
-		// Personal sign-ins under it go too. A token nobody can see in the console any more is
-		// still a live grant at the provider, so it is revoked rather than orphaned.
-		b.revokeAllUnder(r.Context(), orgOf(r), id)
-		// A Drive sync spends this credential and nothing else, so it goes with it rather than
-		// failing every six hours against a connection that is not there any more.
-		b.store.DeleteDriveSyncsForConnection(r.Context(), orgOf(r), id)
-		b.proxy.forgetToken(id)
-		b.agent.mcp.forget(id)
+		b.connectionGone(r.Context(), orgOf(r), id)
 		b.changed(r.Context(), orgOf(r))
 		writeJSON(w, 200, map[string]any{"ok": true})
 	}))

@@ -15,14 +15,14 @@
 # arm64 image would quietly get an amd64 binary. Declared per stage, they stay the builder's.
 ARG BUILDPLATFORM=linux/amd64
 
-FROM --platform=$BUILDPLATFORM node:22-alpine AS uibuild
+FROM --platform=$BUILDPLATFORM node:24-alpine AS uibuild
 WORKDIR /ui
 COPY ui/package.json ui/package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY ui/ ./
 RUN npm run build
 
-FROM --platform=$BUILDPLATFORM golang:1.25.13-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.0-alpine AS build
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src
@@ -35,7 +35,7 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
 
 FROM litestream/litestream:0.5.17 AS litestream
 
-FROM alpine:3.22
+FROM alpine:3.24
 RUN apk add --no-cache ca-certificates tzdata poppler-utils
 WORKDIR /app
 COPY --from=build /attesttag /app/attesttag

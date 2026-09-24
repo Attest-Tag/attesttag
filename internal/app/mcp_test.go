@@ -147,6 +147,23 @@ func relaxMCPOutbound(t *testing.T) {
 	t.Cleanup(func() { mcpURLCheck, mcpBaseTransport = check, transport })
 }
 
+// storedMCPConn writes a connection to the store for one organisation and reads it back, the way a
+// turn is handed one. The hub reads a connection's credential from its row on every request, so
+// one that exists only in memory has none to send.
+func storedMCPConn(t *testing.T, st *Store, org int64, c *Connection) *Connection {
+	t.Helper()
+	ctx := context.Background()
+	id, err := st.InsertConnection(ctx, org, c, c.secretEnc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := st.Connection(ctx, org, id)
+	if err != nil || stored == nil {
+		t.Fatalf("reading back connection %d: %v", id, err)
+	}
+	return stored
+}
+
 // mcpTestHub returns a hub over a fresh store and sealer, plus a function sealing secrets for it.
 func mcpTestHub(t *testing.T) (*mcpHub, *Store, func(Secret) []byte) {
 	t.Helper()
@@ -169,7 +186,19 @@ func mcpTestHub(t *testing.T) (*mcpHub, *Store, func(Secret) []byte) {
 		}
 		return enc
 	}
-	return newMCPHub(NewProxy(sealer, st)), st, seal
+	h := newMCPHub(NewProxy(sealer, st))
+	// The hub keeps its sessions, and one that outlives its test goes on reconnecting its event
+	// stream through mcpURLCheck while the next test swaps it. Registered after the server's
+	// cleanup, so this runs first, while the server is still there to be told.
+	t.Cleanup(func() {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		for id, mc := range h.conns {
+			mc.session.Close()
+			delete(h.conns, id)
+		}
+	})
+	return h, st, seal
 }
 
 // TestMCPToolsLoadOnDemand checks that a turn does not carry MCP tool definitions until the
@@ -180,8 +209,8 @@ func TestMCPToolsLoadOnDemand(t *testing.T) {
 	ts := fakeMCPServer(t, "list_documents", "upload_document")
 	hub, st, seal := mcpTestHub(t)
 	a := &Agent{store: st, tools: map[string]Tool{}, mcp: hub, settings: newSettingsCache(st, Config{}), slacks: testRegistry(&Chat{}), loc: time.UTC}
-	conn := &Connection{ID: 7, Name: "Acme MCP", CredType: "mcp", Writes: "auto", AllowedHosts: []string{"example.com"},
-		secretEnc: seal(Secret{MCPURL: ts.URL + "/mcp", Token: "tok"})}
+	conn := storedMCPConn(t, st, 0, &Connection{Name: "Acme MCP", CredType: "mcp", Writes: "auto", AllowedHosts: []string{"example.com"},
+		secretEnc: seal(Secret{MCPURL: ts.URL + "/mcp", Token: "tok"})})
 	newCall := func(thread, text string) *Call {
 		return &Call{Channel: "C1", ThreadTS: thread, Kind: "dm", Text: text, Session: &Session{}, Streamer: &Streamer{failed: true},
 			Access: &Access{Rules: []Rule{{Conn: conn}}, ToolPacks: map[string]bool{}}}
@@ -281,8 +310,8 @@ func TestNewThreadPreloadsWhatTheChannelKeepsCalling(t *testing.T) {
 	ts := fakeMCPServer(t, "list_documents", "upload_document")
 	hub, st, seal := mcpTestHub(t)
 	a := &Agent{store: st, tools: map[string]Tool{}, mcp: hub, settings: newSettingsCache(st, Config{}), slacks: testRegistry(&Chat{}), loc: time.UTC}
-	conn := &Connection{ID: 7, Name: "Acme MCP", CredType: "mcp", Writes: "auto", AllowedHosts: []string{"example.com"},
-		secretEnc: seal(Secret{MCPURL: ts.URL + "/mcp", Token: "tok"})}
+	conn := storedMCPConn(t, st, 0, &Connection{Name: "Acme MCP", CredType: "mcp", Writes: "auto", AllowedHosts: []string{"example.com"},
+		secretEnc: seal(Secret{MCPURL: ts.URL + "/mcp", Token: "tok"})})
 	newCall := func(channel, thread string) *Call {
 		return &Call{Channel: channel, ThreadTS: thread, Kind: "channel", Text: "and then?", Session: &Session{}, Streamer: &Streamer{failed: true},
 			Access: &Access{Rules: []Rule{{Conn: conn}}, ToolPacks: map[string]bool{}}}
@@ -334,5 +363,179 @@ func TestNewThreadPreloadsWhatTheChannelKeepsCalling(t *testing.T) {
 	a.ensureTools(ctx, c)
 	if loaded(c) {
 		t.Error("a connection last touched before the window is still being paid for on every turn")
+	}
+}
+
+// replyMCPServer serves an in-process MCP server whose tools answer with the text the map gives
+// them, and keeps the Authorization header of the latest POST, which is where calls travel.
+// jsonReplies picks how the server answers one: a single application/json body, or an event
+// stream.
+func replyMCPServer(t *testing.T, jsonReplies bool, tools map[string]string) (*httptest.Server, *atomic.Value) {
+	t.Helper()
+	srv := mcp.NewServer(&mcp.Implementation{Name: "fake", Version: "0"}, nil)
+	for name, text := range tools {
+		srv.AddTool(&mcp.Tool{Name: name, Description: name, InputSchema: json.RawMessage(`{"type":"object"}`)},
+			func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+				return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}, nil
+			})
+	}
+	var auth atomic.Value
+	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv },
+		&mcp.StreamableHTTPOptions{JSONResponse: jsonReplies})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			auth.Store(r.Header.Get("Authorization"))
+		}
+		handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(func() {
+		ts.CloseClientConnections()
+		ts.Close()
+	})
+	relaxMCPOutbound(t)
+	return ts, &auth
+}
+
+// The hub keeps a session for ten minutes, and the token it was dialled on can be replaced in
+// less. Every request asks for the token the connection's row holds now, so a kept session
+// carries the new one from the next call, still from the copy of the connection a turn was
+// handed before it changed.
+func TestAnMCPSessionCarriesTheTokenTheConnectionHasNow(t *testing.T) {
+	ts, auth := replyMCPServer(t, false, map[string]string{"list_documents": "ok"})
+	h, st, seal := mcpTestHub(t)
+	ctx := context.Background()
+	id, err := st.InsertConnection(ctx, orgID, &Connection{Name: "acme", CredType: "mcp", Status: "active"},
+		seal(Secret{MCPURL: ts.URL + "/mcp", Token: "tok-A"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := mustConn(t, st, id)
+	if _, err := h.call(ctx, orgID, c, "list_documents", nil, ProxyAudit{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := auth.Load(); got != "Bearer tok-A" {
+		t.Fatalf("the server saw %q, want the stored token", got)
+	}
+	kept := h.conns[id]
+
+	// Written to the row the way freshMCPToken writes a renewed token, with nothing told to
+	// forget the session.
+	if err := st.UpdateConnection(ctx, orgID, mustConn(t, st, id), seal(Secret{MCPURL: ts.URL + "/mcp", Token: "tok-B"})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.call(ctx, orgID, c, "list_documents", nil, ProxyAudit{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := auth.Load(); got != "Bearer tok-B" {
+		t.Errorf("the kept session sent %q, want the token the row holds now", got)
+	}
+	if h.conns[id] != kept {
+		t.Error("the session was dialled again, where the kept one should have carried the new token")
+	}
+}
+
+// The case the ten minutes went wrong in: a session dialled on an OAuth token with minutes left,
+// kept past the point freshMCPToken renews it. The request after that point renews it, once, and
+// every request after carries the renewed token. Renewing from the copy the session was dialled
+// from would have spent the old refresh token again on every request.
+func TestAnMCPSessionRenewsItsTokenWhenItComesDue(t *testing.T) {
+	ts, auth := replyMCPServer(t, false, map[string]string{"list_documents": "ok"})
+	h, st, _ := mcpTestHub(t)
+	b := &Bot{store: st, sealer: h.proxy.sealer, proxy: h.proxy}
+	h.token = b.freshMCPToken
+
+	refreshed := make(chan string, 8)
+	idp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.ParseForm()
+		refreshed <- r.Form.Get("refresh_token")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"access_token":"at-2","refresh_token":"rt-2","expires_in":3600}`))
+	}))
+	defer idp.Close()
+	saved := oauthHTTPClient
+	oauthHTTPClient = idp.Client()
+	defer func() { oauthHTTPClient = saved }()
+
+	ctx := context.Background()
+	sealed := func(expires time.Time) []byte {
+		t.Helper()
+		enc, err := b.sealSecret(&Secret{MCPURL: ts.URL + "/mcp", OAuth: &OAuthState{AccessToken: "at-1",
+			RefreshToken: "rt-1", ExpiresAt: expires.Unix(), ClientID: "cid", TokenURL: idp.URL + "/token"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return enc
+	}
+	id, err := st.InsertConnection(ctx, orgID, &Connection{Name: "acme", CredType: "mcp", Status: "active"},
+		sealed(time.Now().Add(5*time.Minute)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := mustConn(t, st, id)
+	call := func() {
+		t.Helper()
+		if _, err := h.call(ctx, orgID, c, "list_documents", nil, ProxyAudit{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	call()
+	if got := auth.Load(); got != "Bearer at-1" {
+		t.Fatalf("the server saw %q, want the stored access token", got)
+	}
+	// Four minutes on, in the row's terms: the same token, now inside its last two.
+	if err := st.UpdateConnection(ctx, orgID, mustConn(t, st, id), sealed(time.Now().Add(time.Minute))); err != nil {
+		t.Fatal(err)
+	}
+	call()
+	call()
+	if got := auth.Load(); got != "Bearer at-2" {
+		t.Errorf("the server saw %q, want the renewed token", got)
+	}
+	close(refreshed)
+	var spent []string
+	for rt := range refreshed {
+		spent = append(spent, rt)
+	}
+	if len(spent) != 1 || spent[0] != "rt-1" {
+		t.Errorf("refreshed with %v, want once, with rt-1", spent)
+	}
+}
+
+// A reply over the cap fails the call that asked for it and nothing more: it is not read into
+// memory whole first, and the call after it gets a fresh session rather than the one the SDK
+// gave up on. Both ways a server can answer are capped, one JSON body and an event stream.
+func TestAnOversizedMCPReplyFailsOnlyItsOwnCall(t *testing.T) {
+	huge := strings.Repeat("x", proxyMaxRead+1<<20)
+	for _, jsonReplies := range []bool{true, false} {
+		t.Run(map[bool]string{true: "json", false: "event stream"}[jsonReplies], func(t *testing.T) {
+			ts, _ := replyMCPServer(t, jsonReplies, map[string]string{"dump_everything": huge, "list_documents": "ok"})
+			h, st, seal := mcpTestHub(t)
+			ctx := context.Background()
+			id, err := st.InsertConnection(ctx, orgID, &Connection{Name: "acme", CredType: "mcp", Status: "active"},
+				seal(Secret{MCPURL: ts.URL + "/mcp", Token: "t"}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := mustConn(t, st, id)
+			_, err = h.call(ctx, orgID, c, "dump_everything", nil, ProxyAudit{})
+			if want := map[bool]string{true: "over 10 MiB", false: "exceeded"}[jsonReplies]; err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("the oversized reply got %v, want an error saying it %s", err, want)
+			}
+			if _, kept := h.conns[id]; kept {
+				t.Error("the session the SDK gave up on is still the one cached")
+			}
+			out, err := h.call(ctx, orgID, c, "list_documents", nil, ProxyAudit{})
+			if err != nil || strings.TrimSpace(out) != "ok" {
+				t.Fatalf("the call after it got %q, %v", out, err)
+			}
+			// An error the server answers with is no sign of a broken session, and costs no new one.
+			live := h.conns[id]
+			if _, err := h.call(ctx, orgID, c, "no_such_tool", nil, ProxyAudit{}); err == nil {
+				t.Fatal("a tool the server does not have was answered")
+			}
+			if h.conns[id] != live {
+				t.Error("an error from the server dropped a session that was working")
+			}
+		})
 	}
 }

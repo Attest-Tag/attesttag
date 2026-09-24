@@ -60,7 +60,7 @@ func TestRepoAuthRefusesAnInstallationThisOrgDoesNotHold(t *testing.T) {
 	seedAdmin(t, st) // organisation 1
 	otherOrg, _ := secondOrg(t, st)
 
-	id := seedInstall(t, st, otherOrg, 4941055, "victim-co")
+	id := seedInstall(t, st, otherOrg, 1234567, "victim-co")
 
 	if _, err := b.repoAuthFor(ctx, 1, "", 0, id); err == nil {
 		t.Fatal("organisation 1 was handed an authorisation for another organisation's installation")
@@ -107,7 +107,7 @@ func TestConnectionEndpointsRefuseAnAppInstallationFromTheBody(t *testing.T) {
 	ctx := context.Background()
 	admin := seedAdmin(t, st)
 	otherOrg, _ := secondOrg(t, st)
-	id := seedInstall(t, st, otherOrg, 4941055, "victim-co")
+	id := seedInstall(t, st, otherOrg, 1234567, "victim-co")
 
 	bundle, err := b.store.CreateBundle(ctx, 1, "Repositories", "")
 	if err != nil {
@@ -123,7 +123,7 @@ func TestConnectionEndpointsRefuseAnAppInstallationFromTheBody(t *testing.T) {
 		return w
 	}
 
-	body := `{"name":"gh","preset":"github","cred_type":"github_app","secret":{"installation_id":4941055}}`
+	body := `{"name":"gh","preset":"github","cred_type":"github_app","secret":{"installation_id":1234567}}`
 	for _, path := range []string{
 		"/api/bundles/" + strconv.FormatInt(bundle.ID, 10) + "/connections",
 		"/api/connections/test",
@@ -166,7 +166,7 @@ func TestInstallationTokenRefusesAnotherOrgsInstallationBeforeTheCache(t *testin
 	}
 	p := NewProxy(sealer, st)
 	_, b64, _ := testAppKey(t)
-	app := &githubApp{id: "4941055", slug: "attesttag", clientID: "cid", clientSecret: "csecret"}
+	app := &githubApp{id: "1234567", slug: "attesttag", clientID: "cid", clientSecret: "csecret"}
 	if app.key, err = parseGitHubAppKey(b64, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,7 @@ func TestInstallationTokenRefusesAnotherOrgsInstallationBeforeTheCache(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	id := seedInstall(t, st, victim.ID, 4941055, "victim-co")
+	id := seedInstall(t, st, victim.ID, 1234567, "victim-co")
 
 	conn := &Connection{ID: 7, Name: "api", Preset: "github", CredType: "github_app",
 		Repo: "victim-co/api", GitHubInstallationID: id}

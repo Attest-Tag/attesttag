@@ -4,7 +4,7 @@
 # mid-job on `go: not found`, and the job reported it as a failing suite.
 #
 # Two layers of answer, because one image cannot be every language at one version:
-#   baked in   — Python 3.12 + uv, Node 22 + npm, Go, Rust, and a JRE-less JDK-free base. These
+#   baked in   — Python 3.14 + uv, Node 22 + npm, Go, Rust, and a JRE-less JDK-free base. These
 #                are the common cases and are worth the pull.
 #   mise       — everything else, and every *other version* of the above, fetched per job from
 #                what the repository itself pins (.tool-versions, .nvmrc, .python-version,
@@ -17,7 +17,7 @@
 # building MuPDF from source on musl is a half-hour that often fails.
 #
 # Build: docker build -f Dockerfile.worker -t attesttag-worker .   (or deploy/gcp/worker.sh)
-FROM golang:1.25.13-alpine AS build
+FROM golang:1.27.0-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -30,7 +30,7 @@ COPY . .
 RUN mkdir -p ui/out && touch ui/out/.embed-placeholder
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /attesttag ./cmd/attesttag
 
-FROM python:3.12-slim-bookworm
+FROM python:3.14-slim-bookworm
 ARG QWEN_CODE_VERSION=0.22.3
 ARG RUST_VERSION=1.98.1
 # libssl-dev and pkg-config are here for the crates and wheels that link against OpenSSL.
@@ -61,7 +61,7 @@ RUN uv tool install poetry && uv tool install pipenv \
 # Go from the official image rather than a pinned tarball: one line covers amd64 and the arm64 of
 # a laptop build, and /usr/local/go/bin is where the worker's baseEnv already looks. GOTOOLCHAIN
 # is auto there, so a repository that asks for a newer Go fetches it into the job's module cache.
-COPY --from=golang:1.25.13-bookworm /usr/local/go /usr/local/go
+COPY --from=golang:1.27.0-bookworm /usr/local/go /usr/local/go
 # Rust: the minimal profile plus rustfmt and clippy, because a repository's `make test` tends to
 # run those two before `cargo test`. Both homes sit outside any HOME — the worker gives each job
 # its own — and rustup's proxies are found on PATH.

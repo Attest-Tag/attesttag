@@ -580,7 +580,7 @@ func (s *Store) RevokeJobTokens(ctx context.Context, grace time.Duration) {
 // ThreadToolResults returns recent successful tool calls in a thread whose name starts with one
 // of prefixes, newest first: the evidence the bot gathered before someone asked for a fix.
 func (s *Store) ThreadToolResults(ctx context.Context, teamID, channel, threadTS string, prefixes []string, limit int) ([]ToolCallRow, error) {
-	rows, err := s.db.QueryContext(ctx, toolCallCols+` where team_id=? and channel=? and thread_ts=? and ok=1 order by id desc limit 50`, teamID, channel, threadTS)
+	rows, err := s.db.QueryContext(ctx, `select `+toolCallCols+` from tool_calls where team_id=? and channel=? and thread_ts=? and ok=1 order by id desc limit 50`, teamID, channel, threadTS)
 	if err != nil {
 		return nil, err
 	}
