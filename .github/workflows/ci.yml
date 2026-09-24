@@ -1,7 +1,6 @@
 # The checks a pull request has to pass. Deliberately separate from evals.yml, which runs the
-# Go suite and govulncheck and is left alone; this adds the things that were never covered —
-# the console's types, whether the image still builds for both architectures, and whether the
-# build context has quietly grown back.
+# Go suite and govulncheck and is left alone. This is testing, not building: the image job below
+# runs only on a merge into main.
 name: ci
 
 # Every pull request into the two long-lived branches and every push to them, so a merge is
@@ -28,22 +27,34 @@ jobs:
   # TestNoDialectSpecificSQL catches a statement written in one dialect's words before it runs;
   # this catches the behaviour that no static check can see — the encodings pgx refuses, the
   # aggregates Postgres asks about, the cursor rules SQLite has and Postgres does not.
+  #
+  # SQLite runs everything. Postgres runs only internal/app, the one package that reads
+  # TEST_DATABASE_URL, split four ways: every test there migrates a fresh schema, which on a
+  # hosted runner made the package take ten minutes against SQLite's two.
   test:
-    name: go test (${{ matrix.dialect }})
+    name: go test (${{ matrix.dialect }}${{ matrix.shard && format(' {0}/4', matrix.shard) || '' }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        dialect: [sqlite, postgres]
+        include:
+          - { dialect: sqlite, shard: 0 }
+          - { dialect: postgres, shard: 1 }
+          - { dialect: postgres, shard: 2 }
+          - { dialect: postgres, shard: 3 }
+          - { dialect: postgres, shard: 4 }
     services:
       postgres:
-        image: postgres:18-alpine
+        # An empty image skips the service, so the SQLite leg does not wait for a database.
+        image: ${{ matrix.dialect == 'postgres' && 'postgres:18-alpine' || '' }}
         env:
           POSTGRES_PASSWORD: test
           POSTGRES_DB: attesttag_test
         options: >-
-          --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
         ports: ["5432:5432"]
+    env:
+      TEST_DATABASE_URL: ${{ matrix.dialect == 'postgres' && 'postgres://postgres:test@localhost:5432/attesttag_test?sslmode=disable' || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -52,23 +63,17 @@ jobs:
         with: { go-version-file: go.mod, cache: true }
       # The console is embedded with //go:embed, so it has to exist before anything compiles.
       - run: cd ui && npm ci --no-audit --no-fund && npm run build
-      # A throwaway database, so durability buys nothing. With an fsync on every commit the
-      # suite ran past go test's default ten minutes on a hosted runner; locally it takes two.
-      - name: Postgres without fsync
-        if: matrix.dialect == 'postgres'
-        env: { PGPASSWORD: test }
-        run: |
-          psql -h localhost -U postgres -v ON_ERROR_STOP=1 \
-            -c "alter system set fsync = off" \
-            -c "alter system set synchronous_commit = off" \
-            -c "alter system set full_page_writes = off" \
-            -c "select pg_reload_conf()"
-      - run: go vet ./...
       # -skip TestEvals, as `make test` does: it costs money and needs a running bot.
-      - name: go test
-        run: go test -skip TestEvals -timeout 30m ./...
-        env:
-          TEST_DATABASE_URL: ${{ matrix.dialect == 'postgres' && 'postgres://postgres:test@localhost:5432/attesttag_test?sslmode=disable' || '' }}
+      - name: go vet and go test
+        if: matrix.dialect == 'sqlite'
+        run: go vet ./... && go test -skip TestEvals -timeout 30m ./...
+      # Round-robin over the sorted test names, so each shard is a stable quarter of the list.
+      - name: go test internal/app, shard ${{ matrix.shard }} of 4
+        if: matrix.dialect == 'postgres'
+        run: |
+          tests=$(go test -list . ./internal/app | grep -E '^(Test|Fuzz|Example)' \
+            | awk -v n=4 -v i=${{ matrix.shard }} 'NR % n == i - 1' | paste -sd'|' -)
+          go test -skip TestEvals -timeout 30m -run "^(${tests})\$" ./internal/app
 
   console:
     name: console types
@@ -91,8 +96,12 @@ jobs:
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
       - run: ./deploy/test/run.sh
 
+  # Not a pull-request check: nothing is pushed, so on a pull request it would only be eight
+  # minutes of proving the Dockerfile still builds. It runs on a merge into main instead, and by
+  # hand, until a deploy workflow builds and pushes the image for real.
   image:
     name: image builds for both architectures
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -130,3 +139,15 @@ jobs:
             GIT_COMMIT=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # The one check the main and testing rulesets require, so adding, renaming or sharding a job
+  # above does not mean editing the ruleset. A skipped or cancelled job counts as a failure.
+  passed:
+    name: ci passed
+    if: always()
+    needs: [test, console, deploy-scripts]
+    runs-on: ubuntu-latest
+    steps:
+      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')
+        run: echo "::error::a required job did not pass" && exit 1
+      - run: echo "all required jobs passed"

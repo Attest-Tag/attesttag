@@ -95,8 +95,9 @@ make evals                                      # live evals from evals/cases.js
   The `connection_*` cases need a bundle with a bearer connection for `httpbin.org` attached
   to the eval channel and are skipped otherwise. See [`evals/README.md`](../evals/README.md).
 - **CI** is two workflows. `ci.yml` runs on every pull request into, and every push to, `main` and
-  `testing`: the suite against SQLite and Postgres, the console's types and build, the deploy
-  scripts against fake cloud CLIs, and the image for both architectures. `evals.yml` — the suite
+  `testing`: the suite against SQLite and Postgres, the console's types and build, and the deploy
+  scripts against fake cloud CLIs. A merge needs its `ci passed` check. The image build for both
+  architectures runs only on a merge into `main`, since nothing pushes it yet. `evals.yml` — the suite
   and the Go vulnerability scan — is still started by hand (`workflow_dispatch`). Run `make test`
   yourself before opening a pull request. Live evals
   run by hand on a staging host with a configured HTTPS delivery URL and an installed workspace;
