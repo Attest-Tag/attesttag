@@ -126,15 +126,15 @@ func (a *Agent) stopMatching(by string, match func(*runHandle) bool) int {
 // finishStopped closes a turn someone called off: the stream ends with a note instead of an
 // error, the thinking status clears, and anything the turn was holding for confirmation is
 // dropped — nobody should be asked to approve a write from a run they just stopped.
+//
+// What the run spent is not written here: Run records every turn's spend on its way out, a
+// stopped one's included, and a row written here as well would count it twice.
 func (a *Agent) finishStopped(ctx context.Context, c *Call, by string) {
 	// Nobody should be asked to approve a write from a run that was just called off — which goes
 	// for the approver's DM as much as the in-thread card, so drop what was held for them too.
 	c.pendingID, c.pendingGrants = 0, nil
 	if a.store != nil {
 		a.store.DiscardPendingWrites(ctx, c.TeamID, c.Channel, c.ThreadTS)
-		if c.usage.In > 0 || c.usage.Out > 0 {
-			a.store.LogUsageBy(ctx, c.OrgID, c.TeamID, c.Channel, c.ThreadTS, c.UserID, c.model, c.usage)
-		}
 	}
 	if c.SL == nil {
 		return

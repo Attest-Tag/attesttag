@@ -1237,7 +1237,7 @@ func (s *Store) LogUsage(ctx context.Context, orgID int64, teamID, channel, thre
 }
 
 // LogUsageBy records what one turn cost and, on an account with prepaid credit, takes it off the
-// balance. Nine call sites reach this, including the fix-job worker reporting from its own
+// balance. Seven call sites reach this, including the fix-job worker reporting from its own
 // container, so it is the one place spend is written and therefore the one place it can be charged.
 //
 // It takes the whole Usage rather than three numbers out of it because two of the five — the

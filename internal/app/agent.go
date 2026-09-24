@@ -219,7 +219,8 @@ type Call struct {
 	run                 *runHandle // this turn's registration, so it can be stopped mid-flight
 	model               string     // model this turn is using
 	llm                 *LLM       // the endpoint it is using, resolved once (llmOf)
-	usage               Usage      // what it has spent so far
+	usage               Usage      // what it has spent so far; see addUsage
+	completions         int        // model calls that came back, whatever usage they reported
 
 	// Silent is a turn that may end with nothing to say — a quiet routine — and so must be
 	// incapable of reaching Slack while it works. Not a hint: the streamer cannot open a
@@ -951,6 +952,12 @@ func (a *Agent) conversation(ctx context.Context, c *Call) ([]openai.ChatComplet
 func (a *Agent) Run(ctx context.Context, c *Call) error {
 	rctx, endRun := a.beginRun(ctx, c)
 	defer endRun()
+	// What the turn spent is written here, on the way out of every path, and nowhere inside it;
+	// see recordSpend. WithoutCancel because a stop cancels rctx and a caller's deadline can pass
+	// mid-turn, and neither gives the tokens back. Deferred after endRun so that it runs first:
+	// the turn's cost is on the books before its in-flight slot lets the next turn in to read
+	// the month's spend.
+	defer a.recordSpend(context.WithoutCancel(ctx), c)
 	err := a.turn(rctx, c)
 	if by, stopped := c.stoppedBy(); stopped {
 		a.finishStopped(detached(ctx), c, by)
@@ -974,6 +981,34 @@ func (a *Agent) Run(ctx context.Context, c *Call) error {
 	a.postAccessRequest(ctx, c)  // calls held for a named approver get one card, by DM
 	a.postMemoryLink(ctx, c)     // something was remembered or forgotten: where to change it
 	return err
+}
+
+// recordSpend writes one turn's usage row, once, whichever way the turn ended. It used to be
+// written at the turn's exits, and only the answer and the round cap wrote it, with a stopped
+// run writing its own. But a turn is bought a call at a time: one that fails on its fourth round
+// has paid for three, and every error return after a call had come back (the provider falling
+// over, a prompt grown past the model's context, a completion with no choices, the landing
+// retry failing) left what was paid with no row. No row is no debit from credit and nothing for
+// the monthly budgets or the per-person rate limit to count, so a turn that failed late spent
+// outside every one of them.
+//
+// A turn none of whose calls came back bought nothing and writes nothing. One whose provider
+// reported no usage still writes its row, as an answered turn always has: the rate limit counts
+// rows, and a question answered is a request whatever it cost.
+func (a *Agent) recordSpend(ctx context.Context, c *Call) {
+	if a.store == nil || c.completions == 0 {
+		return
+	}
+	a.store.LogUsageBy(ctx, c.OrgID, c.TeamID, c.Channel, c.ThreadTS, c.UserID, c.model, c.usage)
+}
+
+// addUsage folds one model call into what the turn has spent, the moment it comes back. Every
+// paid call in the turn goes through here because recordSpend reads c.usage wherever the turn
+// happened to stop: a call added later, at the exits that remembered to, is a call nobody is
+// charged for when the turn fails first.
+func (c *Call) addUsage(us Usage) {
+	c.usage.add(us)
+	c.completions++
 }
 
 // ensureAccess resolves the channel's configuration onto the call, once. Pulled out of turn
@@ -1033,7 +1068,6 @@ func (a *Agent) turn(ctx context.Context, c *Call) error {
 	defer c.SL.SetStatus(ctx, c.Channel, c.ThreadTS, "")
 
 	params := openai.ChatCompletionNewParams{Model: openai.ChatModel(model), Messages: msgs}
-	var total Usage
 	forced := forcedTool(c.Text)
 	if c.NoTools {
 		forced = ""
@@ -1095,10 +1129,10 @@ func (a *Agent) turn(ctx context.Context, c *Call) error {
 				if round == rounds-1 {
 					stopped = "I ran out of tool rounds"
 				}
-			case overSpent(total, a.cfg.turnSpendCeiling()):
+			case overSpent(c.usage, a.cfg.turnSpendCeiling()):
 				note, stopped = outOfSpendNote, "I hit my budget"
 				slog.Warn("turn reached its spend ceiling; landing it", "channel", c.Channel, "thread", c.ThreadTS,
-					"round", round, "cost_usd", fmt.Sprintf("%.5f", total.CostUSD), "in", total.In)
+					"round", round, "cost_usd", fmt.Sprintf("%.5f", c.usage.CostUSD), "in", c.usage.In)
 			case repeats.stuck():
 				note, stopped = stuckNote, "I kept repeating the same tool calls"
 				slog.Warn("turn kept repeating its tool calls; landing it", "channel", c.Channel, "thread", c.ThreadTS,
@@ -1116,8 +1150,7 @@ func (a *Agent) turn(ctx context.Context, c *Call) error {
 		if err != nil {
 			return err
 		}
-		total.add(us)
-		c.usage = total // a stopped run still reports what it spent
+		c.addUsage(us)
 		if len(resp.Choices) == 0 {
 			return errors.New("model returned no choices")
 		}
@@ -1161,8 +1194,7 @@ func (a *Agent) turn(ctx context.Context, c *Call) error {
 				if err != nil {
 					return err
 				}
-				total.add(us)
-				c.usage = total
+				c.addUsage(us)
 				if len(resp.Choices) == 0 {
 					return errors.New("model returned no choices")
 				}
@@ -1219,7 +1251,7 @@ func (a *Agent) turn(ctx context.Context, c *Call) error {
 				c.Streamer.Replay(ctx, streamTail(c.Streamer, text))
 			}
 			c.FinalText = text
-			footer := a.footer(ctx, c, model, total)
+			footer := a.footer(ctx, c, model, c.usage)
 			var ts string
 			if lead, full, _ := splitLongAnswer(text, st.LongAnswerChars); isLong && !c.Streamer.Started() && !c.offline() {
 				ts, err = c.Streamer.Stop(ctx, lead, footer)
@@ -1232,11 +1264,10 @@ func (a *Agent) turn(ctx context.Context, c *Call) error {
 			}
 			c.AnswerTS = ts
 			c.roundsUsed = round + 1
-			a.store.LogUsageBy(ctx, c.OrgID, c.TeamID, c.Channel, c.ThreadTS, c.UserID, model, total)
-			a.store.AddTurn(ctx, c.TeamID, c.Channel, c.ThreadTS, "assistant", c.SL.BotUserID, text, ts, total.In, total.Out)
+			a.store.AddTurn(ctx, c.TeamID, c.Channel, c.ThreadTS, "assistant", c.SL.BotUserID, text, ts, c.usage.In, c.usage.Out)
 			slog.Info("turn", "channel", c.Channel, "thread", c.ThreadTS, "model", model, "rounds", round+1, "repeated", repeats.total,
-				"in", total.In, "cached_in", total.CachedIn, "out", total.Out, "reasoning", total.Reasoning,
-				"cost_usd", fmt.Sprintf("%.5f", total.CostUSD))
+				"in", c.usage.In, "cached_in", c.usage.CachedIn, "out", c.usage.Out, "reasoning", c.usage.Reasoning,
+				"cost_usd", fmt.Sprintf("%.5f", c.usage.CostUSD))
 			return err
 		}
 		params.Messages = append(params.Messages, msg.ToParam())
@@ -1270,8 +1301,7 @@ func (a *Agent) turn(ctx context.Context, c *Call) error {
 		repeats.endRound(fresh)
 	}
 	c.roundsUsed = rounds
-	c.Streamer.Stop(ctx, "\n\n_I stopped after too many tool calls without reaching an answer. Try narrowing the question._", a.footer(ctx, c, model, total))
-	a.store.LogUsageBy(ctx, c.OrgID, c.TeamID, c.Channel, c.ThreadTS, c.UserID, model, total)
+	c.Streamer.Stop(ctx, "\n\n_I stopped after too many tool calls without reaching an answer. Try narrowing the question._", a.footer(ctx, c, model, c.usage))
 	return errors.New("tool round cap reached")
 }
 
