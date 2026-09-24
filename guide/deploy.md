@@ -155,7 +155,7 @@ What to expect:
 
 **The fix worker.** `PROJECT=… REGION=… ./deploy/gcp/worker.sh` (or `make worker-deploy`) — run
 it before the bot's own deploy — builds `Dockerfile.worker` on Cloud Build (Debian slim, git, and the toolchains a repository's
-tests reach for — Python 3.12 + uv, Node 22, Go and Rust — plus the Qwen Code CLI), and the heavier
+tests reach for — Python 3.14 + uv, Node 22, Go and Rust — plus the Qwen Code CLI), and the heavier
 `Dockerfile.worker.jvm` (a JDK, Maven, Gradle and the .NET SDK) unless `WORKER_JVM=0`. It creates
 the Cloud Run Jobs `attesttag-worker` and `attesttag-worker-jvm` with one task, no retries and a
 one-hour ceiling, gives them a service account with **no roles** (everything a worker uses comes

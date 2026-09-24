@@ -4,7 +4,7 @@
 # mid-job on `go: not found`, and the job reported it as a failing suite.
 #
 # Two layers of answer, because one image cannot be every language at one version:
-#   baked in   — Python 3.12 + uv, Node 22 + npm, Go, Rust, and a JRE-less JDK-free base. These
+#   baked in   — Python 3.14 + uv, Node 22 + npm, Go, Rust, and a JRE-less JDK-free base. These
 #                are the common cases and are worth the pull.
 #   mise       — everything else, and every *other version* of the above, fetched per job from
 #                what the repository itself pins (.tool-versions, .nvmrc, .python-version,

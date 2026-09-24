@@ -15,7 +15,7 @@
 # arm64 image would quietly get an amd64 binary. Declared per stage, they stay the builder's.
 ARG BUILDPLATFORM=linux/amd64
 
-FROM --platform=$BUILDPLATFORM node:25-alpine AS uibuild
+FROM --platform=$BUILDPLATFORM node:24-alpine AS uibuild
 WORKDIR /ui
 COPY ui/package.json ui/package-lock.json ./
 RUN npm ci --no-audit --no-fund
