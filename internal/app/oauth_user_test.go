@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -839,5 +840,130 @@ func TestAnOrganisationWithNoneIsToldWhatToAskFor(t *testing.T) {
 	}
 	if _, ok := a.toolsFor(ctx, quiet)["connect_account"]; ok {
 		t.Error("the tool is sent to a turn that asked nothing of the kind")
+	}
+}
+
+// A connection is deleted on its own or with the bundle it is filed in, and what hangs off it by
+// id has to end either way: user_connections and drive_syncs name it with no foreign key to
+// cascade through, and the proxy and the MCP hub cache by its id. The bundle's route did none of
+// it, so every person's grant under the bundle stayed live at the provider, in a row the console
+// no longer showed and nothing could remove, and each Drive sync went on failing against a
+// connection that was not there.
+func TestDeletingAConnectionEitherWayEndsWhatHangsOffIt(t *testing.T) {
+	for _, route := range []string{"connection", "bundle"} {
+		t.Run(route, func(t *testing.T) {
+			b, mux, st := installTestBot(t)
+			org, _, tok := seedOrg(t, st, RoleAdmin)
+			ctx := context.Background()
+			b.proxy = NewProxy(b.sealer, st)
+			b.agent = &Agent{mcp: newMCPHub(b.proxy)}
+
+			revoked := make(chan string, 8)
+			provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				r.ParseForm()
+				revoked <- r.URL.Path + " " + r.Form.Get("token")
+			}))
+			defer provider.Close()
+			saved := oauthHTTPClient
+			oauthHTTPClient = &http.Client{Transport: rewriteTo(provider.URL)}
+			defer func() { oauthHTTPClient = saved }()
+
+			// Each connection has one person's grant, sealed the way the callback seals it, a Drive
+			// sync spending it, and a session in the MCP hub's cache.
+			conn := func(bundleID int64, name string) int64 {
+				t.Helper()
+				enc, err := b.sealSecret(&Secret{OAuth: &OAuthState{ClientID: "cid", ClientSecret: "csec",
+					AuthURL: "https://accounts.example.com/authorize", TokenURL: "https://oauth.example.com/token"}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				id, err := st.InsertConnection(ctx, org, &Connection{BundleID: bundleID, Name: name, Preset: "google",
+					CredType: "oauth_user", AllowedHosts: []string{"www.googleapis.com"}, Status: "active"}, enc)
+				if err != nil {
+					t.Fatal(err)
+				}
+				us, err := b.proxy.sealUserSecret(&OAuthState{AccessToken: "at-" + name, RefreshToken: "rt-" + name,
+					ClientID: "cid", TokenURL: "https://oauth.example.com/token"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := st.SaveUserConnection(ctx, org, id, "T1", "USAM", "sam@example.com", us); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := st.AddDriveSync(ctx, org, DriveSync{ConnectionID: id, FolderID: "root", FolderName: name,
+					Dest: name, CreatedBy: "U1"}); err != nil {
+					t.Fatal(err)
+				}
+				b.agent.mcp.conns[id] = &mcpConn{}
+				return id
+			}
+			going, err := st.CreateBundle(ctx, org, "going", "admin@example.com")
+			if err != nil {
+				t.Fatal(err)
+			}
+			staying, err := st.CreateBundle(ctx, org, "staying", "admin@example.com")
+			if err != nil {
+				t.Fatal(err)
+			}
+			calendar, gmail, drive := conn(going.ID, "calendar"), conn(going.ID, "gmail"), conn(staying.ID, "drive")
+
+			path, gone, kept := "/api/bundles/"+strconv.FormatInt(going.ID, 10), []int64{calendar, gmail}, []int64{drive}
+			if route == "connection" {
+				path, gone, kept = "/api/connections/"+strconv.FormatInt(calendar, 10), []int64{calendar}, []int64{gmail, drive}
+			}
+			if code, body := authReq(t, mux, "DELETE", path, nil, tok); code != 200 {
+				t.Fatalf("DELETE %s = %d %v", path, code, body)
+			}
+			close(revoked)
+
+			names := map[int64]string{calendar: "calendar", gmail: "gmail", drive: "drive"}
+			want := map[string]bool{}
+			for _, id := range gone {
+				want["/revoke rt-"+names[id]] = true
+			}
+			got := map[string]bool{}
+			for r := range revoked {
+				got[r] = true
+			}
+			if len(got) != len(want) {
+				t.Errorf("revoked at the provider: %v, want %v", got, want)
+			}
+			for r := range want {
+				if !got[r] {
+					t.Errorf("%s was never revoked at the provider: %v", r, got)
+				}
+			}
+
+			syncs, err := st.DriveSyncs(ctx, org)
+			if err != nil {
+				t.Fatal(err)
+			}
+			synced := map[int64]bool{}
+			for _, s := range syncs {
+				synced[s.ConnectionID] = true
+			}
+			for _, id := range gone {
+				if ucs, err := st.UserConnectionsFor(ctx, org, id); err != nil || len(ucs) != 0 {
+					t.Errorf("%s: %d personal grants outlived their connection (%v)", names[id], len(ucs), err)
+				}
+				if synced[id] {
+					t.Errorf("%s: its Drive sync outlived the connection it spends", names[id])
+				}
+				if _, cached := b.agent.mcp.conns[id]; cached {
+					t.Errorf("%s: the MCP hub still holds a session for it", names[id])
+				}
+			}
+			for _, id := range kept {
+				if ucs, err := st.UserConnectionsFor(ctx, org, id); err != nil || len(ucs) != 1 {
+					t.Errorf("%s: %d personal grants, want the 1 it had (%v)", names[id], len(ucs), err)
+				}
+				if !synced[id] {
+					t.Errorf("%s: its Drive sync went with a connection it does not spend", names[id])
+				}
+				if _, cached := b.agent.mcp.conns[id]; !cached {
+					t.Errorf("%s: its MCP session was dropped", names[id])
+				}
+			}
+		})
 	}
 }

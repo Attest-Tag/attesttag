@@ -58,18 +58,27 @@ func (s *Store) EnqueueInvestigation(ctx context.Context, v *Investigation) (int
 }
 
 // claimInvestigation takes the oldest piece of unleased work — queued, or running under a lease
-// that expired because whoever held it is gone. One atomic UPDATE, so two workers in the same
-// process (or two containers mid-handover) cannot both hold the same run.
+// that expired because whoever held it is gone — and hands it to one worker only: two in the
+// same process, or two containers mid-handover, must never both hold the same run.
 func (s *Store) claimInvestigation(ctx context.Context) (*Investigation, error) {
 	now := time.Now()
+	// The outer where repeats the subquery's conditions, and on Postgres that is what keeps this
+	// to one claim. The subquery reads the snapshot the statement started with, so workers
+	// polling in the same instant all pick the same row; each waits on the row lock of the one
+	// ahead of it and then re-checks only the outer conditions against the row as updated. With
+	// id alone there every one of them took the run: the thread got an answer from each, and the
+	// row added up what each of them spent. A claim that waited on StopQueuedInvestigations
+	// started the stopped run all the same. The worker that arrives second now gets nothing and
+	// polls again. SQLite has one writer and never showed it.
 	v, err := scanInvestigation(s.db.QueryRowContext(ctx, `update investigations
 		set status='running', attempts=attempts+1, lease_until=?,
 		    started_at=case when started_at='' then ? else started_at end
 		where id=(select id from investigations
 			where status in ('queued','running') and lease_until<=? and attempts<?
 			order by id limit 1)
+		  and status in ('queued','running') and lease_until<=? and attempts<?
 		returning `+investigationCols, now.Add(investigationLease).UnixNano(), now.UTC().Format(time.DateTime),
-		now.UnixNano(), investigationMaxAttempts))
+		now.UnixNano(), investigationMaxAttempts, now.UnixNano(), investigationMaxAttempts))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

@@ -95,25 +95,25 @@ var userPredicates = []string{"owner", "slack_user_id", "user_id"}
 // this list and not carrying a predicate is a failure.
 var globalQueries = map[string]string{
 	// Identity is global by design: one person, one account, however many organisations.
-	"insert into users":                                          "a user is not owned by an organisation",
-	"select * from users":                                        "a user is not owned by an organisation",
-	"update users set":                                           "the account's own fields, keyed by user id",
-	"insert into user_identities":                                "an identity belongs to a user, not an organisation",
-	"select user_id from user_identities":                        "the sign-in lookup, keyed by provider and subject",
-	"delete from user_identities":                                "keyed by user id",
-	"select provider, subject":                                   "one user's own sign-in methods",
-	"insert into memberships":                                    "the row that creates the link, keyed by both ids",
-	"delete from memberships":                                    "keyed by both ids",
-	"update memberships set":                                     "keyed by both ids",
-	"select m.user_id":                                           "joins memberships to orgs on ids the caller owns",
-	"select count(*) from memberships where user_id=?":           "after an organisation is deleted: has this account anywhere left to be?",
-	"from github_installs where installation_id=?":               "deliberately org-less: the install flow has to tell \"not ours\" from \"does not exist\" before it can refuse either. The caller compares org_id itself (handleGitHubSetup), and the console's own listing is scoped.",
-	"select org_id from billing_accounts\n\t\t  where status in": "the hourly allowance sync's enumeration, deliberately deployment-wide and exactly like the roll-up's below: it asks which accounts might have an allowance out of step with the size and period they are on, then works on each one by id. It runs behind the leader lease, never on a request.",
-	"update billing_accounts set allowance_micros=0":             "the allowance expiry sweep. An age comparison over every row, like the other sweeps, and deliberately not per-organisation: narrowing it would mean enumerating every account to do the same thing once each. It reveals nothing and decides nothing -- every read already treats a lapsed allowance as spent (BillingAccount.AllowanceLive), so this only stops a stored row from claiming credit the gate would refuse.",
-	"select org_id from billing_accounts where lifetime_debit":   "the hourly roll-up's enumeration, deliberately deployment-wide: it asks which organisations have spent since their statement was last written, and then works on each one by id. It runs behind the leader lease, never on a request. (It happens to satisfy the predicate check by selecting org_id, so this entry is the reason written down rather than the thing permitting it.)",
-	"from billing_accounts where customer_id=?":                  "deliberately org-less: an invoice or subscription webhook carries a Stripe customer and nothing of ours, so this lookup is HOW the organisation is found. The row it returns names it and everything after it is scoped by that (billing.go); a session naming a different organisation than the customer is bound to is refused there.",
-	"from credit_ledger where external_id=? and kind=?":          "deliberately org-less, for the same reason as the customer lookup above: a refund or a dispute arrives carrying a payment intent and — for a dispute — no customer and none of our metadata, so the top-up that payment became is HOW its organisation is found. external_id is unique across the ledger, so it names one row, and what follows is scoped by the organisation that row names (billing.go, applyChargeEvent).",
-	"insert into orgs":                                           "creating one",
+	"insert into users":                                        "a user is not owned by an organisation",
+	"select * from users":                                      "a user is not owned by an organisation",
+	"update users set":                                         "the account's own fields, keyed by user id",
+	"insert into user_identities":                              "an identity belongs to a user, not an organisation",
+	"select user_id from user_identities":                      "the sign-in lookup, keyed by provider and subject",
+	"delete from user_identities":                              "keyed by user id",
+	"select provider, subject":                                 "one user's own sign-in methods",
+	"insert into memberships":                                  "the row that creates the link, keyed by both ids",
+	"delete from memberships":                                  "keyed by both ids",
+	"update memberships set":                                   "keyed by both ids",
+	"select m.user_id":                                         "joins memberships to orgs on ids the caller owns",
+	"select count(*) from memberships where user_id=?":         "after an organisation is deleted: has this account anywhere left to be?",
+	"from github_installs where installation_id=?":             "deliberately org-less: the install flow has to tell \"not ours\" from \"does not exist\" before it can refuse either. The caller compares org_id itself (handleGitHubSetup), and the console's own listing is scoped.",
+	"select org_id from billing_accounts where status in":      "the hourly allowance sync's enumeration, deliberately deployment-wide and exactly like the roll-up's below: it asks which accounts might have an allowance out of step with the size and period they are on, then works on each one by id. It runs behind the leader lease, never on a request.",
+	"update billing_accounts set allowance_micros=0":           "the allowance expiry sweep. An age comparison over every row, like the other sweeps, and deliberately not per-organisation: narrowing it would mean enumerating every account to do the same thing once each. It reveals nothing and decides nothing -- every read already treats a lapsed allowance as spent (BillingAccount.AllowanceLive), so this only stops a stored row from claiming credit the gate would refuse.",
+	"select org_id from billing_accounts where lifetime_debit": "the hourly roll-up's enumeration, deliberately deployment-wide: it asks which organisations have spent since their statement was last written, and then works on each one by id. It runs behind the leader lease, never on a request.",
+	"from billing_accounts where customer_id=?":                "deliberately org-less: an invoice or subscription webhook carries a Stripe customer and nothing of ours, so this lookup is HOW the organisation is found. The row it returns names it and everything after it is scoped by that (billing.go); a session naming a different organisation than the customer is bound to is refused there.",
+	"from credit_ledger where external_id=? and kind=?":        "deliberately org-less, for the same reason as the customer lookup above: a refund or a dispute arrives carrying a payment intent and — for a dispute — no customer and none of our metadata, so the top-up that payment became is HOW its organisation is found. external_id is unique across the ledger, so it names one row, and what follows is scoped by the organisation that row names (billing.go, applyChargeEvent).",
+	"insert into orgs":                                         "creating one",
 	// Single sign-on routes on a domain and on a provider id, each of which names exactly one
 	// organisation. Asking for the org first would mean already knowing what these answer.
 	"from sso_providers where domain=? and domain_verified=1": "the sign-in lookup: the domain of the address typed is what says which organisation it belongs to",
@@ -121,15 +121,15 @@ var globalQueries = map[string]string{
 	"select client_secret_enc from sso_providers where id=?":  "the token exchange, keyed by the row the callback already resolved",
 	"select count(*) from orgs":                               "the signup gate asks whether any exist",
 	// Bearer tokens: the token is the authorisation, so the row is found by it alone.
-	"insert into admin_sessions":                                   "a session is created for a known user",
-	"select coalesce(a.id,0)":                                      "a session is found by its opaque token",
-	"delete from admin_sessions":                                   "keyed by token or by user id",
-	"update admin_sessions set":                                    "keyed by token",
-	"insert into email_tokens":                                     "a one-time link is created for a known user or address",
-	"update email_tokens set":                                      "keyed by the token hash, or by user and kind",
-	"delete from email_tokens":                                     "the expiry sweep",
-	"from api_keys where key_hash=?":                               "a developer key is found by the hash of the key itself; the row it returns names the organisation",
-	"update api_keys set last_used_at=? where id=?":                "the key just authenticated; its own row is the subject",
+	"insert into admin_sessions":                    "a session is created for a known user",
+	"select coalesce(a.id,0)":                       "a session is found by its opaque token",
+	"delete from admin_sessions":                    "keyed by token or by user id",
+	"update admin_sessions set":                     "keyed by token",
+	"insert into email_tokens":                      "a one-time link is created for a known user or address",
+	"update email_tokens set":                       "keyed by the token hash, or by user and kind",
+	"delete from email_tokens":                      "the expiry sweep",
+	"from api_keys where key_hash=?":                "a developer key is found by the hash of the key itself; the row it returns names the organisation",
+	"update api_keys set last_used_at=? where id=?": "the key just authenticated; its own row is the subject",
 	"update api_keys set revoked_at=? where user_id=? and revoked_at is null": "a password reset or change locks the person out everywhere, keyed by the person like DeleteSessionsFor",
 	"update mcp_grants set revoked_at=? where user_id=? and revoked_at=''":    "the same reset, ending the MCP clients the person connected as it ends their keys",
 	// An MCP token is found the way a developer key is: by the hash of the token itself, because
@@ -137,6 +137,7 @@ var globalQueries = map[string]string{
 	"from mcp_grants where access_hash=?":                          "an MCP access token is found by its hash; the row names the organisation",
 	"from mcp_grants where refresh_hash=?":                         "a refresh token is found by its hash, the same way",
 	"from mcp_grants where prev_refresh_hash=?":                    "a refresh token already spent, found by its hash so its replay can end the grant",
+	"from setup_links where token=?":                               "a setup link is found by its own unguessable token, the way a session is; the row it returns names the organisation the credential is filed in",
 	"insert into oauth_states":                                     "install state, keyed by an unguessable token",
 	"select coalesce(created_by,''), expires_at from oauth_states": "found by its token",
 	"delete from oauth_states":                                     "single use, and the expiry sweep",
@@ -167,13 +168,17 @@ var globalQueries = map[string]string{
 	"update investigations set lease_until=?":     "the heartbeat of a run already claimed, keyed by its own id",
 	"update investigations set status=?, error=?": "finishing the run this process claimed, keyed by its own id",
 	"update investigations set status='queued'":   "handing a claimed run back, keyed by its own id",
+	// Access requests nobody answered in time, found in one pass over the deployment like the
+	// sweeps above; claimAccess then closes each one by its own org and id.
+	"from access_requests where status='pending' and expires_at": "ExpireAccessRequests: the expiry sweep, reading only which rows lapsed and whose they are",
 	// The Slack inbox is one queue for the whole deployment, and delivery_key embeds the
 	// workspace ("event:<team>:<id>") exactly as seen_events does. The row carries org_id, which
 	// is what everything downstream of a claim is scoped by.
-	"from slack_deliveries where delivery_key=?": "the dedup check; the key embeds the workspace",
-	"update slack_deliveries set":                "one delivery, keyed by a key that embeds its workspace",
-	"delete from slack_deliveries where done_at": "the GC for finished deliveries",
-	"delete from slack_deliveries where dead_at": "the GC for dead-lettered deliveries",
+	"from slack_deliveries where delivery_key=?":          "the dedup check; the key embeds the workspace",
+	"from slack_deliveries where done_at=0 and dead_at=0": "the admission check: how deep the whole queue is, and how much of it is this organisation's and this workspace's. Counts, and nothing of any row",
+	"update slack_deliveries set":                         "one delivery, keyed by a key that embeds its workspace",
+	"delete from slack_deliveries where done_at":          "the GC for finished deliveries",
+	"delete from slack_deliveries where dead_at":          "the GC for dead-lettered deliveries",
 	// A sign-in that was started and never finished, swept by age. The row is found by its
 	// single-use state token everywhere else.
 	"delete from connect_states where expires_at": "the expiry sweep for unfinished personal sign-ins",
@@ -225,7 +230,7 @@ func TestEveryPerOrgQueryIsScoped(t *testing.T) {
 		}
 		for _, m := range sqlLiteral.FindAllStringSubmatch(string(src), -1) {
 			q := strings.ToLower(strings.Join(strings.Fields(m[1]), " "))
-			if !sqlStart.MatchString(q) || !touchesPerOrgTable(q) || hasOrgPredicate(q) || isAllowedGlobal(q) {
+			if !sqlStart.MatchString(q) || !touchesPerOrgTable(q) || hasOrgPredicate(withoutSelectLists(q)) || isAllowedGlobal(q) {
 				continue
 			}
 			offenders = append(offenders, f+": "+trimQuery(q))
@@ -235,6 +240,66 @@ func TestEveryPerOrgQueryIsScoped(t *testing.T) {
 		t.Errorf("%d statement(s) touch per-organisation data without narrowing to one.\n"+
 			"Add the predicate, or add the statement to globalQueries with the reason it is safe:\n  %s",
 			len(offenders), strings.Join(offenders, "\n  "))
+	}
+}
+
+// withoutSelectLists is a statement with the column list of each select taken out, so that what
+// is left to name the organisation is what decides which rows: a where, a join, an insert's
+// columns. A column list only says what comes back, and org_id taken out as a column used to pass
+// this check on its own. routineCols, routineRunCols and toolCallCols were written that way,
+// `select …, org_id, … from <table>` as one literal with the where appended at each use, so the
+// check read the column list, passed it, and never saw a where at all.
+func withoutSelectLists(q string) string {
+	word := func(i int, w string) bool {
+		isWord := func(b byte) bool { return b == '_' || b >= 'a' && b <= 'z' || b >= '0' && b <= '9' }
+		return strings.HasPrefix(q[i:], w) && (i == 0 || !isWord(q[i-1])) &&
+			(i+len(w) == len(q) || !isWord(q[i+len(w)]))
+	}
+	var out strings.Builder
+	// skipping is the depth of the select whose column list is being dropped, or -1. The list
+	// ends at that select's own from; a subquery inside it, parentheses and all, goes with it.
+	depth, skipping := 0, -1
+	for i := 0; i < len(q); {
+		switch {
+		case q[i] == '(':
+			depth++
+		case q[i] == ')':
+			if depth == skipping { // a scalar subquery, `(select 1)`, has no from to end its list
+				skipping = -1
+			}
+			depth--
+		case skipping < 0 && word(i, "select"):
+			out.WriteString("select ")
+			skipping, i = depth, i+len("select")
+			continue
+		case depth == skipping && word(i, "from"):
+			skipping = -1
+		}
+		if skipping < 0 {
+			out.WriteByte(q[i])
+		}
+		i++
+	}
+	return out.String()
+}
+
+// The guard on withoutSelectLists: what it keeps is what the check above reads, so a list it
+// failed to drop would be the blind spot back again, silently.
+func TestAColumnListIsNotAPredicate(t *testing.T) {
+	for q, want := range map[string]bool{
+		"select id, coalesce(org_id,0), channel from routines where id=?":                            false,
+		"select id, org_id from routines where org_id=? and id=?":                                    true,
+		"select (select org_id from orgs o where o.id=r.org_id) from routines r where r.id=?":        false,
+		"select id from routines where org_id=(select org_id from teams where team_id=?)":            true,
+		"select (select 1), org_id from routines where id=?":                                         false,
+		"insert into routines (org_id, cron) select org_id, cron from routines where id=?":           true,
+		"select r.id from routines r join orgs o on o.id=r.org_id where r.id=?":                      true,
+		"with t as (select id, org_id from routines where id=?) select id from t":                    false,
+		"select count(*), sum(case when org_id=? then 1 else 0 end) from slack_deliveries where 1=1": false,
+	} {
+		if got := hasOrgPredicate(withoutSelectLists(q)); got != want {
+			t.Errorf("%s\n  read as %q: narrowed=%v, want %v", q, withoutSelectLists(q), got, want)
+		}
 	}
 }
 
@@ -392,7 +457,7 @@ func TestEveryPerUserQueryNamesItsPerson(t *testing.T) {
 			if strings.HasPrefix(q, "delete from personal_memories where org_id=? and team_id=?") {
 				continue
 			}
-			if hasOrgPredicate(q) && hasUserPredicate(q) {
+			if pred := withoutSelectLists(q); hasOrgPredicate(pred) && hasUserPredicate(pred) {
 				continue
 			}
 			offenders = append(offenders, f+": "+trimQuery(q))

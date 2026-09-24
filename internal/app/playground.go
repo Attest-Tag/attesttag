@@ -77,7 +77,7 @@ func (s *Store) LastToolCallID(ctx context.Context, orgID int64) int64 {
 
 // ToolCallsAfter returns one thread's calls above a watermark, oldest first — the order they ran in.
 func (s *Store) ToolCallsAfter(ctx context.Context, orgID int64, threadTS string, afterID int64) []ToolCallRow {
-	rows, err := s.db.QueryContext(ctx, toolCallCols+` where org_id=? and thread_ts=? and id>? order by id`, orgID, threadTS, afterID)
+	rows, err := s.db.QueryContext(ctx, `select `+toolCallCols+` from tool_calls where org_id=? and thread_ts=? and id>? order by id`, orgID, threadTS, afterID)
 	if err != nil {
 		return nil
 	}
