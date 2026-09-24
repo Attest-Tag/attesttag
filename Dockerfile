@@ -35,7 +35,7 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
 
 FROM litestream/litestream:0.5.17 AS litestream
 
-FROM alpine:3.22
+FROM alpine:3.24
 RUN apk add --no-cache ca-certificates tzdata poppler-utils
 WORKDIR /app
 COPY --from=build /attesttag /app/attesttag
