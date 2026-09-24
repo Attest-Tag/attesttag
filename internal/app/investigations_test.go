@@ -293,6 +293,58 @@ func TestAnInterruptedInvestigationIsClaimedAgain(t *testing.T) {
 	}
 }
 
+// One run, one worker. Each round releases every claimer on the same instant, the way the lane's
+// workers line up when they poll in step, and on Postgres that used to hand one question to
+// several of them: the thread got an answer from each, and the row was charged for every run.
+// SQLite runs this process's queries on one connection and cannot fail it, so the Postgres leg is
+// what counts.
+func TestWorkersPollingTogetherClaimARunOnce(t *testing.T) {
+	ctx := context.Background()
+	st := testStore(t)
+	for round := range 20 {
+		id, err := st.EnqueueInvestigation(ctx, &Investigation{OrgID: orgID, TeamID: "T1", Channel: "C1",
+			ThreadTS: "1700000000.000100", Question: "why?", Rounds: 40, Minutes: 12})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		claims := make(chan *Investigation, 8)
+		errs := make(chan error, 8)
+		for range 8 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				v, err := st.claimInvestigation(ctx)
+				if err != nil {
+					errs <- err
+				}
+				if v != nil {
+					claims <- v
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+		close(claims)
+		close(errs)
+		for err := range errs {
+			t.Fatal(err)
+		}
+		if len(claims) != 1 {
+			t.Fatalf("round %d: %d workers claimed investigation %d at once", round, len(claims), id)
+		}
+		v := <-claims
+		if v.ID != id || v.Attempts != 1 {
+			t.Fatalf("round %d: claimed %+v, want id %d on its first attempt", round, v, id)
+		}
+		if err := st.finishInvestigation(ctx, v.ID, "done", "", Usage{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 // A run that keeps being interrupted is given up on rather than retried forever, and the thread
 // that asked is told — a question dropped in silence is the failure nobody can see.
 func TestAnInvestigationGivesUpAfterItsAttempts(t *testing.T) {
