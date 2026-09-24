@@ -4,14 +4,20 @@
 # build context has quietly grown back.
 name: ci
 
-# Paused. Nothing runs on a branch or a pull request for now — only by hand, from the Actions
-# tab or `gh workflow run ci`. The jobs themselves are untouched and still describe what they
-# check; restoring the automatic runs is putting the two triggers below back.
+# Every pull request, whatever branch it targets, and every push to the two long-lived branches,
+# so a merge is checked again as it lands. Deployment is not here yet; when it is, it belongs in
+# its own workflow gated on this one, not as another job that a pull request could reach.
 on:
+  pull_request:
+  push:
+    branches: [main, testing]
   workflow_dispatch:
-  # pull_request:
-  # push:
-  #   branches: [main]
+
+# A new push to a pull request makes the run for the previous one worthless. Pushes to main and
+# testing are not cancelled, so each merge keeps its own result.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -40,14 +46,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: "22", cache: npm, cache-dependency-path: ui/package-lock.json }
+        with: { node-version: "24", cache: npm, cache-dependency-path: ui/package-lock.json }
       - uses: actions/setup-go@v7
         with: { go-version-file: go.mod, cache: true }
       # The console is embedded with //go:embed, so it has to exist before anything compiles.
       - run: cd ui && npm ci --no-audit --no-fund && npm run build
       - run: go vet ./...
+      # -skip TestEvals, as `make test` does: it costs money and needs a running bot.
       - name: go test
-        run: go test ./...
+        run: go test -skip TestEvals ./...
         env:
           TEST_DATABASE_URL: ${{ matrix.dialect == 'postgres' && 'postgres://postgres:test@localhost:5432/attesttag_test?sslmode=disable' || '' }}
 
@@ -57,10 +64,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: "22", cache: npm, cache-dependency-path: ui/package-lock.json }
+        with: { node-version: "24", cache: npm, cache-dependency-path: ui/package-lock.json }
       - run: cd ui && npm ci --no-audit --no-fund
       - run: cd ui && npx tsc --noEmit
       - run: cd ui && npm run build # the static export the binary embeds
+
+  # The deploy scripts against fake aws/az/gcloud/docker CLIs — `make test-deploy`. No cloud
+  # account and no credentials; deploy/test/README.md says what it does and does not prove.
+  deploy-scripts:
+    name: deploy scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+      - run: ./deploy/test/run.sh
 
   image:
     name: image builds for both architectures
