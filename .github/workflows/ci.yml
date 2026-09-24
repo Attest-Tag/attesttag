@@ -4,11 +4,12 @@
 # build context has quietly grown back.
 name: ci
 
-# Every pull request, whatever branch it targets, and every push to the two long-lived branches,
-# so a merge is checked again as it lands. Deployment is not here yet; when it is, it belongs in
+# Every pull request into the two long-lived branches and every push to them, so a merge is
+# checked again as it lands. Both branches require these jobs to pass before a merge. Deployment is not here yet; when it is, it belongs in
 # its own workflow gated on this one, not as another job that a pull request could reach.
 on:
   pull_request:
+    branches: [main, testing]
   push:
     branches: [main, testing]
   workflow_dispatch:
@@ -51,10 +52,21 @@ jobs:
         with: { go-version-file: go.mod, cache: true }
       # The console is embedded with //go:embed, so it has to exist before anything compiles.
       - run: cd ui && npm ci --no-audit --no-fund && npm run build
+      # A throwaway database, so durability buys nothing. With an fsync on every commit the
+      # suite ran past go test's default ten minutes on a hosted runner; locally it takes two.
+      - name: Postgres without fsync
+        if: matrix.dialect == 'postgres'
+        env: { PGPASSWORD: test }
+        run: |
+          psql -h localhost -U postgres -v ON_ERROR_STOP=1 \
+            -c "alter system set fsync = off" \
+            -c "alter system set synchronous_commit = off" \
+            -c "alter system set full_page_writes = off" \
+            -c "select pg_reload_conf()"
       - run: go vet ./...
       # -skip TestEvals, as `make test` does: it costs money and needs a running bot.
       - name: go test
-        run: go test -skip TestEvals ./...
+        run: go test -skip TestEvals -timeout 30m ./...
         env:
           TEST_DATABASE_URL: ${{ matrix.dialect == 'postgres' && 'postgres://postgres:test@localhost:5432/attesttag_test?sslmode=disable' || '' }}
 

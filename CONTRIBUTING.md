@@ -53,7 +53,7 @@ createdb attesttag_test
 TEST_DATABASE_URL="postgres://$(whoami)@localhost:5432/attesttag_test?sslmode=disable" go test ./...
 ```
 
-CI runs these on every pull request and on every push to `main` and `testing`, but run them
+CI runs these on every pull request into `main` or `testing`, and a merge needs them green; run them
 yourself before you open one — it is quicker than waiting for a red check.
 
 A schema change is a new migration, written twice under the same number:

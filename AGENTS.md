@@ -34,7 +34,7 @@ make test    # go vet ./... && go test -skip TestEvals ./...
 ```
 
 `make test` is the gate. `TestEvals` is skipped because it costs money and needs a running bot
-(`make evals` runs it deliberately). CI (`.github/workflows/ci.yml`) runs it on every pull request, but run it yourself first;
+(`make evals` runs it deliberately). CI (`.github/workflows/ci.yml`) runs it on every pull request into `main` or `testing` and blocks the merge until it passes, but run it yourself first;
 anything that touches SQL should also pass against Postgres (`TEST_DATABASE_URL`, see
 [`CONTRIBUTING.md`](CONTRIBUTING.md)).
 
