@@ -57,7 +57,7 @@ jobs:
       TEST_DATABASE_URL: ${{ matrix.dialect == 'postgres' && 'postgres://postgres:test@localhost:5432/attesttag_test?sslmode=disable' || '' }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with: { node-version: "24", cache: npm, cache-dependency-path: ui/package-lock.json }
       - uses: actions/setup-go@v7
         with: { go-version-file: go.mod, cache: true }
@@ -80,7 +80,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with: { node-version: "24", cache: npm, cache-dependency-path: ui/package-lock.json }
       - run: cd ui && npm ci --no-audit --no-fund
       - run: cd ui && npx tsc --noEmit
