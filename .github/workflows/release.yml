@@ -68,7 +68,7 @@ jobs:
 
       - name: Work out the tags
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ github.repository }}
           # A deploy template pins the moving minor (:1.4), so a restart brings security fixes
@@ -147,7 +147,7 @@ jobs:
           REGISTRY: ${{ env.REGISTRY }}
 
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ steps.names.outputs.worker }}
           tags: |
@@ -174,7 +174,7 @@ jobs:
 
       # Java and .NET repositories run on a heavier image built from the one above.
       - id: metajvm
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ steps.names.outputs.jvm }}
           tags: |
