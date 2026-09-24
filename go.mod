@@ -2,6 +2,8 @@ module attesttag
 
 go 1.26.0
 
+toolchain go1.27.0
+
 require (
 	cloud.google.com/go/compute/metadata v0.9.1
 	cloud.google.com/go/storage v1.68.0
