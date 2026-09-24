@@ -3,7 +3,7 @@
 The container images are the short way in ([`deploy/README.md`](../deploy/README.md)).
 This is the long way: a Go toolchain, a Node toolchain, and the binary in your hands.
 
-Requirements: Go 1.25.13 or newer, Node 22 (to build the console), and `pdftotext` from poppler
+Requirements: Go 1.26 or newer, Node 22 (to build the console), and `pdftotext` from poppler
 if you want PDF support (`brew install poppler` on macOS, `apt install poppler-utils` on Debian).
 You also need a Slack app — [`slack-app.md`](slack-app.md) — a public HTTPS address for Slack to
 reach it on ([`deploy/docs/https.md`](../deploy/docs/https.md)), and a model key.

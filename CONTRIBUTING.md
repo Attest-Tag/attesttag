@@ -5,7 +5,7 @@ than you might think — a corrected sentence in the README is worth having.
 
 ## Getting it running
 
-You need **Go 1.25.13** or newer, **Node 22**, and `pdftotext` (from poppler) on your PATH for
+You need **Go 1.26** or newer, **Node 22**, and `pdftotext` (from poppler) on your PATH for
 PDF indexing. Then:
 
 ```bash

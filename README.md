@@ -9,7 +9,7 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="MIT licence" src="https://img.shields.io/badge/licence-MIT-blue.svg"></a>
-  <img alt="Go 1.25" src="https://img.shields.io/badge/go-1.25-00ADD8.svg">
+  <img alt="Go 1.26" src="https://img.shields.io/badge/go-1.26-00ADD8.svg">
   <img alt="linux/amd64 and linux/arm64" src="https://img.shields.io/badge/arch-amd64%20%7C%20arm64-lightgrey.svg">
 </p>
 

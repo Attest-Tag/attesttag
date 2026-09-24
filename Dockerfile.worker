@@ -61,7 +61,7 @@ RUN uv tool install poetry && uv tool install pipenv \
 # Go from the official image rather than a pinned tarball: one line covers amd64 and the arm64 of
 # a laptop build, and /usr/local/go/bin is where the worker's baseEnv already looks. GOTOOLCHAIN
 # is auto there, so a repository that asks for a newer Go fetches it into the job's module cache.
-COPY --from=golang:1.25.13-bookworm /usr/local/go /usr/local/go
+COPY --from=golang:1.27.0-bookworm /usr/local/go /usr/local/go
 # Rust: the minimal profile plus rustfmt and clippy, because a repository's `make test` tends to
 # run those two before `cargo test`. Both homes sit outside any HOME — the worker gives each job
 # its own — and rustup's proxies are found on PATH.
