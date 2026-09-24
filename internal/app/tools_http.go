@@ -30,7 +30,9 @@ func (a *Agent) httpTool(c *Call) Tool {
 	// not be paying prompt for a parameter it can never need.
 	if shared := c.Access.SharedHosts(); len(shared) > 0 {
 		b.WriteString(" More than one connection covers " + strings.Join(shared, "; ") +
-			" — pass connection with the name to pick one. If it matters which and the request does not say, ask before calling.")
+			" — pass connection with the name to pick one. Left out, the proxy uses the connection whose path matches most " +
+			"closely, and the asker's own account before a shared one; each result says which answered. If it matters which " +
+			"and the request does not say, ask before calling.")
 	}
 	return Tool{
 		Name: "http_request", Desc: b.String(),
@@ -133,8 +135,8 @@ func (a *Agent) proxied(ctx context.Context, c *Call, p ProxyRequest) (string, e
 				return "", err
 			}
 			c.writesRun++
-			return fmt.Sprintf("HTTP %d (ran without asking: this routine is set to confirm its own writes)%s\n%s%s",
-				resp.Status, viewLine(resp.Body), resp.Body, bodyNote(resp)), nil
+			return fmt.Sprintf("HTTP %d%s (ran without asking: this routine is set to confirm its own writes)%s\n%s%s%s",
+				resp.Status, viaLine(resp), viewLine(resp.Body), resp.Body, bodyNote(resp), connNote(resp)), nil
 		}
 		// An allow rule may cover it; otherwise hold it for a human. The second description is
 		// the one a turn a forwarded email started is judged on — the same request with the body
@@ -148,8 +150,8 @@ func (a *Agent) proxied(ctx context.Context, c *Call, p ProxyRequest) (string, e
 			// Counted like the autoConfirm branch above: both are writes that happened with
 			// nobody pressing anything, which is what the count is for.
 			c.writesRun++
-			return fmt.Sprintf("HTTP %d (ran without asking: pre-approved by the allow rule %q)%s\n%s%s",
-				resp.Status, rule, viewLine(resp.Body), resp.Body, bodyNote(resp)), nil
+			return fmt.Sprintf("HTTP %d%s (ran without asking: pre-approved by the allow rule %q)%s\n%s%s%s",
+				resp.Status, viaLine(resp), rule, viewLine(resp.Body), resp.Body, bodyNote(resp), connNote(resp)), nil
 		}
 		if c.Silent {
 			return c.silentRefusal(strings.ToUpper(p.Method) + " " + p.URL), nil
@@ -166,7 +168,73 @@ func (a *Agent) proxied(ctx context.Context, c *Call, p ProxyRequest) (string, e
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("HTTP %d%s\n%s%s", resp.Status, viewLine(resp.Body), resp.Body, bodyNote(resp)), nil
+	return fmt.Sprintf("HTTP %d%s%s\n%s%s%s", resp.Status, viaLine(resp), viewLine(resp.Body), resp.Body, bodyNote(resp), connNote(resp)), nil
+}
+
+// viaLine says which credential answered, whenever that is not the only one it could have been
+// or it is somebody's own account. Without it the model guesses, and it guessed wrong in the
+// way that costs most: a Drive service account's shared folder reported as "your own Drive",
+// and a service account's missing scope reported as the person's grant, sending them round
+// the consent screen three times for a token that was never the one in use.
+func viaLine(resp *ProxyResponse) string {
+	if resp == nil || resp.Conn == nil || resp.Account == "" && len(resp.Others) == 0 && resp.Skipped == "" {
+		return ""
+	}
+	s := fmt.Sprintf(" via %q", resp.Conn.Name)
+	switch {
+	case resp.Account != "":
+		s += " as " + resp.Account
+	case isPersonal(resp.Conn):
+		s += " as the requester"
+	default:
+		s += " (shared credential)"
+	}
+	return s
+}
+
+// connNote is what the model needs to know about the credential after reading the body: that a
+// shared one stood in for the asker's own, or that the service refused it for a scope it does
+// not hold — and whose grant that is, since only a personal one is fixed by reconnecting.
+func connNote(resp *ProxyResponse) string {
+	if resp == nil || resp.Conn == nil {
+		return ""
+	}
+	quoted := make([]string, len(resp.Others))
+	for i, o := range resp.Others {
+		quoted[i] = strconv.Quote(o)
+	}
+	var b strings.Builder
+	if resp.Skipped != "" {
+		fmt.Fprintf(&b, "\n\n[answered by the shared connection %q because the requester has not connected their own %q. "+
+			"This is what the shared credential can see, not their own account: say so, and offer them a Connect link for %q "+
+			"if they meant their own.]", resp.Conn.Name, resp.Skipped, resp.Skipped)
+	}
+	if resp.Status == 403 && scopeRefusal(resp.Body) {
+		if isPersonal(resp.Conn) {
+			fmt.Fprintf(&b, "\n\n[refused for a missing scope on the requester's own %q sign-in: what they granted does not "+
+				"include this. Send a fresh Connect link and ask them to leave that permission ticked.]", resp.Conn.Name)
+		} else {
+			fmt.Fprintf(&b, "\n\n[refused for a missing scope on %q, a shared credential. It is not the requester's grant, "+
+				"so reconnecting their account will not change it.", resp.Conn.Name)
+			if len(quoted) > 0 {
+				fmt.Fprintf(&b, " Also covering this URL: %s — retry with connection set to the one meant.", strings.Join(quoted, ", "))
+			}
+			b.WriteString("]")
+		}
+	}
+	return b.String()
+}
+
+// scopeRefusal recognises a 403 that is about the token's scopes rather than the caller's
+// permissions on the thing: Google's wording, its error reason, and RFC 6750's error code.
+func scopeRefusal(body string) bool {
+	b := strings.ToLower(body)
+	for _, s := range []string{"insufficient authentication scopes", "access_token_scope_insufficient", "insufficient_scope"} {
+		if strings.Contains(b, s) {
+			return true
+		}
+	}
+	return false
 }
 
 // bodyNote says that a response was cut short, and what to do about it. The proxy has always
