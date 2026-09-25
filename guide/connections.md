@@ -108,8 +108,13 @@ in-process proxy that:
    `.` or `..` segment is refused rather than resolved, because the path that was checked has to
    be the path that is sent. Two connections may share a host — Drive and Calendar are both
    `www.googleapis.com` — so a rule that matches the host but not the path or the method is
-   passed over rather than treated as the answer. Only public addresses on ports 80 and 443 are
-   reachable, and the address is checked again when the connection is dialled.
+   passed over rather than treated as the answer. Where several still match, the longest matching
+   prefix wins (a trailing slash does not count), then the asker's own account over a shared
+   credential, then the narrowest grant; a request may name the connection it means instead. For
+   somebody who has not connected their own account, a read goes to a shared credential meant for
+   the same service — labelled as the shared view — and a write asks them to connect. Only public
+   addresses on ports 80 and 443 are reachable, and the address is checked again when the
+   connection is dialled.
 3. Injects the credential at the network edge, and only over https: a URL a connection matches
    on plain http is refused. An `Authorization`, `Cookie` or `Host` header the model wrote is
    dropped. Requests time out after 30 seconds and redirects are not followed, and a request that

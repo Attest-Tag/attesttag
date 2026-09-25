@@ -915,6 +915,14 @@ func (a *Agent) toolsFor(ctx context.Context, c *Call) map[string]Tool {
 			}
 		}
 	}
+	// Drive has tools of its own wherever the channel reaches one, the company's or somebody's own
+	// kind, and without an admin turning a pack on: one http_request can ask only one Drive, and
+	// which one is exactly the question it gets wrong (tools_drive.go).
+	if company, own := drivesOf(c.Access); len(company)+len(own) > 0 {
+		for _, dt := range a.driveTools() {
+			out[dt.Name] = dt
+		}
+	}
 	// Connecting an account is the person's own to do, so the tool that hands them the link is
 	// offered wherever one of these is in reach — and in a channel that has not been given one,
 	// wherever the organisation has one to connect at all. It sends a direct message, which is
