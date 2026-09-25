@@ -207,9 +207,10 @@ under `connections.manage`: `POST /api/github/repos` lists what a `token`, a sav
 or `repos` with one of those three, or attaches saved `connection_ids`; `POST /api/repos` saves
 without attaching anywhere. `default_repo` is set on `PUT /api/scopes/{id}`. Each repository row
 also carries a **recipe** — how the fix worker sets it up, builds it and
-tests it (`recipe` on `PUT /api/connections/{id}`); leave it empty and the worker works it out
-from the clone and writes back what it found, so the second job on a repository starts from what
-the first one learned. The older single `test_cmd` still means what it always did.
+tests it (`recipe` on `PUT /api/connections/{id}`); leave it empty and every job works it out
+from the clone, per package. What the first job found is kept on the row only to route later jobs
+to the right worker image — it never decides what a later job runs. The older single `test_cmd`
+still means what it always did.
 
 ## Setup links
 

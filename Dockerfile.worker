@@ -7,9 +7,11 @@
 #   baked in   — Python 3.14 + uv, Node 22 + npm, Go, Rust, and a JRE-less JDK-free base. These
 #                are the common cases and are worth the pull.
 #   mise       — everything else, and every *other version* of the above, fetched per job from
-#                what the repository itself pins (.tool-versions, .nvmrc, .python-version,
-#                rust-toolchain.toml, .java-version). The fetch lands in the job cache, so the
-#                second job on a repository pays for it once (internal/worker/toolchain.go).
+#                what each folder of the repository pins (.tool-versions, mise.toml, .nvmrc,
+#                .python-version, .java-version); its shims pick the folder's version wherever
+#                a command runs. Go and Rust switch per folder on their own (GOTOOLCHAIN,
+#                rustup). The fetch lands in the job cache, so the second job on a repository
+#                pays for it once (internal/worker/toolchain.go).
 # That is what makes "any repository, any language" a matter of the repository declaring itself
 # rather than of this file growing without limit.
 #

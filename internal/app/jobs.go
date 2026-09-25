@@ -243,7 +243,13 @@ func (r *JobRunner) constraints(st Settings, conn *Connection, kind string) JobC
 		DraftPR: true, BranchPrefix: pickBranchPrefix(st.WorkerBranchPrefix, kind), BranchSuffix: st.WorkerBranchSuffix,
 		MaxRounds: engineMaxRounds}
 	if conn != nil {
-		c.TestCmd, c.Recipe = conn.TestCmd, conn.Recipe
+		c.TestCmd = conn.TestCmd
+		// Only a recipe somebody set steers the worker. One an earlier job worked out and
+		// rememberRecipe kept is about whatever package that job was about; handed on, it
+		// overrode detection and pinned every later job in a monorepo to the first one's folder.
+		if conn.Recipe.SetByAdmin() {
+			c.Recipe = conn.Recipe
+		}
 		if clamped := clampJobTimeout(c.TimeoutS, conn); clamped != c.TimeoutS {
 			slog.Info("job timeout clamped to the life of a GitHub App token",
 				"repo", conn.Repo, "setting_s", c.TimeoutS, "timeout_s", clamped)
@@ -929,7 +935,7 @@ func describeJobDispatch(spec JobSpec) string {
 // connection is quoted; otherwise the honest answer is that it will be worked out from the
 // clone, which is a different promise from naming a command.
 func describeChecks(spec JobSpec) string {
-	if r := spec.Constraints.Recipe; r != nil && r.Runnable() {
+	if r := spec.Constraints.Recipe; r.SetByAdmin() && r.Runnable() {
 		return r.Describe() + " (set in the console)"
 	}
 	if cmd := strings.TrimSpace(spec.Constraints.TestCmd); cmd != "" {
@@ -938,11 +944,12 @@ func describeChecks(spec JobSpec) string {
 	return "worked out from the repository — its .attest/recipe.yaml if it has one, else its build files. The result says what ran."
 }
 
-// rememberRecipe writes back what the worker resolved, so the second job on a repository starts
-// from what the first one learned: the console shows it, the confirm card quotes it, and the
-// dispatcher can pick a worker image for its ecosystem. Only a recipe that was worked out from
-// the clone is stored — one an admin or the repository already authored is theirs, and
-// overwriting it with our guess would be rude and wrong.
+// rememberRecipe writes back what the first job on a repository worked out, so the dispatcher
+// can pick a worker image for its ecosystem (workerFor). It never steers a later job:
+// constraints hands the worker only a recipe somebody set, and every job detects its own
+// packages afresh. Only a recipe that was worked out from the clone is stored — one an admin or
+// the repository already authored is theirs, and overwriting it with our guess would be rude
+// and wrong.
 func (r *JobRunner) rememberRecipe(ctx context.Context, j *Job, res *JobResult) {
 	if res == nil || res.Recipe == nil || res.Recipe.Source != RecipeSourceDetected || j.ConnectionID == 0 {
 		return

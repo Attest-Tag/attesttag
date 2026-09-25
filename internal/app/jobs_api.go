@@ -109,16 +109,32 @@ func (b *Bot) verifyWorkerOIDC(r *http.Request) bool {
 // OpenAI and OpenRouter keys take; an Azure key is thirty-two hex characters that look like
 // nothing in particular, and a worker log is exactly where one would be printed.
 func (r *JobRunner) scrub(ctx context.Context, j *Job, s string) string {
-	s = redact(s)
-	if conn, err := r.store.Connection(ctx, j.OrgID, j.ConnectionID); err == nil && conn != nil {
-		s = r.proxy.scrubSecrets(conn, s)
+	return r.scrubber(ctx, j)(s)
+}
+
+// scrubber looks the job's secrets up once and returns what scrub does with them, for a caller
+// with many strings to clean: a result carries a dozen outputs, and each lookup is a query.
+func (r *JobRunner) scrubber(ctx context.Context, j *Job) func(string) string {
+	conn, err := r.store.Connection(ctx, j.OrgID, j.ConnectionID)
+	if err != nil {
+		conn = nil
 	}
+	var modelKey string
 	if j.KeyOwner == keyOwnerOrg && r.proxy != nil && r.proxy.sealer != nil {
 		if key, ok, err := r.store.ModelKeySecret(ctx, j.OrgID, r.proxy.sealer); err == nil && ok && len(key) >= 8 {
-			s = strings.ReplaceAll(s, key, "[redacted-secret]")
+			modelKey = key
 		}
 	}
-	return s
+	return func(s string) string {
+		s = redact(s)
+		if conn != nil {
+			s = r.proxy.scrubSecrets(conn, s)
+		}
+		if modelKey != "" {
+			s = strings.ReplaceAll(s, modelKey, "[redacted-secret]")
+		}
+		return s
+	}
 }
 
 func tooBig(w http.ResponseWriter, err error) bool {
@@ -336,13 +352,26 @@ func (b *Bot) handleJobResult(w http.ResponseWriter, r *http.Request, j *Job) {
 		bad(w, fmt.Errorf("status must be succeeded, failed, cancelled or timeout"))
 		return
 	}
-	scrub := func(s string, n int) string { return truncate(b.jobs.scrub(ctx, j, s), n) }
+	clean := b.jobs.scrubber(ctx, j)
+	scrub := func(s string, n int) string { return truncate(clean(s), n) }
 	res.Summary = scrub(res.Summary, JobSummaryMaxBytes)
-	res.LogTail = scrub(res.LogTail, JobLogTailMaxBytes)
+	res.LogTail = KeepTail(clean(res.LogTail), JobLogTailMaxBytes)
 	res.Error.Message = scrub(res.Error.Message, 2000)
 	res.TicketComment = scrub(res.TicketComment, 8000)
-	res.Tests.Before.Output = scrub(res.Tests.Before.Output, 4000)
-	res.Tests.After.Output = scrub(res.Tests.After.Output, 4000)
+	res.CheckNote = scrub(oneLine(res.CheckNote), 500)
+	cleanChecks(clean, JobCheckOutputMaxBytes, &res.Setup, &res.Build, &res.Tests, &res.Lint)
+	cleanRecipeNote(clean, res.Recipe)
+	if len(res.Packages) > JobCheckedPackagesMax-1 {
+		res.Packages = res.Packages[:JobCheckedPackagesMax-1]
+	}
+	for i := range res.Packages {
+		p := &res.Packages[i]
+		p.Workdir = truncate(oneLine(p.Workdir), 200)
+		p.Note, p.Skipped = scrub(oneLine(p.Note), 500), scrub(oneLine(p.Skipped), 500)
+		cleanChecks(clean, JobPackageOutputMaxBytes, &p.Setup, &p.Build, &p.Tests, &p.Lint)
+		cleanRecipeNote(clean, p.Recipe)
+	}
+	res.Unchecked = cleanList(res.Unchecked, JobUncheckedMax, 200)
 	if len(res.FilesChanged) > 200 {
 		res.FilesChanged = res.FilesChanged[:200]
 	}
@@ -352,6 +381,23 @@ func (b *Bot) handleJobResult(w http.ResponseWriter, r *http.Request, j *Job) {
 	b.jobs.priceJobUsage(ctx, j, &res.Usage)
 	b.jobs.finish(ctx, j.OrgID, j.ID, res.Status, &res)
 	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// cleanChecks scrubs every output a package's gates carry and cuts each to its tail, which is
+// where a failure is. The build, linter and install print what the repository's own code
+// printed as readily as the suite does, so none of them reaches storage unscrubbed.
+func cleanChecks(clean func(string) string, n int, setup *JobStepRun, checks ...*JobCheck) {
+	setup.Output = KeepTail(clean(setup.Output), n)
+	for _, c := range checks {
+		c.Before.Output, c.After.Output = KeepTail(clean(c.Before.Output), n), KeepTail(clean(c.After.Output), n)
+		c.Skipped = truncate(clean(c.Skipped), 500)
+	}
+}
+
+func cleanRecipeNote(clean func(string) string, r *Recipe) {
+	if r != nil {
+		r.Why = truncate(clean(r.Why), 500)
+	}
 }
 
 func (b *Bot) handleJobPoll(w http.ResponseWriter, r *http.Request, j *Job) {
