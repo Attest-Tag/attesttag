@@ -93,7 +93,7 @@ func (b *Bot) needsVerifiedEmail(ctx context.Context, u *AdminUser, perm Permiss
 		return ""
 	}
 	if b.emailUnverified(ctx, u) {
-		return "Confirm your email address first: the link is in your inbox, and Settings → Account can send it again."
+		return "Confirm your email address first: the link is in your inbox, and Settings → General can send it again."
 	}
 	return ""
 }
