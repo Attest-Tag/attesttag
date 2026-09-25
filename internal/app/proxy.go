@@ -761,7 +761,11 @@ func coveringConns(acc *Access, method string, u *url.URL) ([]coverage, string) 
 				for _, pfx := range r.Conn.PathPrefixes {
 					if strings.HasPrefix(u.Path, pfx) {
 						ok = true
-						spec = max(spec, len(pfx))
+						// Measured without a trailing slash. "/drive/v3/" claims nothing that
+						// "/drive/v3" does not, but counted as written it is one longer, and one
+						// is enough to put a shared credential ahead of the asker's own account
+						// for every Drive call. The console takes either spelling without comment.
+						spec = max(spec, len(strings.TrimRight(pfx, "/")))
 					}
 				}
 				if !ok {
@@ -924,11 +928,13 @@ func (p *Proxy) Do(ctx context.Context, orgID int64, acc *Access, req ProxyReque
 			// still be answered by a shared credential covering the same URL, so long as the
 			// answer says whose view it is. A write cannot: doing it as someone else is a
 			// different act from the one they asked for, so that still asks them to connect.
-			// Only a stand-in claiming this path as closely will do: a service account that
-			// covers the whole host was ranked below their account because it is not meant for
-			// this URL, and answering with its 403 would hide the Connect link they need.
+			// Only a stand-in meant for this URL will do: one claiming the path as closely, or one
+			// made for this service that claims the whole host — which is how a Drive service
+			// account is made, with no path prefixes at all. Anything else covering the host was
+			// ranked below their account because it is not meant for this URL, and answering with
+			// its 403 would hide the Connect link they need.
 			for _, c := range covering {
-				if !isPersonal(c.conn) && c.spec == spec {
+				if !isPersonal(c.conn) && (c.spec == spec || c.spec == 0 && presetServes(c.conn, u.Path)) {
 					skipped, conn = conn.Name, c.conn
 					break
 				}
