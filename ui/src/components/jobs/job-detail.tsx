@@ -7,12 +7,15 @@ import { ErrorBanner } from "@/components/core/error-banner";
 import { StatusChip } from "@/components/core/status-chip";
 import {
   JOB_PHASES,
+  checkedPackages,
+  describeRecipe,
   formatJobCost,
   formatJobDuration,
   jobBranchShape,
   jobConsoleLabel,
   jobStatusVariant,
   phaseGlyph,
+  recipeSourceLabel,
 } from "@/components/jobs/job-format";
 import { BranchLink, RepoLink } from "@/components/jobs/repo-link";
 import { Badge } from "@/components/ui/badge";
@@ -25,7 +28,16 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
-import { isJobActive, useApi, type JobDetail, type JobEvent, type JobTestRun } from "@/lib/api";
+import {
+  isJobActive,
+  useApi,
+  type JobCheck,
+  type JobDetail,
+  type JobEvent,
+  type JobPackage,
+  type JobResult,
+  type JobTestRun,
+} from "@/lib/api";
 import { formatBytes, formatDateTime, formatNumber } from "@/lib/format";
 
 export function JobDetailDialog({
@@ -262,20 +274,7 @@ function JobDetailBody({ id }: { id: number }) {
         </Section>
       )}
 
-      {result && (
-        <Section title="Tests">
-          <p className="font-mono text-xs text-muted-foreground">
-            {result.tests.command || "no test suite detected"}
-          </p>
-          {result.tests.skipped && (
-            <p className="mt-1 text-xs text-muted-foreground">Not run: {result.tests.skipped}.</p>
-          )}
-          <div className="mt-2 space-y-2">
-            <TestRunRow label="Before" run={result.tests.before} />
-            <TestRunRow label="After" run={result.tests.after} />
-          </div>
-        </Section>
-      )}
+      {result && <Checks result={result} />}
 
       {result && (result.diff_stat.files > 0 || (result.files_changed?.length ?? 0) > 0) && (
         <Section title="Diff">
@@ -364,28 +363,170 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
-function TestRunRow({ label, run }: { label: string; run: JobTestRun }) {
+/**
+ * What the job checked, package by package: the primary first, then each other package the
+ * brief pointed at, then the packages the change touched that nothing checked, so their silence
+ * is not read as a pass.
+ */
+function Checks({ result }: { result: JobResult }) {
+  const packages = checkedPackages(result);
+  const several = packages.length > 1;
+  const unchecked = result.unchecked ?? [];
+  return (
+    <Section title="Checks">
+      <div className="space-y-5">
+        {packages.map((p, i) => (
+          <PackageChecks key={`${i}:${p.workdir}`} pkg={p} several={several} />
+        ))}
+        {unchecked.length > 0 && (
+          <p className="text-sm">
+            Also changed, not checked:{" "}
+            {unchecked.map((dir, i) => (
+              <span key={`${i}:${dir}`}>
+                {i > 0 && ", "}
+                <DirName dir={dir} />
+              </span>
+            ))}
+          </p>
+        )}
+      </div>
+    </Section>
+  );
+}
+
+/** A gate with something to show: a command, or a run. */
+const hasCheck = (c: JobCheck) => !!c.command || c.before.ran || c.after.ran;
+
+function PackageChecks({ pkg: p, several }: { pkg: JobPackage; several: boolean }) {
+  const setup = p.setup?.ran ? p.setup : null;
+  const build = hasCheck(p.build) ? p.build : null;
+  const lint = p.lint?.after.ran ? p.lint : null;
+  // Rows name their gate once there is more to show than the one suite: an install, a build, a
+  // linter, another package. A row written before those were steps of their own has only the
+  // suite, and reads the way the Tests section always did.
+  const named = several || !!setup || !!build || !!lint;
+  // The recipe line already gives the reason nothing could run; it is not said twice.
+  const testsSkipped = p.tests.skipped && p.tests.skipped !== p.recipe?.why ? p.tests.skipped : "";
+  return (
+    <div className="space-y-2">
+      {several && (
+        <h4 className="text-sm font-medium">
+          <DirName dir={p.workdir} />
+          {p.recipe?.ecosystem && (
+            <span className="font-normal text-muted-foreground"> · {p.recipe.ecosystem}</span>
+          )}
+        </h4>
+      )}
+      {p.recipe && (
+        <p className="text-xs text-muted-foreground">
+          {/* Commands read best in mono; a recipe with none is a sentence saying why. */}
+          <span className={p.recipe.build || p.recipe.lint || p.recipe.test ? "font-mono" : undefined}>
+            {describeRecipe(p.recipe)}
+          </span>{" "}
+          — {recipeSourceLabel(p.recipe.source)}
+        </p>
+      )}
+      {p.note && (
+        <div className="rounded-lg border border-warning/30 bg-warning-soft p-3 text-sm">{p.note}.</div>
+      )}
+      {p.skipped && <p className="text-xs text-muted-foreground">Not checked: {p.skipped}.</p>}
+      {named ? (
+        <>
+          {setup && (
+            <RunRow label="Install" run={setup} okLabel="ok" wide>
+              {setup.command && <span className="font-mono">{setup.command}</span>}
+            </RunRow>
+          )}
+          {!p.skipped && (
+            <>
+              {build && (
+                <>
+                  <RunRow label="Build before" run={build.before} wide />
+                  <RunRow label="Build after" run={build.after} wide />
+                </>
+              )}
+              {hasCheck(p.tests) ? (
+                <>
+                  <RunRow label="Tests before" run={p.tests.before} counts wide />
+                  <RunRow label="Tests after" run={p.tests.after} counts wide />
+                </>
+              ) : (
+                <RunRow label="Tests" run={p.tests.after} wide>
+                  {testsSkipped || "no test suite detected"}
+                </RunRow>
+              )}
+              {lint && <RunRow label="Lint after" run={lint.after} wide />}
+            </>
+          )}
+        </>
+      ) : (
+        <div>
+          {!p.recipe && (
+            <p className="font-mono text-xs text-muted-foreground">{p.tests.command || "no test suite detected"}</p>
+          )}
+          {testsSkipped && <p className="mt-1 text-xs text-muted-foreground first:mt-0">Not run: {testsSkipped}.</p>}
+          <div className="mt-2 space-y-2 first:mt-0">
+            <RunRow label="Before" run={p.tests.before} counts />
+            <RunRow label="After" run={p.tests.after} counts />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** A package directory as the report names it: the root in words, anything else as its path. */
+function DirName({ dir }: { dir: string }) {
+  if (!dir || dir === ".") return <>repository root</>;
+  return <span className="font-mono">{dir}</span>;
+}
+
+function RunRow({
+  label,
+  run,
+  counts = false,
+  wide = false,
+  okLabel = "passed",
+  children,
+}: {
+  label: string;
+  run: JobTestRun;
+  /** A suite says how many passed and failed; a build, a linter or an install has no count to give. */
+  counts?: boolean;
+  /** Room for a label that names the gate as well as when it ran: "Tests before". */
+  wide?: boolean;
+  /** The chip's word for a run that went well. */
+  okLabel?: string;
+  /** Quieter detail after the result: the command an install ran, why a suite did not run. */
+  children?: React.ReactNode;
+}) {
   const chip = !run.ran ? (
     <StatusChip variant="neutral">not run</StatusChip>
   ) : run.ok ? (
-    <StatusChip variant="success">passed</StatusChip>
+    <StatusChip variant="success">{okLabel}</StatusChip>
   ) : (
     <StatusChip variant="danger">failed</StatusChip>
   );
+  const facts = run.ran
+    ? [counts ? `${run.passed ?? 0} passed, ${run.failed ?? 0} failed` : "", run.seconds ? `${run.seconds.toFixed(1)} s` : ""]
+        .filter(Boolean)
+        .join(" · ")
+    : "";
   return (
     <div>
       <div className="flex flex-wrap items-center gap-2 text-sm">
-        <span className="w-14 text-muted-foreground">{label}</span>
+        <span className={wide ? "w-28 text-muted-foreground" : "w-14 text-muted-foreground"}>{label}</span>
         {chip}
-        {run.ran && (
+        {(facts || children) && (
           <span className="text-xs text-muted-foreground">
-            {run.passed ?? 0} passed, {run.failed ?? 0} failed
-            {run.seconds ? ` · ${run.seconds.toFixed(1)} s` : ""}
+            {facts}
+            {facts && children && " · "}
+            {children}
           </span>
         )}
       </div>
       {run.output && (
-        <Disclosure label="Output" className="mt-1 pl-16">
+        <Disclosure label="Output" className={wide ? "mt-1 pl-30" : "mt-1 pl-16"}>
           <pre className="max-h-48 overflow-auto rounded-lg border bg-background p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap break-words">
             {run.output}
           </pre>
