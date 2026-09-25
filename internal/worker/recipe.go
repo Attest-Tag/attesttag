@@ -346,9 +346,12 @@ func (f recipeFile) recipe() (*app.Recipe, error) {
 // ---- the connection's recipe ----
 
 // connectionRecipe is what an admin set in the console: a structured recipe, or the older
-// single test command, which still means exactly what it used to.
+// single test command, which still means exactly what it used to. A recipe an earlier job
+// worked out and the bot remembered is not a decision — it is about whatever package that job
+// was about — so it never overrides what this job detects. Current bots do not send one; this
+// is for the ones that still do.
 func connectionRecipe(c *app.Recipe, legacyTestCmd string) *app.Recipe {
-	if c != nil && (c.Runnable() || len(c.Setup) > 0 || len(c.Tools) > 0 || c.Workdir != "") {
+	if c.SetByAdmin() && (c.Runnable() || len(c.Setup) > 0 || len(c.Tools) > 0 || c.Workdir != "") {
 		out := *c
 		return &out
 	}
@@ -379,20 +382,28 @@ func nonEmptyStr(a, b string) string {
 // contributes the commands.
 func detectRecipe(root string, hints []string) *app.Recipe {
 	workdir := pickWorkdir(root, hints)
-	dir := filepath.Join(root, filepath.FromSlash(workdir))
-	found := ecosystemsIn(dir)
-	if len(found) == 0 && workdir != "." { // the package directory declares nothing; try the root
-		workdir, dir = ".", root
-		found = ecosystemsIn(dir)
+	if workdir != "." && len(ecosystemsIn(filepath.Join(root, filepath.FromSlash(workdir)))) == 0 {
+		workdir = "." // the package directory declares nothing; try the root
 	}
-	r := &app.Recipe{Source: app.RecipeSourceDetected, Workdir: workdir, Tools: map[string]string{}}
-	if len(found) == 0 {
-		r.Source = app.RecipeSourceNone
-		r.Why = "no marker file for any ecosystem the worker knows (" + strings.Join(probeNames(), ", ") + ")"
+	r := detectAt(root, workdir)
+	if r.Source == app.RecipeSourceNone {
 		if pkgs := packageDirs(root, 3); len(pkgs) > 1 {
 			r.Why = fmt.Sprintf("this looks like a monorepo (%s) and nothing said which package the change is in; name a file in the brief, or set workdir in .attest/recipe.yaml",
 				strings.Join(pkgs, ", "))
 		}
+	}
+	return r
+}
+
+// detectAt works out one package directory: which ecosystems it declares, what each installs,
+// and the primary one's build, lint and test commands.
+func detectAt(root, workdir string) *app.Recipe {
+	dir := filepath.Join(root, filepath.FromSlash(workdir))
+	found := ecosystemsIn(dir)
+	r := &app.Recipe{Source: app.RecipeSourceDetected, Workdir: workdir, Tools: map[string]string{}}
+	if len(found) == 0 {
+		r.Source = app.RecipeSourceNone
+		r.Why = "no marker file for any ecosystem the worker knows (" + strings.Join(probeNames(), ", ") + ")"
 		return r
 	}
 	// Every ecosystem present installs; the first contributes the commands and names the recipe.
@@ -431,23 +442,8 @@ func detectRecipe(root string, hints []string) *app.Recipe {
 // hints, the root when it declares one, else the only child that does.
 func pickWorkdir(root string, hints []string) string {
 	for _, h := range hints {
-		h = strings.TrimSpace(strings.ReplaceAll(h, "\\", "/"))
-		if h == "" || strings.HasPrefix(h, "/") || strings.Contains(h, "..") {
-			continue
-		}
-		dir := filepath.Dir(filepath.FromSlash(h))
-		for {
-			abs := filepath.Join(root, dir)
-			if rel, err := filepath.Rel(root, abs); err != nil || strings.HasPrefix(rel, "..") {
-				break
-			}
-			if len(ecosystemsIn(abs)) > 0 {
-				return filepath.ToSlash(dir)
-			}
-			if dir == "." || dir == string(filepath.Separator) {
-				break
-			}
-			dir = filepath.Dir(dir)
+		if dir := packageOf(root, h); dir != "" {
+			return dir
 		}
 	}
 	if len(ecosystemsIn(root)) > 0 {
@@ -461,6 +457,48 @@ func pickWorkdir(root string, hints []string) string {
 		return found[0]
 	}
 	return "."
+}
+
+// packageOf is the package a path in the repository belongs to: the nearest directory at or
+// above it that declares an ecosystem — the path itself when it names such a directory — or ""
+// when nothing up to the root does. A path that is empty, absolute or climbs out of the clone
+// belongs to nothing. A deleted file still belongs to the package around where it was.
+func packageOf(root, rel string) string {
+	rel = strings.TrimSpace(strings.ReplaceAll(rel, "\\", "/"))
+	if rel == "" || strings.HasPrefix(rel, "/") || strings.Contains(rel, "..") {
+		return ""
+	}
+	dir := filepath.FromSlash(strings.TrimSuffix(rel, "/"))
+	if st, err := os.Stat(filepath.Join(root, dir)); err != nil || !st.IsDir() {
+		dir = filepath.Dir(dir)
+	}
+	for {
+		abs := filepath.Join(root, dir)
+		if r, err := filepath.Rel(root, abs); err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+			return ""
+		}
+		if len(ecosystemsIn(abs)) > 0 {
+			return filepath.ToSlash(dir)
+		}
+		if dir == "." || dir == string(filepath.Separator) {
+			return ""
+		}
+		dir = filepath.Dir(dir)
+	}
+}
+
+// isAPackage is whether a package directory is one worth checking on its own: none of its path
+// is documentation, examples, tooling or a dependency tree (notAPackage, skipDir), or hidden.
+func isAPackage(dir string) bool {
+	if dir == "." {
+		return true
+	}
+	for _, seg := range strings.Split(dir, "/") {
+		if seg == "" || strings.HasPrefix(seg, ".") || notAPackage[seg] || skipDir[seg] {
+			return false
+		}
+	}
+	return true
 }
 
 // notAPackage are directories that carry their own tooling but are never what a repository is.

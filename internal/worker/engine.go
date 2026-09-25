@@ -24,8 +24,11 @@ type Workspace struct {
 	Env             []string // the allowlisted environment every subprocess gets
 	Recipe          *app.Recipe
 	Deadline        time.Time
-	Reporter        *Reporter
-	Scrub           *Scrubber
+	// EngineStop is when the engine must stop so that every package's after-checks and the
+	// push still fit before Deadline; zero means two minutes before it.
+	EngineStop time.Time
+	Reporter   *Reporter
+	Scrub      *Scrubber
 }
 
 type Brief struct {
@@ -37,6 +40,13 @@ type Brief struct {
 	Notes    string // why nothing ran, when nothing did
 	RepoMap  string // the top of the directory tree, so the engine starts oriented
 	Conv     string // AGENTS.md / CONTRIBUTING.md, as the repository's own conventions
+	// Primary is the package Recipe describes, with the toolchains it runs on, and Extras are the
+	// other packages the job checks. Either may be nil in a brief built by hand.
+	Primary *pkgRun
+	Extras  []*pkgRun
+	// Shims is whether every folder's pinned toolchain is picked wherever a command runs, which
+	// is what makes the brief's sentence saying so true.
+	Shims bool
 }
 
 // maxRoundsFor is the engine's turn cap: the spec's, or 500 (the bot's own default).
@@ -129,22 +139,49 @@ func recipeBlock(b Brief) string {
 		}
 		w.WriteString("The harness found no build or test command for this repository (" + why + ").\n")
 		w.WriteString("Say so in your summary, and verify the change another way if you can — read the code around it carefully, since nothing here will catch a mistake for you.\n")
-		w.WriteString("</how_this_repo_is_built>\n\n")
-		return w.String()
+	} else {
+		fmt.Fprintf(&w, "Ecosystem: %s. Dependencies are already installed.\n", nonEmptyStr(r.Ecosystem, "unknown"))
+		if r.Workdir != "" && r.Workdir != "." {
+			fmt.Fprintf(&w, "Run these from %s (not the repository root):\n", r.Workdir)
+		}
+		commandLines(&w, r, b.Primary, b.Build, b.Baseline)
+		packageNotes(&w, b.Primary)
+		w.WriteString("The harness runs these again after you stop and reports the result, so run them yourself first.\n")
+		if out := strings.TrimSpace(b.Baseline.Output); out != "" && !b.Baseline.OK {
+			w.WriteString("\nTest output before your change:\n" + cut(out, 4000) + "\n")
+		} else if out := strings.TrimSpace(b.Build.Output); out != "" && !b.Build.OK {
+			w.WriteString("\nBuild output before your change:\n" + cut(out, 4000) + "\n")
+		}
 	}
-	fmt.Fprintf(&w, "Ecosystem: %s. Dependencies are already installed.\n", nonEmptyStr(r.Ecosystem, "unknown"))
-	if r.Workdir != "" && r.Workdir != "." {
-		fmt.Fprintf(&w, "Run these from %s (not the repository root):\n", r.Workdir)
+	for _, p := range b.Extras {
+		extraBlock(&w, p)
+	}
+	if b.Shims {
+		w.WriteString("\nEach folder's own toolchain pins (.nvmrc, .python-version, .tool-versions, mise.toml) are used automatically wherever a command runs, so `cd web && npm test` gets the Node that web/ pins.\n")
+	}
+	if len(b.Extras) > 0 {
+		w.WriteString("A package you change outside the ones listed here is not checked by the harness; if you change one, say so in your summary.\n")
+	}
+	w.WriteString("</how_this_repo_is_built>\n\n")
+	return w.String()
+}
+
+// commandLines are a package's build, lint and test commands, each with what it said before the
+// change, and with the environment the package's checks run in put in front of it.
+func commandLines(w *strings.Builder, r *app.Recipe, p *pkgRun, build, tests app.JobTestRun) {
+	prefix := ""
+	if p != nil && len(p.Prefix) > 0 {
+		prefix = strings.Join(p.Prefix, " ") + " "
 	}
 	for _, s := range []struct {
 		label string
 		step  *app.RecipeStep
 		res   app.JobTestRun
-	}{{"build", r.Build, b.Build}, {"lint", r.Lint, app.JobTestRun{}}, {"test", r.Test, b.Baseline}} {
+	}{{"build", r.Build, build}, {"lint", r.Lint, app.JobTestRun{}}, {"test", r.Test, tests}} {
 		if s.step == nil {
 			continue
 		}
-		fmt.Fprintf(&w, "- %s: %s", s.label, s.step.String())
+		fmt.Fprintf(w, "- %s: %s%s", s.label, prefix, s.step.String())
 		if s.res.Ran {
 			if s.res.OK {
 				w.WriteString("  (passed before your change)")
@@ -154,14 +191,40 @@ func recipeBlock(b Brief) string {
 		}
 		w.WriteString("\n")
 	}
-	w.WriteString("The harness runs these again after you stop and reports the result, so run them yourself first.\n")
-	if out := strings.TrimSpace(b.Baseline.Output); out != "" && !b.Baseline.OK {
-		w.WriteString("\nTest output before your change:\n" + cut(out, 4000) + "\n")
-	} else if out := strings.TrimSpace(b.Build.Output); out != "" && !b.Build.OK {
-		w.WriteString("\nBuild output before your change:\n" + cut(out, 4000) + "\n")
+}
+
+// packageNotes are the toolchains a package runs on and the caveats about them.
+func packageNotes(w *strings.Builder, p *pkgRun) {
+	if p == nil {
+		return
 	}
-	w.WriteString("</how_this_repo_is_built>\n\n")
-	return w.String()
+	if len(p.Tools) > 0 {
+		w.WriteString("Toolchains: " + strings.Join(p.Tools, ", ") + ".\n")
+	}
+	for _, n := range p.Notes {
+		w.WriteString("Note: " + n + ".\n")
+	}
+	if p.OldPython != "" {
+		fmt.Fprintf(w, "Its Python pin is older than anything that can be obtained, so its checks run on Python %s: run its commands exactly as listed (with the prefix). "+
+			"A failure caused only by that version difference is not the bug — do not port the code to another Python version, and say in your summary that the checks ran on %s.\n", p.OldPython, p.OldPython)
+	}
+}
+
+// extraBlock is one more package the harness checks, told the way the first one is.
+func extraBlock(w *strings.Builder, p *pkgRun) {
+	if p.Skipped != "" {
+		fmt.Fprintf(w, "\nNot checked: %s — %s.\n", folderName(p.Dir), p.Skipped)
+		return
+	}
+	r := p.Recipe
+	fmt.Fprintf(w, "\nAlso checked: %s (%s). Run these from %s:\n", folderName(p.Dir), nonEmptyStr(r.Ecosystem, "unknown"), nonEmptyStr(p.Dir, "."))
+	commandLines(w, r, p, p.Build.Before, p.Tests.Before)
+	packageNotes(w, p)
+	if out := strings.TrimSpace(p.Tests.Before.Output); out != "" && p.Tests.Before.Ran && !p.Tests.Before.OK {
+		w.WriteString("Its test output before your change:\n" + cut(out, 1500) + "\n")
+	} else if out := strings.TrimSpace(p.Build.Before.Output); out != "" && p.Build.Before.Ran && !p.Build.Before.OK {
+		w.WriteString("Its build output before your change:\n" + cut(out, 1500) + "\n")
+	}
 }
 
 // fakeEngine makes one deterministic edit without a model, so the whole pipeline runs in tests
@@ -171,21 +234,24 @@ type fakeEngine struct{}
 func (fakeEngine) Name() string { return "fake" }
 
 func (fakeEngine) Run(ctx context.Context, ws *Workspace, b Brief) (EngineResult, error) {
-	target := "README.md"
+	targets := []string{"README.md"}
 	if len(b.Spec.FilesHint) > 0 && b.Spec.FilesHint[0] != "" {
-		target = b.Spec.FilesHint[0]
+		targets = b.Spec.FilesHint
 	}
-	path := filepath.Join(ws.RepoDir, filepath.FromSlash(target))
-	if rel, err := filepath.Rel(ws.RepoDir, path); err != nil || strings.HasPrefix(rel, "..") {
-		return EngineResult{Stopped: "error"}, stepErr("engine_error", "hinted file is outside the repository")
+	for _, target := range targets {
+		path := filepath.Join(ws.RepoDir, filepath.FromSlash(target))
+		if rel, err := filepath.Rel(ws.RepoDir, path); err != nil || strings.HasPrefix(rel, "..") {
+			return EngineResult{Stopped: "error"}, stepErr("engine_error", "hinted file is outside the repository")
+		}
+		os.MkdirAll(filepath.Dir(path), 0o755)
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			return EngineResult{Stopped: "error"}, stepErr("engine_error", err.Error())
+		}
+		fmt.Fprintf(f, "\n<!-- attest_tag fix job #%d: %s -->\n", b.JobID, b.Spec.Title)
+		f.Close()
 	}
-	os.MkdirAll(filepath.Dir(path), 0o755)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return EngineResult{Stopped: "error"}, stepErr("engine_error", err.Error())
-	}
-	fmt.Fprintf(f, "\n<!-- attest_tag fix job #%d: %s -->\n", b.JobID, b.Spec.Title)
-	f.Close()
+	target := strings.Join(targets, ", ")
 	ws.Reporter.Log("fake engine: appended a marker to " + target)
 	u := app.JobUsage{In: 1000, Out: 100, CostUSD: 0.01}
 	ws.Reporter.Usage(u)

@@ -65,19 +65,6 @@ func readText(dir, name string) string {
 	return string(raw)
 }
 
-// firstLine is how the little version files are read: .nvmrc, .python-version, .ruby-version.
-func firstLine(dir, name string) string {
-	s := strings.TrimSpace(readText(dir, name))
-	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
-		s = s[:i]
-	}
-	s = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(s), "v"))
-	if len(s) > 32 || strings.ContainsAny(s, " \t/\\") {
-		return ""
-	}
-	return s
-}
-
 func hasGlob(dir, pattern string) bool {
 	hits, _ := filepath.Glob(filepath.Join(dir, pattern))
 	return len(hits) > 0
@@ -124,14 +111,13 @@ func makeTargets(dir string) map[string]bool {
 
 // ---- go ----
 
-var goVersionRe = regexp.MustCompile(`(?m)^go\s+(\d+\.\d+(?:\.\d+)?)`)
-
+// planGo pins no toolchain: the image's Go runs every module, and GOTOOLCHAIN=auto (proc.go)
+// fetches a newer one for a module whose go.mod asks for it. Pinning the go line through mise put
+// Go 1.16 ahead of everything for a module that said `go 1.16` — a toolchain from before
+// GOTOOLCHAIN existed, running a repository the image's Go builds as written.
 func planGo(dir string) app.Recipe {
 	r := app.Recipe{Ecosystem: "go", Setup: []app.RecipeStep{setupStep("go", "mod", "download")},
 		Build: step("build", "go", "build", "./..."), Test: step("test", "go", "test", "./...")}
-	if m := goVersionRe.FindStringSubmatch(readText(dir, "go.mod")); m != nil {
-		r.Tools = tools("go", m[1])
-	}
 	if exists(dir, ".golangci.yml", ".golangci.yaml", ".golangci.toml", ".golangci.json") {
 		r.Lint = step("lint", "golangci-lint", "run")
 	}
@@ -140,17 +126,11 @@ func planGo(dir string) app.Recipe {
 
 // ---- rust ----
 
-var rustChannelRe = regexp.MustCompile(`(?m)^\s*channel\s*=\s*"([^"]+)"`)
-
+// planRust pins no toolchain either: rustup's proxies in the image read rust-toolchain.toml in
+// whichever folder cargo runs and fetch that toolchain themselves.
 func planRust(dir string) app.Recipe {
 	r := app.Recipe{Ecosystem: "rust", Setup: []app.RecipeStep{setupStep("cargo", "fetch")},
 		Build: step("build", "cargo", "build", "--quiet"), Test: step("test", "cargo", "test", "--quiet")}
-	for _, f := range []string{"rust-toolchain.toml", "rust-toolchain"} {
-		if m := rustChannelRe.FindStringSubmatch(readText(dir, f)); m != nil {
-			r.Tools = tools("rust", m[1])
-			break
-		}
-	}
 	if exists(dir, "clippy.toml", ".clippy.toml") {
 		r.Lint = step("lint", "cargo", "clippy", "--quiet", "--all-targets")
 	}
@@ -160,7 +140,7 @@ func planRust(dir string) app.Recipe {
 // ---- python ----
 
 var (
-	pyRequiresRe = regexp.MustCompile(`requires-python\s*=\s*"[^0-9]*(\d+\.\d+)`)
+	pyRequiresRe = regexp.MustCompile(`requires-python\s*=\s*["']([^"']+)["']`)
 	pytestArgs   = []string{"-x", "-q", "-p", "no:cacheprovider"}
 	// compileall is the closest Python has to a compile step, and it is worth having: a syntax
 	// error is the most common way a change breaks a repository with no suite to catch it.
@@ -209,11 +189,10 @@ func planPython(dir string) app.Recipe {
 		argv := append(append([]string{}, runner...), mod)
 		return step(mod, append(argv, args...)...)
 	}
+	// A .python-version is the folder's own pin, which mise reads where the commands run
+	// (toolchain.go). requires-python is a range, and only its floor means anything here.
 	if m := pyRequiresRe.FindStringSubmatch(readText(dir, "pyproject.toml")); m != nil {
-		r.Tools = tools("python", m[1])
-	}
-	if v := firstLine(dir, ".python-version"); v != "" {
-		r.Tools = tools("python", v)
+		r.Tools = tools("python", pythonFloor(m[1]))
 	}
 	if hasPytest(dir) {
 		t := run("pytest", pytestArgs...)
@@ -265,8 +244,6 @@ func readPkg(dir string) (pkgJSON, bool) {
 	return p, true
 }
 
-var nodeEngineRe = regexp.MustCompile(`(\d+)(?:\.\d+)*`)
-
 func planNode(dir string) app.Recipe {
 	r := app.Recipe{Ecosystem: "node"}
 	pkg, ok := readPkg(dir)
@@ -298,12 +275,10 @@ func planNode(dir string) app.Recipe {
 		pm = "yarn"
 	}
 	r.Setup = []app.RecipeStep{setupStep(append([]string{pm}, frozen...)...)}
-	if v := firstLine(dir, ".nvmrc"); v != "" {
-		r.Tools = tools("node", v)
-	} else if v := firstLine(dir, ".node-version"); v != "" {
-		r.Tools = tools("node", v)
-	} else if m := nodeEngineRe.FindString(pkg.Engines.Node); m != "" {
-		r.Tools = tools("node", m)
+	// .nvmrc and .node-version are the folder's own pins, which mise reads where the commands
+	// run; a folder without one gets the floor of its engines range.
+	if !exists(dir, ".nvmrc", ".node-version") {
+		r.Tools = tools("node", nodeFloor(pkg.Engines.Node))
 	}
 	script := func(name string) *app.RecipeStep {
 		s := strings.TrimSpace(pkg.Scripts[name])
@@ -338,9 +313,9 @@ func planMaven(dir string) app.Recipe {
 	r := app.Recipe{Ecosystem: "java-maven", Setup: []app.RecipeStep{setup},
 		Build: step("build", mvn, "-B", "-ntp", "-q", "-DskipTests", "package"),
 		Test:  step("test", mvn, "-B", "-ntp", "test")}
-	if v := firstLine(dir, ".java-version"); v != "" {
-		r.Tools = tools("java", v)
-	} else if m := mavenReleaseRe.FindStringSubmatch(readText(dir, "pom.xml")); m != nil {
+	// A .java-version is the folder's own pin, read by mise; the release the build compiles for
+	// is the floor of what can run it.
+	if m := mavenReleaseRe.FindStringSubmatch(readText(dir, "pom.xml")); m != nil && !exists(dir, ".java-version") {
 		r.Tools = tools("java", m[1])
 	}
 	return r
@@ -348,13 +323,9 @@ func planMaven(dir string) app.Recipe {
 
 func planGradle(dir string) app.Recipe {
 	g := local(dir, "gradlew", "gradle")
-	r := app.Recipe{Ecosystem: "java-gradle",
+	return app.Recipe{Ecosystem: "java-gradle",
 		Build: step("build", g, "--no-daemon", "-q", "assemble"),
 		Test:  step("test", g, "--no-daemon", "test")}
-	if v := firstLine(dir, ".java-version"); v != "" {
-		r.Tools = tools("java", v)
-	}
-	return r
 }
 
 // ---- dotnet ----
@@ -372,9 +343,6 @@ func planDotnet(dir string) app.Recipe {
 
 func planRuby(dir string) app.Recipe {
 	r := app.Recipe{Ecosystem: "ruby", Setup: []app.RecipeStep{setupStep("bundle", "install", "--jobs", "4", "--retry", "2")}}
-	if v := firstLine(dir, ".ruby-version"); v != "" {
-		r.Tools = tools("ruby", v)
-	}
 	switch {
 	case exists(dir, "spec"), exists(dir, ".rspec"):
 		r.Test = step("test", "bundle", "exec", "rspec")

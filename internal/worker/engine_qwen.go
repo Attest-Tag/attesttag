@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -35,6 +36,37 @@ const (
 	qwenSettingsDir = ".qwen"
 )
 
+// qwenArgv starts the Qwen Code CLI on the image's own Node. The CLI is a `#!/usr/bin/env node`
+// script, so started by name it ran on whatever node the job's PATH found first — with a
+// repository that pins Node 20 at its root, Node 20, where the CLI wants 22 or later. The
+// worker's own PATH never has the shims on it, so the node found on it is the image's.
+func qwenArgv(bin string) []string {
+	path, err := exec.LookPath(bin)
+	if err != nil {
+		return []string{bin}
+	}
+	script, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return []string{bin}
+	}
+	f, err := os.Open(script)
+	if err != nil {
+		return []string{bin}
+	}
+	head := make([]byte, 128)
+	n, _ := f.Read(head)
+	f.Close()
+	line, _, _ := strings.Cut(string(head[:n]), "\n")
+	if !strings.HasPrefix(line, "#!") || !strings.Contains(line, "node") {
+		return []string{bin}
+	}
+	node, err := exec.LookPath("node")
+	if err != nil {
+		return []string{bin}
+	}
+	return []string{node, script}
+}
+
 func (e *qwenEngine) writeSettings(home string) error {
 	dir := filepath.Join(home, qwenSettingsDir)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -57,16 +89,20 @@ func (e *qwenEngine) Run(ctx context.Context, ws *Workspace, b Brief) (EngineRes
 	if err := e.writeSettings(home); err != nil {
 		return EngineResult{Stopped: "error"}, stepErr("engine_error", "qwen settings: "+err.Error())
 	}
-	remaining := time.Until(ws.Deadline) - 2*time.Minute
+	stop := ws.EngineStop
+	if stop.IsZero() {
+		stop = ws.Deadline.Add(-2 * time.Minute)
+	}
+	remaining := time.Until(stop)
 	if remaining < 2*time.Minute {
 		return EngineResult{Stopped: "timeout"}, nil
 	}
 	prompt := briefText(b)
 	os.WriteFile(filepath.Join(ws.JobDir, "brief.md"), []byte(prompt), 0o600)
-	argv := []string{e.bin, "-p", prompt, "--yolo", "--output-format", "stream-json",
-		"--max-session-turns", strconv.Itoa(e.maxRounds), "--max-tool-calls", strconv.Itoa(e.maxRounds * 3),
+	argv := append(qwenArgv(e.bin), "-p", prompt, "--yolo", "--output-format", "stream-json",
+		"--max-session-turns", strconv.Itoa(e.maxRounds), "--max-tool-calls", strconv.Itoa(e.maxRounds*3),
 		// qwen wants whole seconds or a single unit ("5m"); Go's "40m0s" form is rejected.
-		"--max-wall-time", strconv.Itoa(int(remaining.Seconds()))}
+		"--max-wall-time", strconv.Itoa(int(remaining.Seconds())))
 	env := append(append([]string{}, ws.Env...),
 		"OPENAI_BASE_URL="+e.llm.BaseURL, "OPENAI_API_KEY="+e.llm.APIKey, "OPENAI_MODEL="+e.llm.Model,
 		"QWEN_CODE_UNATTENDED_RETRY=1", "QWEN_CODE_NO_TELEMETRY=1", "QWEN_CODE_SUPPRESS_YOLO_WARNING=1")
