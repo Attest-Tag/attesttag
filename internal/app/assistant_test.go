@@ -783,6 +783,7 @@ func TestGuideSearchFindsTheRightSection(t *testing.T) {
 		{"plan pricing budget", "plans.md", ""},
 		{"path prefixes and methods on a connection", "connections.md", "Connections"},
 		{"approve a github repository collaborator", "connections.md", "Repositories"},
+		{"monorepo more than one package", "fix-jobs.md", "Monorepos"},
 	} {
 		out := searchGuide(tc.query)
 		if !strings.Contains(out, tc.wantFile) {
