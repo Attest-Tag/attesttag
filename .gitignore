@@ -5,6 +5,8 @@
 *.db-wal
 *.db-shm
 /attesttag
+# The release archives `make dist` writes.
+/dist/
 bot.log
 
 # Private keys, certificates and credential files. The GitHub App setup hands the operator a

@@ -53,9 +53,6 @@ rows are in Postgres, and the bot says so at startup.
 docker compose --profile quicktunnel up -d
 ```
 
-Until the first release there is no image to pull, so build one first, as
-[`../local/README.md`](../local/README.md) shows.
-
 Two named volumes, `data` and `docs`. Snapshot the disk underneath, or stop the bot and copy the
 volume — a copy of a SQLite file taken while it is being written can be inconsistent:
 
@@ -110,7 +107,7 @@ Every install below carries the bot's five secrets: the chart refuses to render 
 Slack three and `OPENROUTER_API_KEY`, and the pod will not start without `MASTER_KEY` —
 `$MASTER_KEY` below is one you generated with `openssl rand -base64 32` and backed up first.
 [`../helm/README.md`](../helm/README.md) shows how to keep them in a Secret of your own instead,
-and what to do about the image until the first release.
+and how to run an image you built rather than the released one.
 
 **Local** — the chart's default. A StatefulSet, one replica, two ReadWriteOnce volumes:
 

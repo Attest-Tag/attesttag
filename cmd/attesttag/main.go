@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
 	"attesttag/internal/app"
@@ -25,6 +26,10 @@ func main() {
 			// The one-shot cutover tool: copy a SQLite database into an empty Postgres one and
 			// verify every row of it. Not part of serving anything.
 			os.Exit(app.PGImport(os.Args[2:]))
+		case "version", "--version":
+			// Before anything reads the environment, so it answers on a machine with no .env.
+			fmt.Println("attesttag", app.VersionString())
+			return
 		}
 	}
 	app.Run()

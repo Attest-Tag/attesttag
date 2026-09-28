@@ -51,9 +51,10 @@ app's signing secret, client id and client secret into `.env` with a model key
 and its address, alone. Open the console and sign up; the first sign-up founds the deployment
 and everybody after arrives by invitation.
 
-Until the first release is tagged there is no published image to pull. Build one from the
-checkout — `docker build -t attesttag-local .` — and put `ATTEST_IMAGE=attesttag-local` in
-`.env`.
+That runs the latest release. To stay on one minor version, put `ATTEST_VERSION=0.1` in `.env`;
+[`CHANGELOG.md`](CHANGELOG.md) says what each release changes and what an upgrade asks of you.
+To run this checkout instead, build it — `docker build -t attesttag-local .` — and put
+`ATTEST_IMAGE=attesttag-local` in `.env`.
 
 The one thing that trips people up: **Slack will not deliver events to localhost**, and there is
 no Socket Mode fallback here, so a public HTTPS address is required rather than convenient.
@@ -77,10 +78,12 @@ version.
 | [**Azure**](deploy/azure/README.md) | Container Apps, with Postgres or a bucket | `./deploy/azure/containerapps.sh` |
 | [**Kubernetes**](deploy/helm/README.md) | anywhere, one chart, three shapes | `helm install` |
 
-They are all the same container — `ghcr.io/attest-tag/attesttag`, published by each release for
-`linux/amd64` and `linux/arm64`, signed, with provenance and an SBOM. (The fix-job worker images
-beside it are `linux/amd64` only.) Point it at a managed Postgres and a bucket and it runs
-somewhere none of these folders mentions.
+They are all the same container — `ghcr.io/attest-tag/attesttag`, published by each
+[release](https://github.com/Attest-Tag/attesttag/releases) for `linux/amd64` and `linux/arm64`,
+signed, with provenance and an SBOM. (The fix-job worker images beside it are `linux/amd64`
+only.) Point it at a managed Postgres and a bucket and it runs somewhere none of these folders
+mentions. Each release also carries the binary itself, for Linux and macOS, to run without a
+container.
 
 **Three things decide whether a deployment works**, and they are the same everywhere: a public
 HTTPS origin; **always-on CPU**, because the Slack dispatcher, the routine scheduler and the

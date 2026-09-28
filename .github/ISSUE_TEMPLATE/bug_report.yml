@@ -12,8 +12,8 @@ body:
     id: version
     attributes:
       label: Version
-      description: The image tag, or the commit you built from.
-      placeholder: "v1.0.0, or sha-abc123"
+      description: What `attesttag version` prints (`docker exec <container> /app/attesttag version` in a container), or the commit you built from.
+      placeholder: "0.1.0 (4f2a9c1e0b7d)"
     validations: { required: true }
   - type: dropdown
     id: deployment
