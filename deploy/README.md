@@ -22,7 +22,7 @@ The quickest path, from nothing:
 docker compose --profile quicktunnel up -d
 ```
 
-Until the first release there is no published image to pull: build one first with
+That pulls the latest release; to run this checkout instead, build it first with
 `docker build -t attesttag-local .` and put `ATTEST_IMAGE=attesttag-local` in `.env`. After the
 first `up -d` the bot restarts in a loop until `.env` has the Slack values and the model key,
 which is expected at this point — the tunnel's address comes first, and then the Slack app that
@@ -84,9 +84,9 @@ Postgres or a bucket.
 
 The release workflow publishes the image as `ghcr.io/attest-tag/attesttag`, for `linux/amd64`
 and `linux/arm64`, signed, with provenance and an SBOM, each time a `v*` tag is pushed — with the
-Helm chart at `oci://ghcr.io/attest-tag/charts/attest-tag` and a GitHub release that names them.
-None has been yet, so until the first release build it from this checkout
-(`docker build -t attesttag-local .`). The fix-job worker images, `attesttag-worker` and
+Helm chart at `oci://ghcr.io/attest-tag/charts/attest-tag` and a GitHub release that names them
+and carries the binary for Linux and macOS. To run a commit no release has, build it from this
+checkout (`docker build -t attesttag-local .`). The fix-job worker images, `attesttag-worker` and
 `attesttag-worker-jvm`, are published for `linux/amd64` only. Anywhere that runs a container and
 can keep it warm will run this; the environment contract is [`env/selfhost.env.example`](env/selfhost.env.example)
 and nothing about it is Docker-specific. Point it at a managed Postgres and a bucket and the

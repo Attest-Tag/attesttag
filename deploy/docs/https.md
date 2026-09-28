@@ -16,9 +16,6 @@ docker compose --profile quicktunnel up -d
 docker compose logs quicktunnel
 ```
 
-(Until the first release there is no bot image to pull; build one first, as
-[`../local/README.md`](../local/README.md) shows.)
-
 The logs print a `https://something-random.trycloudflare.com` address. Use it as `BASE_URL`
 when generating the Slack manifest, set `ADMIN_BASE_URL` in `.env` to the same value, and apply
 it by running the same `docker compose --profile quicktunnel up -d` again — not

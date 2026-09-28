@@ -54,7 +54,14 @@ holds an empty line for each key, and the cloud deploy scripts read the first on
 
 `ghcr.io/attest-tag/attesttag`, published by each release for `linux/amd64` and `linux/arm64`,
 signed, with provenance and an SBOM; the fix-job worker images beside it are `linux/amd64` only.
-Until the first release is tagged, build it from the checkout with `docker build -t attesttag-local .`.
+`:latest` is the newest release; `:0.1` follows the 0.1 releases, which after 0.1.0 only fix
+things (`CHANGELOG.md` says what each release changes). To run a commit no release has,
+build it from the checkout with `docker build -t attesttag-local .`. `attesttag version` prints
+which one a container or binary is.
+
+Each GitHub release also carries the binary for Linux and macOS, amd64 and arm64, with the
+console built in, for running without a container. Outside the image it needs poppler's
+`pdftotext` on the PATH to read PDFs, and `litestream` to replicate SQLite to a bucket.
 
 The image runs as an unprivileged user (uid 10001), refuses to start without `MASTER_KEY` rather
 than invent one it would lose, and sets its session cookies `Secure` on every origin — so the
