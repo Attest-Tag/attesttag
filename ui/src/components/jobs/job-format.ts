@@ -2,6 +2,7 @@
 // Kept free of React so either can import it without a cycle.
 
 import type { StatusChipVariant } from "@/components/core/status-chip";
+import { stepLine, type JobCheck, type JobPackage, type JobResult, type Recipe } from "@/lib/api";
 
 export function jobStatusVariant(status: string): StatusChipVariant {
   switch (status) {
@@ -75,6 +76,64 @@ export function phaseGlyph(status: string | undefined): { glyph: string; classNa
       return { glyph: "–", className: "text-muted-foreground", label: "skipped" };
     default:
       return { glyph: "○", className: "text-muted-foreground/50", label: "pending" };
+  }
+}
+
+// A gate that never ran. A row written before the build was its own gate has no build field,
+// and Go reads the missing field as exactly this.
+const NOT_RUN: JobCheck = { before: { ran: false, ok: false }, after: { ran: false, ok: false } };
+
+/**
+ * Every package a job checked, the primary first, in one shape. It mirrors JobResult.Checked in
+ * internal/app/jobs_proto.go: the primary is the result's top-level fields, so a row written
+ * before a job could check more than one package reads as the one package it always was.
+ */
+export function checkedPackages(result: JobResult): JobPackage[] {
+  const primary: JobPackage = {
+    workdir: result.recipe?.workdir || ".",
+    recipe: result.recipe,
+    setup: result.setup,
+    build: result.build ?? NOT_RUN,
+    tests: result.tests,
+    lint: result.lint,
+    note: result.check_note,
+  };
+  return [primary, ...(result.packages ?? [])];
+}
+
+/**
+ * A recipe on one line — "in web · build: npm run build · test: npm test" — as the confirm card
+ * and the pull request print it. It mirrors Recipe.Describe in internal/app/jobs_proto.go.
+ */
+export function describeRecipe(r: Recipe | null | undefined): string {
+  if (!r) return "not resolved yet";
+  const parts: string[] = [];
+  if (r.workdir && r.workdir !== ".") parts.push(`in ${r.workdir}`);
+  for (const [label, step] of [
+    ["build", r.build],
+    ["lint", r.lint],
+    ["test", r.test],
+  ] as const) {
+    if (step) parts.push(`${label}: ${stepLine(step)}`);
+  }
+  if (parts.length > 0) return parts.join(" · ");
+  return r.why ? `nothing to run (${r.why})` : "nothing to run";
+}
+
+/** Where a recipe came from, which is the difference between "nobody said" and "what we were told". */
+export function recipeSourceLabel(source: string): string {
+  switch (source) {
+    case "repo_file":
+      return "this repository's .attest/recipe.yaml";
+    case "connection":
+    case "": // saved before recipes said where they came from, and someone's decision then (Recipe.SetByAdmin)
+      return "set in the console";
+    case "detected":
+      return "worked out from the repository";
+    case "none":
+      return "nothing detected";
+    default:
+      return source;
   }
 }
 

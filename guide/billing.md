@@ -62,12 +62,20 @@ has agreed to, and a test cites the constant so that moving it is a deliberate a
 
 | variable | what it is |
 |---|---|
-| `STRIPE_SECRET_KEY` | Developers → API keys. A secret; ship it through your platform's secret store, never `--set-env-vars` |
+| `STRIPE_SECRET_KEY` | Developers → API keys. A secret; ship it through your platform's secret store, never `--set-env-vars`. A restricted key (`rk_…`) works and is the better choice, below |
 | `STRIPE_WEBHOOK_SECRET` | Developers → Webhooks → add `<your-origin>/api/billing/webhook` |
 | `STRIPE_SIZES` | `size=<price id>:<minor units>[:<included minor units>]`, comma separated, in the order to offer them. The third field is the model credit the size includes each month, which expires with that month; leave it off for a size that includes none. An entry with no Price id — `over_250=:0` — is listed and not sold: "Talk to us" in the console and on the site, refused at checkout |
 | `BILLING_CURRENCY` | `usd`. A payment in any other currency is refused rather than converted |
 | `BILLING_TOPUP_MIN_USD`, `BILLING_TOPUP_MAX_USD` | one top-up's bounds, enforced server-side. `25` and `10000` |
 | `BILLING_LOW_BALANCE_USD` | `10`. Warn the account, in its alert channel and by mail to whoever founded it, at this much prepaid credit left — at most once every 72 hours |
+
+**A restricted key is enough, and safer.** The server calls five kinds of Stripe object and
+nothing else — every call is in `billing_stripe.go` — so the key needs write on Checkout Sessions,
+the customer portal, Subscriptions and Subscription Schedules, read on Prices, and none on anything
+else. Leaked, it cannot refund a payment or register a webhook of its own. The mode is read from
+the prefix, `sk_live_` or `rk_live_`, and compared with every event's `livemode`. Give the
+test-mode key the same permissions: a full-access test key lets a call added later pass every
+sandbox run and be refused only in production.
 
 **Buying wants a confirmed address.** Checkout refuses an account whose email has not been
 confirmed — it reaches out from the organisation with money, and the receipt has to arrive

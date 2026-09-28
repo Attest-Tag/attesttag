@@ -378,7 +378,7 @@ func (b *Bot) handleBillingCheckout(w http.ResponseWriter, r *http.Request) {
 	// answer to that request, whatever it does for this one.
 	if b.emailUnverified(ctx, me) {
 		writeJSON(w, http.StatusForbidden, map[string]any{
-			"error":        "Confirm your email address before buying: the link is in your inbox, and Settings → Account can send it again.",
+			"error":        "Confirm your email address before buying: the link is in your inbox, and Settings → General can send it again.",
 			"verify_email": true})
 		return
 	}

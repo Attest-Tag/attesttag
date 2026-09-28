@@ -832,8 +832,12 @@ func NewPayments(cfg Config) Payments {
 // stripeMode is "live" or "test", read from the key's own prefix. It is logged at boot and
 // compared against every event's livemode, which is what catches a test webhook pointed at
 // production before it credits somebody with money nobody paid.
+//
+// A restricted key (rk_) names its mode exactly as a secret key (sk_) does. Reading only sk_live_
+// put a deployment running on a restricted live key in test mode, and the livemode check then
+// acknowledged every real event and acted on none: a customer paid and was never credited.
 func stripeMode(key string) string {
-	if strings.HasPrefix(key, "sk_live_") {
+	if strings.HasPrefix(key, "sk_live_") || strings.HasPrefix(key, "rk_live_") {
 		return "live"
 	}
 	return "test"

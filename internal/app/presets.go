@@ -34,6 +34,28 @@ type Preset struct {
 	// console offers them as checkboxes, and the connection ends up allowlisted to exactly what
 	// was ticked. A preset with no options is the whole service, as before.
 	Options []PresetOption `json:"options,omitempty"`
+	// Serves is where on a shared host this service lives, for a preset whose connections are
+	// made without path prefixes. It allows nothing: what a connection reaches is still its own
+	// hosts and prefixes. It says what the credential is *for*, which is the one thing the proxy
+	// cannot read off a connection that claims all of www.googleapis.com — and the thing it needs
+	// when somebody's own account was the first choice for a Drive URL and they have not
+	// connected it, so that a shared Drive credential may answer and one kept for some other
+	// Google API may not.
+	Serves []string `json:"-"`
+}
+
+// presetServes says whether a connection's preset names path as its own service.
+func presetServes(conn *Connection, path string) bool {
+	pr := presetByID(conn.Preset)
+	if pr == nil {
+		return false
+	}
+	for _, p := range pr.Serves {
+		if strings.HasPrefix(path, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // PresetOption is one such part. ReadScopes are asked for whenever it is on; WriteScopes are
@@ -311,9 +333,14 @@ var Presets = []Preset{
 		Notes: "Notion API: POST /v1/search {query, page_size}, GET /v1/pages/{id}, GET /v1/blocks/{id}/children, POST /v1/databases/{id}/query."},
 	{ID: "gdrive", Name: "Google Drive", Category: "Knowledge and docs", CredType: "gcp_sa", Hosts: []string{"www.googleapis.com"},
 		Scopes:      "https://www.googleapis.com/auth/drive",
+		Serves:      []string{"/drive/v3", "/upload/drive/v3"},
 		SecretLabel: "Service-account key (JSON)", SecretHint: "Share the folders with the service account's email — Viewer to read, Editor if you want it to write. Paste its JSON key.", Placeholder: `{"type": "service_account", …}`,
 		DocsURL: "https://developers.google.com/drive/api/guides/about-auth", Test: TestCall{Method: "GET", Path: "/drive/v3/about?fields=user"},
-		Notes: "Drive v3: GET /drive/v3/files?q=fullText contains 'refund'&fields=files(id,name,mimeType,modifiedTime,webViewLink), GET /drive/v3/files/{id}/export?mimeType=text/plain for Google Docs, GET /drive/v3/files/{id}?alt=media for uploads. Writing needs Editor on the file or folder: PATCH /drive/v3/files/{id} (rename, move), POST /upload/drive/v3/files?uploadType=media (create) — a share the account only reads is refused by Drive rather than by the proxy."},
+		Notes: "The company's Drive: the folders shared with this service account, readable by anyone in the channel without connecting an account of their own. " +
+			"Find files with drive_search and read one with drive_read, which search every Drive in the channel and say whose each file is. " +
+			"By hand, for a search they cannot express (a folder's contents by date, say): GET /drive/v3/files?q=…&fields=files(id,name,mimeType,modifiedTime,webViewLink)" +
+			"&supportsAllDrives=true&includeItemsFromAllDrives=true with trashed=false in q. Writing needs Editor on the file or folder: PATCH /drive/v3/files/{id} " +
+			"(rename, move), POST /upload/drive/v3/files?uploadType=media (create) — a share the account only reads is refused by Drive rather than by the proxy."},
 	{ID: "airtable", Name: "Airtable", Category: "Knowledge and docs", CredType: "bearer", Hosts: []string{"api.airtable.com"},
 		SecretLabel: "Personal access token", SecretHint: "airtable.com/create/tokens → scopes data.records:read and schema.bases:read, granted only to the bases the bot may read.", Placeholder: "pat…",
 		DocsURL: "https://airtable.com/developers/web/guides/personal-access-tokens", Test: TestCall{Method: "GET", Path: "/v0/meta/whoami"},
@@ -450,7 +477,8 @@ var Presets = []Preset{
 			"GET /gmail/v1/users/me/messages/{id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date for a header line " +
 			"or format=full for the body, whose parts[].body.data is base64url. Draft with POST /gmail/v1/users/me/drafts {\"message\":{\"raw\":\"<base64url RFC822>\"}}. " +
 			"Drive v3 at https://www.googleapis.com/drive/v3, and always the asker's own files — there is no way to reach anyone else's. " +
-			"Search with GET /drive/v3/files?q=…&fields=files(id,name,mimeType,modifiedTime,webViewLink)&orderBy=modifiedTime desc: q is Drive's own " +
+			"Find and read files with drive_search and drive_read rather than by hand: they look in the company's Drive as well and say whose each " +
+			"file is. By hand, search with GET /drive/v3/files?q=…&fields=files(id,name,mimeType,modifiedTime,webViewLink)&orderBy=modifiedTime desc: q is Drive's own " +
 			"query language, where name contains 'onboarding' matches titles and fullText contains 'refund' matches contents, and trashed=false belongs " +
 			"on every search or deleted files come back. Add supportsAllDrives=true&includeItemsFromAllDrives=true to see shared drives, which is where " +
 			"most company files are; without them a search quietly returns only My Drive. Read a Google Doc with " +

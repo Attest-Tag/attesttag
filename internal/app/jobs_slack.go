@@ -255,6 +255,28 @@ func (r *JobRunner) renderChecklist(ctx context.Context, j *Job) {
 // postReport posts the outcome as a new message and attaches the diff and log. It returns the
 // one-line note kept in the thread's history.
 func (r *JobRunner) postReport(ctx context.Context, j *Job, res *JobResult) string {
+	text := jobReport(j, res)
+	sl, slErr := r.slacks.For(ctx, j.TeamID)
+	if slErr != nil {
+		slog.Warn("job report not posted: workspace not connected", "job", j.ID, "err", slErr)
+		return text
+	}
+	if _, err := sl.PostMarkdown(ctx, j.Channel, j.ThreadTS, text, ""); err != nil {
+		slog.Warn("job report post failed", "job", j.ID, "err", err)
+	}
+	// Attachments: the diff the worker uploaded, and the log tail when there is one.
+	if diff, _, _, err := r.store.JobFile(ctx, j.OrgID, j.ID, "diff"); err == nil && strings.TrimSpace(diff) != "" {
+		r.attach(ctx, j, "diff", fmt.Sprintf("fix-job-%d.diff", j.ID), fmt.Sprintf("Fix job #%d diff", j.ID), diff, "diff", "txt")
+	}
+	if tail := strings.TrimSpace(res.LogTail); tail != "" && (j.Status != JobSucceeded || len(tail) > 1500) {
+		r.attach(ctx, j, "log", fmt.Sprintf("fix-job-%d-log.txt", j.ID), fmt.Sprintf("Fix job #%d log", j.ID), tail, "text", "txt")
+	}
+	return text
+}
+
+// jobReport is the outcome message: what happened, what the checks said in every package the job
+// checked, what changed without being checked, and what it cost.
+func jobReport(j *Job, res *JobResult) string {
 	var b strings.Builder
 	switch j.Status {
 	case JobSucceeded:
@@ -305,39 +327,98 @@ func (r *JobRunner) postReport(ctx context.Context, j *Job, res *JobResult) stri
 	if res.Note != "" {
 		b.WriteString("\n:warning: " + escapeMrkdwn(truncate(oneLine(res.Note), 300)))
 	}
+	if res.CheckNote != "" {
+		b.WriteString("\n:warning: " + escapeMrkdwn(truncate(oneLine(res.CheckNote), 300)))
+	}
+	// With more than one package checked, the primary's line says which one it is.
+	label := "*Tests:*"
+	if len(res.Packages) > 0 {
+		label = "*Tests* (" + dirLabel(res.Checked()[0].Workdir) + "):"
+	}
 	var facts []string
 	if res.Tests.Before.Ran || res.Tests.After.Ran {
-		facts = append(facts, "*Tests:* before "+testWord(res.Tests.Before)+" / after "+testWord(res.Tests.After))
+		facts = append(facts, label+" before "+testWord(res.Tests.Before)+" / after "+testWord(res.Tests.After))
 	} else if res.Tests.Skipped != "" {
-		facts = append(facts, "*Tests:* not run ("+escapeMrkdwn(truncate(oneLine(res.Tests.Skipped), 160))+")")
+		facts = append(facts, label+" not run ("+escapeMrkdwn(truncate(oneLine(res.Tests.Skipped), 160))+")")
 	} else if j.Status == JobSucceeded {
-		facts = append(facts, "*Tests:* none found")
+		facts = append(facts, label+" none found")
 	}
 	if res.DiffStat.Files > 0 {
 		facts = append(facts, fmt.Sprintf("*Diff:* %d files, +%d −%d", res.DiffStat.Files, res.DiffStat.Insertions, res.DiffStat.Deletions))
 	}
 	facts = append(facts, "*Cost:* "+jobSpendLine(j))
 	b.WriteString("\n" + strings.Join(facts, "   "))
+	for _, p := range res.Packages {
+		b.WriteString("\n" + packageLine(p))
+	}
+	if len(res.Unchecked) > 0 {
+		b.WriteString("\n*Also changed, not checked:* " + dirList(res.Unchecked, 8))
+	}
 	if res.TicketComment != "" && j.Status == JobSucceeded {
 		b.WriteString("\n_The worker drafted a ticket comment; ask me to post it if you want it on the ticket._")
 	}
-	text := b.String()
-	sl, slErr := r.slacks.For(ctx, j.TeamID)
-	if slErr != nil {
-		slog.Warn("job report not posted: workspace not connected", "job", j.ID, "err", slErr)
-		return text
+	return b.String()
+}
+
+// packageLine is one more package's checks, in the words the primary's line uses.
+func packageLine(p JobPackage) string {
+	head := "*" + dirLabel(p.Workdir) + ":*"
+	if p.Skipped != "" {
+		return head + " not checked (" + escapeMrkdwn(truncate(oneLine(p.Skipped), 160)) + ")"
 	}
-	if _, err := sl.PostMarkdown(ctx, j.Channel, j.ThreadTS, text, ""); err != nil {
-		slog.Warn("job report post failed", "job", j.ID, "err", err)
+	var parts []string
+	switch {
+	case p.Tests.Before.Ran || p.Tests.After.Ran:
+		parts = append(parts, "tests before "+testWord(p.Tests.Before)+" / after "+testWord(p.Tests.After))
+		if p.Build.After.Ran && !p.Build.After.OK {
+			parts = append(parts, "build still fails")
+		}
+	case p.Build.Before.Ran || p.Build.After.Ran:
+		parts = append(parts, "build before "+passWord(p.Build.Before)+" / after "+passWord(p.Build.After))
+	default:
+		why := nonEmpty(p.Tests.Skipped, "nothing to run")
+		parts = append(parts, "not run ("+escapeMrkdwn(truncate(oneLine(why), 160))+")")
 	}
-	// Attachments: the diff the worker uploaded, and the log tail when there is one.
-	if diff, _, _, err := r.store.JobFile(ctx, j.OrgID, j.ID, "diff"); err == nil && strings.TrimSpace(diff) != "" {
-		r.attach(ctx, j, "diff", fmt.Sprintf("fix-job-%d.diff", j.ID), fmt.Sprintf("Fix job #%d diff", j.ID), diff, "diff", "txt")
+	if p.Setup.Ran && !p.Setup.OK {
+		parts = append(parts, "dependencies did not install")
 	}
-	if tail := strings.TrimSpace(res.LogTail); tail != "" && (j.Status != JobSucceeded || len(tail) > 1500) {
-		r.attach(ctx, j, "log", fmt.Sprintf("fix-job-%d-log.txt", j.ID), fmt.Sprintf("Fix job #%d log", j.ID), tail, "text", "txt")
+	line := head + " " + strings.Join(parts, " · ")
+	if p.Note != "" {
+		line += " — " + escapeMrkdwn(truncate(oneLine(p.Note), 200))
 	}
-	return text
+	return line
+}
+
+// passWord is testWord for a gate that has no count to give, like a build.
+func passWord(t JobTestRun) string {
+	switch {
+	case !t.Ran:
+		return "not run"
+	case t.OK:
+		return "pass"
+	}
+	return "fail"
+}
+
+// dirLabel is a package directory as the report prints it. The name comes from the repository,
+// so it is escaped, and a backtick in it would end the code span early.
+func dirLabel(dir string) string {
+	if dir == "" || dir == "." {
+		return "the root"
+	}
+	return "`" + strings.ReplaceAll(escapeMrkdwn(truncate(oneLine(dir), 80)), "`", "'") + "`"
+}
+
+func dirList(dirs []string, max int) string {
+	var out []string
+	for i, d := range dirs {
+		if i == max {
+			out = append(out, fmt.Sprintf("and %d more", len(dirs)-max))
+			break
+		}
+		out = append(out, dirLabel(d))
+	}
+	return strings.Join(out, ", ")
 }
 
 func testWord(t JobTestRun) string {

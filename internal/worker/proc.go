@@ -184,6 +184,29 @@ func (w *lineWriter) flush() {
 	w.buf = nil
 }
 
+// withEnv is env with each KEY=VALUE set: replaced where the key is already there, appended
+// where it is not. env itself is not changed.
+func withEnv(env []string, kv ...string) []string {
+	out := append([]string{}, env...)
+	for _, pair := range kv {
+		key, _, ok := strings.Cut(pair, "=")
+		if !ok || key == "" {
+			continue
+		}
+		set := false
+		for i, cur := range out {
+			if strings.HasPrefix(cur, key+"=") {
+				out[i], set = pair, true
+				break
+			}
+		}
+		if !set {
+			out = append(out, pair)
+		}
+	}
+	return out
+}
+
 // baseEnv is what every subprocess gets: a PATH, a private HOME and TMPDIR inside the job dir,
 // caches inside the work dir, and the flags that keep tools quiet and non-interactive.
 func baseEnv(jobDir, workDir string) []string {
@@ -202,6 +225,9 @@ func baseEnv(jobDir, workDir string) []string {
 		"GIT_TERMINAL_PROMPT=0", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_ASKPASS=/bin/true",
 		"PYTHONDONTWRITEBYTECODE=1", "PIP_DISABLE_PIP_VERSION_CHECK=1", "PIP_NO_INPUT=1",
 		"UV_CACHE_DIR=" + filepath.Join(cache, "uv"), "UV_NO_PROGRESS=1",
+		// The interpreters uv fetches for a requires-python or a pin mise cannot serve, kept with
+		// the job cache rather than in the throwaway HOME, so the next job has them already.
+		"UV_PYTHON_INSTALL_DIR=" + filepath.Join(cache, "uv-python"),
 		"npm_config_cache=" + filepath.Join(cache, "npm"), "npm_config_fund=false", "npm_config_audit=false", "npm_config_update_notifier=false",
 		"GOMODCACHE=" + filepath.Join(cache, "go", "mod"), "GOCACHE=" + filepath.Join(cache, "go", "build"), "GOFLAGS=-buildvcs=false", "GOTOOLCHAIN=auto",
 		"CARGO_HOME=" + filepath.Join(cache, "cargo"), "CARGO_TERM_COLOR=never", "CARGO_INCREMENTAL=0",

@@ -656,6 +656,12 @@ Style (for your final reply, after any tool calls): be concise; lead with the an
 			// errand — who has to do what, once — which is a thing a person can go and ask for.
 			b.WriteString("\nNothing in this organisation runs on people's own accounts, so mail, calendar and contacts are out of reach until an admin sets that up once. Call connect_account: it posts the steps they follow. Then say in a line that it needs an admin to set up once, that the steps are in the thread, and that they can pass them on. Never say you could do it yourself, and never write a console link of your own.\n")
 		}
+		// Which Drive a file is in is not a question a host list answers, and the list above calls
+		// a Google Workspace connection the asker's own — so a model told a file is "in Google
+		// Drive" concludes the asker has to connect before anyone can read it.
+		if company, own := drivesOf(c.Access); len(company)+len(own) > 0 && !c.NoTools {
+			b.WriteString(driveGuidance(c, company, own))
+		}
 		if repos := c.Access.Repos(); len(repos) > 0 {
 			names := make([]string, 0, len(repos))
 			for _, rc := range repos {
@@ -1516,6 +1522,11 @@ func humanTitle(name string, args json.RawMessage, conn *Connection) string {
 		return "Sending a direct message"
 	case "run_js":
 		return "Running a calculation"
+	case "drive_search":
+		return "Searching Drive: " + pick("query")
+	case "drive_read":
+		// Not the match: it can be the name or the id somebody is being looked up by.
+		return "Reading a Drive file"
 	case "start_fix_job":
 		return "Preparing a fix job: " + pick("title")
 	case "http_request":
