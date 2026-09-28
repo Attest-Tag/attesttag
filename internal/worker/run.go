@@ -33,6 +33,88 @@ type Runner struct {
 	// posted, never before — an upload of up to a couple of minutes must not sit between a
 	// finished job and the thread being told about it.
 	cacheDir string
+	// pkgs are the packages this job checks, the primary first, once they are known: the result
+	// reports every one of them however far the job got.
+	pkgs []*pkgRun
+}
+
+// How the time left is kept for the other packages a job checks. The engine is the point of the
+// job, so it is never squeezed below engineFloor for them; each further package gets at most
+// extraMax to set up and check before the change, is skipped with the reason when less than
+// extraMin is left for it, and has its after-checks sized from how long its before-checks took.
+const (
+	engineFloor = 12 * time.Minute
+	extraMin    = 3 * time.Minute
+	extraMax    = 10 * time.Minute
+	tailReserve = 3 * time.Minute // commit, push and the pull request
+	afterFactor = 1.25            // the after-checks, as a multiple of the before-checks
+)
+
+func scaled(d time.Duration, f float64) time.Duration { return time.Duration(float64(d) * f) }
+
+// beforeTime is how long every package's checks took before the change.
+func beforeTime(pkgs []*pkgRun) time.Duration {
+	var total float64
+	for _, p := range pkgs {
+		total += p.beforeSecs
+	}
+	return time.Duration(total * float64(time.Second))
+}
+
+// extraBudget is how long further package i of n may take to set up and check before the change:
+// what is left once the engine's floor, the after-checks of what already ran and the push are
+// kept back, shared among the packages still to go, and never more than extraMax.
+func extraBudget(left, before time.Duration, i, n int) time.Duration {
+	spare := left - engineFloor - scaled(before, afterFactor) - tailReserve
+	if spare <= 0 || n-i <= 0 {
+		return 0
+	}
+	return min(extraMax, spare/time.Duration(n-i))
+}
+
+// engineStop is when the engine must stop so that the after-checks of every package and the push
+// still fit: the before-checks' time with a margin, never less than four minutes and never more
+// than two fifths of what is left. It used to be two minutes before the deadline, and a long
+// engine run then left the after-checks to run into it, ending the job as a timeout with no pull
+// request for the work it had done.
+func engineStop(deadline time.Time, before time.Duration, lint bool) time.Time {
+	reserve := scaled(before, afterFactor) + tailReserve
+	if lint {
+		reserve += time.Minute
+	}
+	reserve = min(max(reserve, 4*time.Minute), scaled(time.Until(deadline), 0.4))
+	return deadline.Add(-reserve)
+}
+
+// afterCap is a check's share after the change, cut so the push and the pull request still fit
+// before the deadline; zero when there is no time left for it at all.
+func afterCap(want time.Duration, deadline time.Time) time.Duration {
+	want = min(want, time.Until(deadline)-tailReserve)
+	if want < 30*time.Second {
+		return 0
+	}
+	return want
+}
+
+// provisionCap is how long the primary's toolchains may take to install.
+func provisionCap(deadline time.Time) time.Duration {
+	if left := time.Until(deadline); left < 12*time.Minute {
+		return left / 3
+	}
+	return 12 * time.Minute
+}
+
+// fillPackages puts what every package's checks said onto the result: the primary's caveats as
+// CheckNote beside its own fields, and the others as Packages.
+func (r *Runner) fillPackages(res *app.JobResult) {
+	if len(r.pkgs) == 0 {
+		return
+	}
+	res.CheckNote = joinNotes(r.pkgs[0].Notes)
+	res.Packages = nil
+	for _, p := range r.pkgs[1:] {
+		res.Packages = append(res.Packages, p.result())
+	}
 }
 
 // How the job's remaining time is shared out. These used to be flat ten- and fifteen-minute
@@ -111,6 +193,7 @@ func (r *Runner) Run(ctx context.Context) (code int) {
 			res.Usage.CostUSD = spent
 		}
 		mcancel()
+		r.fillPackages(res)
 		res.Summary = r.scrub.Clean(cut(res.Summary, app.JobSummaryMaxBytes-100))
 		res.LogTail = r.scrub.Clean(lastLines(res.LogTail, app.JobLogTailMaxBytes-100))
 		res.Error.Message = r.scrub.Clean(cut(res.Error.Message, 1900))
@@ -121,6 +204,11 @@ func (r *Runner) Run(ctx context.Context) (code int) {
 		if n := len(res.FilesChanged); n > resultFilesMax {
 			res.FilesChanged = append(res.FilesChanged[:resultFilesMax:resultFilesMax],
 				fmt.Sprintf("… and %d more files", n-resultFilesMax))
+		}
+		// Three packages' outputs can take a result past the bot's cap, whose refusal loses the
+		// whole of it; the least useful parts go first, with room left for the scrubber's marks.
+		if !res.Fit(app.JobResultMaxBytes - 4<<10) {
+			slog.Warn("result is over the size cap even after trimming", "job", claim.Job.ID)
 		}
 		pctx, pcancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Minute)
 		defer pcancel()
@@ -223,11 +311,19 @@ func (r *Runner) execute(ctx context.Context, claim *app.JobClaim, rep *Reporter
 	rep.Phase("clone", "ok", "at "+cut(baseSHA, 12))
 
 	// 2. what this repository is, and how it is built. Resolved before anything runs, so the
-	// toolchains it names can be installed and the engine can be told the commands.
+	// toolchains it names can be installed and the engine can be told the commands. The brief's
+	// files decide which packages are checked: the first one's is the primary, and every other
+	// package they point into is checked the same way, on its own toolchains.
 	recipe := resolveRecipe(ws.RepoDir, spec.Constraints.Recipe, spec.Constraints.TestCmd, spec.FilesHint)
 	ws.Recipe = recipe
 	res.Recipe = recipe
+	pkgs := resolvePackages(ws.RepoDir, recipe, spec.FilesHint)
+	r.pkgs = pkgs
+	primary, extras := pkgs[0], pkgs[1:]
 	rep.Log("recipe (" + recipe.Source + "): " + recipe.Describe())
+	for _, p := range extras {
+		rep.Log("also checking " + folderName(p.Dir) + ": " + p.Recipe.Describe())
+	}
 	if len(recipe.Services) > 0 {
 		if missing := servicesMissing(recipe.Services, ws); missing != "" {
 			// Not a failure: the change is still worth making and reviewing. But the suite
@@ -246,13 +342,20 @@ func (r *Runner) execute(ctx context.Context, claim *app.JobClaim, rep *Reporter
 	grantSandbox(jobDir, cacheDir)
 	// Toolchains the repository pins, installed into the job's cache before anything uses them —
 	// and before any step is judged unrunnable, since this is what makes a Ruby or JVM step
-	// runnable on an image that does not bake those in.
-	if err := provisionTools(ctx, ws, recipe, r.opts); err != nil {
-		rep.Warn("toolchain setup: " + err.Error())
+	// runnable on an image that does not bake those in. From here the job's PATH carries mise's
+	// shims, so every command gets what the folder it runs in pins.
+	tc := newToolchains(ws, r.opts)
+	if tc != nil {
+		tc.provision(ctx, ws, primary, time.Now().Add(provisionCap(deadline)))
+		tc.activate(ws)
 	}
-	pruneMissing(recipe, ws.RepoDir, ws.Env)
+	pw := primary.workspace(ws)
+	pruneMissing(recipe, ws.RepoDir, pw.Env)
 	if recipe.Why != "" {
 		rep.Log("recipe note: " + recipe.Why)
+	}
+	for _, n := range primary.Notes {
+		rep.Warn(n)
 	}
 	// Again, for anything the worker itself wrote while provisioning: a file the sandbox user
 	// cannot read is a step that fails for a reason nobody can see from the outside.
@@ -267,7 +370,7 @@ func (r *Runner) execute(ctx context.Context, claim *app.JobClaim, rep *Reporter
 	// 3. dependencies
 	if len(recipe.Setup) > 0 {
 		rep.Phase("setup", "started", setupLine(recipe))
-		res.Setup = runSetup(ctx, ws, recipe, c.setup)
+		res.Setup = runSetup(ctx, pw, recipe, c.setup)
 		if res.Setup.OK {
 			rep.Phase("setup", "ok", fmt.Sprintf("%.0fs", res.Setup.Seconds))
 		} else {
@@ -288,13 +391,24 @@ func (r *Runner) execute(ctx context.Context, claim *app.JobClaim, rep *Reporter
 	if !recipe.Runnable() {
 		res.Tests.Skipped, res.Build.Skipped = recipe.Why, recipe.Why
 	}
-	res.Build.Before = r.gate(ctx, ws, rep, res, "build_before", recipe.Build, c.build)
-	res.Tests.Before = r.gate(ctx, ws, rep, res, "test_before", recipe.Test, c.test)
+	res.Build.Before = r.gate(ctx, pw, rep, res, "build_before", recipe.Build, c.build)
+	res.Tests.Before = r.gate(ctx, pw, rep, res, "test_before", recipe.Test, c.test)
+	primary.beforeSecs = res.Build.Before.Seconds + res.Tests.Before.Seconds
 	if stopped(ctx, res) {
 		return
 	}
 
-	// 5. the engine
+	// 4b. every other package the brief points into, set up and checked the same way on its own
+	// toolchains, within what the engine can spare.
+	for i, p := range extras {
+		r.checkBefore(ctx, ws, tc, p, extraBudget(time.Until(deadline), beforeTime(pkgs), i, len(extras)))
+		if stopped(ctx, res) {
+			return
+		}
+	}
+
+	// 5. the engine, stopped early enough that every package's after-checks and the push fit
+	ws.EngineStop = engineStop(deadline, beforeTime(pkgs), hasLint(pkgs))
 	eng, err := newEngine(spec.Constraints.Engine, r.opts, claim)
 	if err != nil {
 		rep.Phase("engine", "failed", err.Error())
@@ -303,7 +417,8 @@ func (r *Runner) execute(ctx context.Context, claim *app.JobClaim, rep *Reporter
 	}
 	rep.Phase("engine", "started", eng.Name()+" on "+spec.Constraints.Model)
 	brief := Brief{JobID: claim.Job.ID, Spec: spec, Recipe: recipe, Baseline: res.Tests.Before, Build: res.Build.Before,
-		Notes: recipe.Why, RepoMap: repoMap(ws.RepoDir, 250), Conv: conventions(ws.RepoDir, 6000)}
+		Notes: recipe.Why, RepoMap: repoMap(ws.RepoDir, 250), Conv: conventions(ws.RepoDir, 6000),
+		Primary: primary, Extras: extras, Shims: tc != nil && tc.active}
 	er, err := eng.Run(ctx, ws, brief)
 	res.Summary = er.Summary
 	res.LogTail = er.LogTail
@@ -331,7 +446,7 @@ func (r *Runner) execute(ctx context.Context, claim *app.JobClaim, rep *Reporter
 		// Not a failure: what the engine had changed is committed and opened as a draft. The
 		// caveat travels as a note, so a job that produced a pull request does not read as an
 		// error in the thread and the console.
-		note := "the engine hit the job's spend cap before finishing on its own"
+		note := "the engine reached its time or tool-call limit before finishing on its own"
 		if er.Stopped == "max_rounds" {
 			note = fmt.Sprintf("the engine used all %d turns before finishing on its own", maxRoundsFor(spec))
 		}
@@ -348,11 +463,17 @@ func (r *Runner) execute(ctx context.Context, claim *app.JobClaim, rep *Reporter
 	// 6. the same gates again. A repository whose workdir moved with the change re-resolves so
 	// the checks run where the code now is.
 	left := shareOut(time.Until(deadline))
-	res.Build.After = r.gate(ctx, ws, rep, res, "build_after", recipe.Build, left.build)
-	res.Tests.After = r.gate(ctx, ws, rep, res, "test_after", recipe.Test, left.test)
+	pw = primary.workspace(ws) // another package's install may have put the shims on PATH since
+	res.Build.After = r.gate(ctx, pw, rep, res, "build_after", recipe.Build, afterCap(left.build, deadline))
+	res.Tests.After = r.gate(ctx, pw, rep, res, "test_after", recipe.Test, afterCap(left.test, deadline))
 	if recipe.Lint != nil {
-		res.Lint.After = runStep(ctx, ws, recipe.Lint, left.build)
-		rep.Tests(stepLine("lint", res.Lint.After))
+		if lc := afterCap(left.build, deadline); lc > 0 {
+			res.Lint.After = runStep(ctx, pw, recipe.Lint, lc)
+			rep.Tests(stepLine("lint", res.Lint.After))
+		}
+	}
+	for _, p := range extras {
+		r.checkAfter(ctx, ws, p, deadline)
 	}
 	if stopped(ctx, res) {
 		return
@@ -375,6 +496,7 @@ func (r *Runner) execute(ctx context.Context, claim *app.JobClaim, rep *Reporter
 		return
 	}
 	res.FilesChanged = files
+	res.Unchecked = uncheckedPackages(ws.RepoDir, files, pkgs)
 	res.DiffStat = repo.diffStat(ctx)
 	if err := repo.commit(ctx, commitMessage(spec, er.Summary, claim.Job.ID)); err != nil {
 		rep.Phase("commit", "failed", err.Error())
@@ -411,8 +533,9 @@ func (r *Runner) execute(ctx context.Context, claim *app.JobClaim, rep *Reporter
 	if gh == nil {
 		gh = newGitHubFor(claim.Secrets.GitHubToken, r.opts)
 	}
+	r.fillPackages(res)
 	pr, err := gh.createPR(ctx, spec.Repo, prInput{Title: prTitle(spec), Head: spec.Branch, Base: spec.BaseBranch, Draft: true,
-		Body: r.scrub.Clean(prBody(spec, res, er.Summary, recipe, claim.Job.ID, skipped))})
+		Body: r.scrub.Clean(prBody(spec, res, er.Summary, recipe, claim.Job.ID, skipped, pkgs))})
 	if pr != nil {
 		res.PR = pr
 	}
@@ -424,12 +547,100 @@ func (r *Runner) execute(ctx context.Context, claim *app.JobClaim, rep *Reporter
 	rep.Phase("pr", "ok", pr.URL)
 	res.Status = app.JobSucceeded
 	res.TicketComment = ticketComment(spec, res)
+	for _, p := range res.Packages {
+		switch p.StillFailing() {
+		case "tests":
+			res.Summary = "Tests in " + folderName(p.Workdir) + " still fail after the change. " + res.Summary
+		case "build":
+			res.Summary = "The build in " + folderName(p.Workdir) + " still fails after the change. " + res.Summary
+		}
+	}
 	switch {
 	case res.Tests.After.Ran && !res.Tests.After.OK:
 		res.Summary = "Tests still fail after the change. " + res.Summary
 	case res.Build.After.Ran && !res.Build.After.OK:
 		res.Summary = "The build still fails after the change. " + res.Summary
 	}
+}
+
+func hasLint(pkgs []*pkgRun) bool {
+	for _, p := range pkgs {
+		if p.Recipe != nil && p.Recipe.Lint != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// checkBefore sets one more package up and checks it before the change, inside its budget, or
+// records why it could not: toolchains get a fifth of the budget, the install two fifths, the
+// build a sixth or so, and the suite the rest.
+func (r *Runner) checkBefore(ctx context.Context, ws *Workspace, tc *toolchains, p *pkgRun, budget time.Duration) {
+	rep := ws.Reporter
+	if budget < extraMin {
+		p.Skipped = "there was not enough time left in the job to set it up and check it"
+		rep.Warn(folderName(p.Dir) + " was not checked: " + p.Skipped)
+		return
+	}
+	end := time.Now().Add(budget)
+	if tc != nil {
+		tc.provision(ctx, ws, p, time.Now().Add(budget/5))
+		tc.activate(ws)
+	}
+	pw := p.workspace(ws)
+	pruneMissing(p.Recipe, ws.RepoDir, pw.Env)
+	for _, n := range p.Notes {
+		rep.Warn(n)
+	}
+	if p.Recipe.Why != "" {
+		rep.Log(folderName(p.Dir) + " recipe note: " + p.Recipe.Why)
+	}
+	if len(p.Recipe.Setup) > 0 {
+		rep.Log(folderName(p.Dir) + " installing: " + setupLine(p.Recipe))
+		p.Setup = runSetup(ctx, pw, p.Recipe, min(budget*2/5, time.Until(end)))
+		if !p.Setup.OK {
+			rep.Warn(folderName(p.Dir) + ": dependencies did not install\n" + lastLines(p.Setup.Output, 600))
+		}
+	}
+	p.Build.Command, p.Tests.Command, p.Lint.Command = p.Recipe.Build.String(), p.Recipe.Test.String(), p.Recipe.Lint.String()
+	if !p.Recipe.Runnable() {
+		p.Build.Skipped, p.Tests.Skipped = p.Recipe.Why, p.Recipe.Why
+	}
+	p.Build.Before = r.check(ctx, pw, p, "build before", p.Recipe.Build, min(budget*3/20, time.Until(end)))
+	p.Tests.Before = r.check(ctx, pw, p, "test before", p.Recipe.Test, time.Until(end))
+	p.beforeSecs = p.Build.Before.Seconds + p.Tests.Before.Seconds
+}
+
+// checkAfter runs a further package's checks again after the change, each allowed half as long
+// again as it took before plus a minute, and never past the time the push needs.
+func (r *Runner) checkAfter(ctx context.Context, ws *Workspace, p *pkgRun, deadline time.Time) {
+	if p.Skipped != "" {
+		return
+	}
+	pw := p.workspace(ws)
+	capFor := func(before app.JobTestRun) time.Duration {
+		return afterCap(time.Duration(1.5*before.Seconds*float64(time.Second))+time.Minute, deadline)
+	}
+	p.Build.After = r.check(ctx, pw, p, "build after", p.Recipe.Build, capFor(p.Build.Before))
+	p.Tests.After = r.check(ctx, pw, p, "test after", p.Recipe.Test, capFor(p.Tests.Before))
+	if p.Recipe.Lint != nil {
+		p.Lint.After = r.check(ctx, pw, p, "lint", p.Recipe.Lint, capFor(p.Build.Before))
+	}
+}
+
+// check runs one of a further package's gates and reports it as a line rather than a phase: the
+// phases are the primary's, and a second "test_before" would read as the first one's.
+func (r *Runner) check(ctx context.Context, ws *Workspace, p *pkgRun, label string, s *app.RecipeStep, cap time.Duration) app.JobTestRun {
+	if s == nil {
+		return app.JobTestRun{}
+	}
+	if cap <= 0 {
+		p.note("its " + label + " check did not run: the job was out of time")
+		return app.JobTestRun{}
+	}
+	out := runStep(ctx, ws, s, cap)
+	ws.Reporter.Tests(folderName(p.Dir) + " " + stepLine(label, out))
+	return out
 }
 
 // gate runs one repeated check and reports it as a phase. A recipe with nothing for this gate
@@ -447,6 +658,10 @@ func (r *Runner) gate(ctx context.Context, ws *Workspace, rep *Reporter, res *ap
 	}
 	if stopped(ctx, res) {
 		rep.Phase(phase, "failed", res.Error.Message)
+		return app.JobTestRun{}
+	}
+	if cap <= 0 { // runCmd would read a zero as its two-minute default
+		rep.Phase(phase, "skipped", "the job ran out of time before this check")
 		return app.JobTestRun{}
 	}
 	rep.Phase(phase, "started", s.String())

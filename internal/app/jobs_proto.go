@@ -1,8 +1,11 @@
 package app
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 // The bot ⇄ worker protocol. The worker binary (internal/worker) imports these types, so the two
@@ -312,18 +315,30 @@ type JobEventsResponse struct {
 // ---- result ----
 
 type JobResult struct {
-	Seq           int64       `json:"seq"`
-	Status        string      `json:"status"` // succeeded | failed | cancelled | timeout
-	Summary       string      `json:"summary"`
-	Note          string      `json:"note,omitempty"` // a caveat on a job that still succeeded: the engine stopped at its turn or spend cap
-	PR            *JobPR      `json:"pr,omitempty"`
-	Branch        string      `json:"branch,omitempty"`
-	HeadSHA       string      `json:"head_sha,omitempty"`
-	Tests         JobTests    `json:"tests"`
-	Build         JobCheck    `json:"build"`           // the compile/typecheck gate, before and after
-	Lint          JobCheck    `json:"lint,omitempty"`  // when the recipe has one
-	Setup         JobStepRun  `json:"setup,omitempty"` // the dependency install
-	Recipe        *Recipe     `json:"recipe,omitempty"`
+	Seq     int64      `json:"seq"`
+	Status  string     `json:"status"` // succeeded | failed | cancelled | timeout
+	Summary string     `json:"summary"`
+	Note    string     `json:"note,omitempty"` // a caveat on a job that still succeeded: the engine stopped at its turn or spend cap
+	PR      *JobPR     `json:"pr,omitempty"`
+	Branch  string     `json:"branch,omitempty"`
+	HeadSHA string     `json:"head_sha,omitempty"`
+	Tests   JobTests   `json:"tests"`
+	Build   JobCheck   `json:"build"`           // the compile/typecheck gate, before and after
+	Lint    JobCheck   `json:"lint,omitempty"`  // when the recipe has one
+	Setup   JobStepRun `json:"setup,omitempty"` // the dependency install
+	Recipe  *Recipe    `json:"recipe,omitempty"`
+	// CheckNote is a caveat on how the primary package was checked rather than on the change:
+	// "pins Python 3.5, which the worker cannot provide; its checks ran on 3.8". Note is the
+	// other kind — the engine stopped early — and the two are shown apart.
+	CheckNote string `json:"check_note,omitempty"`
+	// Packages are the OTHER packages the brief named, each set up and checked before and after
+	// on its own toolchain. The primary stays in Setup/Build/Tests/Lint/Recipe, so everything
+	// written before a job could check more than one package reads the job it always did;
+	// Checked is the one list with the primary first.
+	Packages []JobPackage `json:"packages,omitempty"`
+	// Unchecked are package directories the change touched that nothing checked, named so their
+	// silence is never read as a pass.
+	Unchecked     []string    `json:"unchecked,omitempty"`
 	DiffStat      JobDiffStat `json:"diff_stat"`
 	FilesChanged  []string    `json:"files_changed,omitempty"`
 	Usage         JobUsage    `json:"usage"` // total for the job
@@ -381,6 +396,187 @@ type JobDiffStat struct {
 	Files      int `json:"files"`
 	Insertions int `json:"insertions"`
 	Deletions  int `json:"deletions"`
+}
+
+// How many packages one job checks, and how much of each check's output a result carries.
+const (
+	JobCheckedPackagesMax    = 3    // packages one job sets up and checks, the primary included
+	JobUncheckedMax          = 20   // changed-but-unchecked package directories a result keeps
+	JobCheckOutputMaxBytes   = 4000 // one run's output tail on the primary package
+	JobPackageOutputMaxBytes = 1500 // one run's output tail on each other package
+)
+
+// JobPackage is one package of a repository that a job set up and checked on its own — a
+// monorepo's web/ beside its services/api/ — with its own toolchain, install and gates.
+type JobPackage struct {
+	Workdir string     `json:"workdir"` // relative to the repository root; "." is the root
+	Recipe  *Recipe    `json:"recipe,omitempty"`
+	Setup   JobStepRun `json:"setup,omitempty"`
+	Build   JobCheck   `json:"build"`
+	Tests   JobCheck   `json:"tests"`
+	Lint    JobCheck   `json:"lint,omitempty"`
+	Note    string     `json:"note,omitempty"`    // this package's CheckNote
+	Skipped string     `json:"skipped,omitempty"` // why nothing ran here at all
+}
+
+// StillFailing names the gate that fails after the change — "tests", then "build" — or "".
+func (p *JobPackage) StillFailing() string {
+	switch {
+	case p.Tests.After.Ran && !p.Tests.After.OK:
+		return "tests"
+	case p.Build.After.Ran && !p.Build.After.OK:
+		return "build"
+	}
+	return ""
+}
+
+// Checked is every package the job checked, the primary first, in one shape.
+func (r *JobResult) Checked() []JobPackage {
+	primary := JobPackage{Workdir: ".", Recipe: r.Recipe, Setup: r.Setup, Build: r.Build, Tests: r.Tests, Lint: r.Lint, Note: r.CheckNote}
+	if r.Recipe != nil && r.Recipe.Workdir != "" {
+		primary.Workdir = r.Recipe.Workdir
+	}
+	return append([]JobPackage{primary}, r.Packages...)
+}
+
+// SetByAdmin is whether a connection's recipe is somebody's decision rather than what an earlier
+// job worked out and the bot remembered. Only a decision may steer a job; a remembered guess is
+// what the last job happened to be about. A recipe from before Source existed counts as a
+// decision, which is what it was treated as then.
+func (r *Recipe) SetByAdmin() bool {
+	return r != nil && (r.Source == RecipeSourceConnection || r.Source == "")
+}
+
+// EncodeJobResult is the one wire form of a result. json.Marshal escapes <, > and & as six-byte
+// sequences, and test output is full of them: the same result then measures differently on
+// each side of a size cap whose refusal loses the result.
+func EncodeJobResult(r *JobResult) ([]byte, error) {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(r); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(b.Bytes(), []byte("\n")), nil
+}
+
+// KeepTail cuts s to at most n bytes by dropping its start, on a rune boundary and marked: the
+// end of a check's output is where its failure is.
+func KeepTail(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	const mark = "…\n"
+	if n <= len(mark) {
+		return ""
+	}
+	cut := len(s) - (n - len(mark))
+	for cut < len(s) && !utf8.RuneStart(s[cut]) {
+		cut++
+	}
+	return mark + s[cut:]
+}
+
+// Fit trims a result until its encoded form is at most max bytes and reports whether it got
+// there. A result over the bot's cap is refused whole, which loses a finished job, so this gives
+// up the least useful parts first: output of checks that passed (the pull request quoted it),
+// then the engine's log, then the file list; the tail of a failing check goes last.
+func (r *JobResult) Fit(max int) bool {
+	fits := func() bool {
+		b, err := EncodeJobResult(r)
+		return err == nil && len(b) <= max
+	}
+	if fits() {
+		return true
+	}
+	each := func(fn func(c *JobCheck, s *JobStepRun, extra bool)) {
+		fn(&r.Build, &r.Setup, false)
+		fn(&r.Tests, nil, false)
+		fn(&r.Lint, nil, false)
+		for i := range r.Packages {
+			p := &r.Packages[i]
+			fn(&p.Build, &p.Setup, true)
+			fn(&p.Tests, nil, true)
+			fn(&p.Lint, nil, true)
+		}
+	}
+	clearPassing := func(extra bool) func() {
+		return func() {
+			each(func(c *JobCheck, s *JobStepRun, isExtra bool) {
+				if isExtra != extra {
+					return
+				}
+				for _, run := range []*JobTestRun{&c.Before, &c.After} {
+					if run.OK {
+						run.Output = ""
+					}
+				}
+				if s != nil && s.OK {
+					s.Output = ""
+				}
+			})
+		}
+	}
+	cutFailing := func(extra bool, n int) func() {
+		return func() {
+			each(func(c *JobCheck, s *JobStepRun, isExtra bool) {
+				if isExtra != extra {
+					return
+				}
+				c.Before.Output, c.After.Output = KeepTail(c.Before.Output, n), KeepTail(c.After.Output, n)
+				if s != nil {
+					s.Output = KeepTail(s.Output, n)
+				}
+			})
+		}
+	}
+	steps := []func(){
+		clearPassing(true),
+		clearPassing(false),
+		func() { r.LogTail = KeepTail(r.LogTail, 32<<10) },
+		cutFailing(true, 1000),
+		func() { r.LogTail = KeepTail(r.LogTail, 16<<10) },
+		func() { r.FilesChanged = keepFiles(r.FilesChanged, 50) },
+		cutFailing(false, 2000),
+		func() { r.Summary = cutHead(r.Summary, 4<<10) },
+		func() { r.LogTail = KeepTail(r.LogTail, 4<<10) },
+		cutFailing(true, 0),
+		cutFailing(false, 0),
+		func() { r.LogTail, r.TicketComment = "", cutHead(r.TicketComment, 1<<10) },
+	}
+	for _, step := range steps {
+		step()
+		if fits() {
+			return true
+		}
+	}
+	return false
+}
+
+// keepFiles keeps the first n of a changed-file list, folding the rest — including an earlier
+// "… and N more files" line — into one count.
+func keepFiles(files []string, n int) []string {
+	if len(files) <= n+1 {
+		return files
+	}
+	more := 0
+	if last := files[len(files)-1]; strings.HasPrefix(last, "… and ") {
+		fmt.Sscanf(strings.TrimPrefix(last, "… and "), "%d", &more)
+		files = files[:len(files)-1]
+	}
+	more += len(files) - n
+	return append(files[:n:n], fmt.Sprintf("… and %d more files", more))
+}
+
+// cutHead keeps the start of s — a summary's point is at its top — on a rune boundary.
+func cutHead(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "…"
 }
 
 // JobError codes: empty_diff | tests_failed | budget_exceeded | clone_failed | base_branch_missing |

@@ -144,7 +144,7 @@ func (c *Client) PutDiff(ctx context.Context, diff string) error {
 }
 
 func (c *Client) Result(ctx context.Context, res app.JobResult) error {
-	body, _ := json.Marshal(res)
+	body, _ := app.EncodeJobResult(&res) // the form Fit measured
 	_, _, err := c.do(ctx, "POST", "/result", body, "application/json", 20)
 	return err
 }

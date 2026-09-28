@@ -169,6 +169,16 @@ func (a *Agent) refuseTool(ctx context.Context, c *Call, name, rawArgs string) s
 		if conns := a.personalReach(c); len(conns) > 0 {
 			logArgs = privateScriptArgs(ctx, c, conns)
 		}
+	} else if isDriveTool(name) {
+		// The same reasoning for a Drive search: where the channel reaches somebody's own Drive,
+		// the words it was run with may have been run against their files.
+		if _, own := drivesOf(c.Access); len(own) > 0 {
+			names := make([]string, len(own))
+			for i, conn := range own {
+				names[i] = conn.Name
+			}
+			logArgs = privateScriptArgs(ctx, c, names)
+		}
 	}
 	a.store.LogToolCall(ctx, c.OrgID, c.TeamID, c.Channel, c.ThreadTS, name, logArgs, out, false, 0)
 	return fmt.Sprintf("<tool_result name=%q>\n%s\n</tool_result>", name, out)

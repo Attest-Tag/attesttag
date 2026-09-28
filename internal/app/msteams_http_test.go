@@ -131,22 +131,29 @@ func TestATeamsMessageIsAnsweredOnceItsTenantIsLinked(t *testing.T) {
 		answer.Activity.TextFormat != "markdown" {
 		t.Fatalf("the answer was %+v", answer)
 	}
-	// The next turn reads the chat back from the log, so both sides of this one must be in it.
+	// The next turn reads the chat back from the log, so both sides of this one must be in it. The
+	// answer is logged once Teams has answered the post with its id, which is after the fake has
+	// counted it, so the log gets the same grace the post did.
 	sl, err := b.slacks.For(ctx, "msteams:"+teamsOrg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	thread, err := sl.Thread(ctx, "a:chat-ana", msteamsChatThread, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var said []string
-	for _, m := range thread {
-		said = append(said, m.Text)
-	}
-	joined := strings.Join(said, " | ")
-	if !strings.Contains(joined, "how long do refunds take?") || !strings.Contains(joined, "five working days") {
-		t.Errorf("the log holds %q", joined)
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		thread, err := sl.Thread(ctx, "a:chat-ana", msteamsChatThread, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var said []string
+		for _, m := range thread {
+			said = append(said, m.Text)
+		}
+		joined := strings.Join(said, " | ")
+		if strings.Contains(joined, "how long do refunds take?") && strings.Contains(joined, "five working days") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the log holds %q", joined)
+		}
 	}
 }
 
