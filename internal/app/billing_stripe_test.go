@@ -198,6 +198,9 @@ func TestStripeModeReadsTheKeyPrefix(t *testing.T) {
 	if stripeMode("sk_live_abc") != "live" || stripeMode("sk_test_abc") != "test" || stripeMode("") != "test" {
 		t.Fatal("a live key must not be mistaken for a test one, and an absent key must not read as live")
 	}
+	if stripeMode("rk_live_abc") != "live" || stripeMode("rk_test_abc") != "test" {
+		t.Fatal("a restricted key must read as the mode its prefix names")
+	}
 }
 
 // customer and customer_creation are mutually exclusive at Stripe: sending both is a flat 400,

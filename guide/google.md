@@ -21,7 +21,8 @@ the same answer from, and a service account cannot read anybody's mailbox.
 > files for each person, nothing copied, nothing indexed. **Drive sync** mirrors *one shared
 > folder* into Documents so the whole organisation gets the same answer out of the index. Wanting
 > "the bot to know our handbook" is the second one; wanting "the bot to find my file" is the
-> first.
+> first. A channel given both a person's Drive and the company's searches the two together — see
+> [Finding a file in Drive](#finding-a-file-in-drive).
 
 ---
 
@@ -39,6 +40,7 @@ on their own.
 - [2. Add the connection and pick the parts](#2-add-the-connection-and-pick-the-parts)
 - [3. Attach it where it should reach](#3-attach-it-where-it-should-reach)
 - [4. Everyone connects themselves](#4-everyone-connects-themselves)
+- [Finding a file in Drive](#finding-a-file-in-drive)
 - [What writes do](#what-writes-do)
 - [When it does not work](#when-it-does-not-work)
 
@@ -147,6 +149,29 @@ If nobody has set any of this up and somebody asks about their calendar anyway, 
 the setup steps into the thread — with the real console links and the real redirect URI — rather
 than inventing an answer. It is usually not the asker who can act on them, which is why it goes
 in the thread rather than in a DM.
+
+## Finding a file in Drive
+
+A channel can reach two kinds of Drive: the company's, through a **Google Drive** service-account
+connection attached to it (the same kind of credential a [Drive sync](#drive-sync) uses), and each
+person's own, through the **Drive** part of Google Workspace. The bot finds files with
+`drive_search` and reads them with `drive_read`, which ask every Drive in reach, each under its own
+credential, and say whose each file is:
+
+- A file in the company's Drive needs nobody to connect anything. Somebody who has not connected
+  their own account gets the company's files, and a line saying their own Drive was not searched.
+- Their own files are listed when they ask about them — *find my Q3 notes*, *in my Drive* — or ask
+  in a DM. Found by a search that was not about their own files, in a channel, they go to the asker
+  in a direct message, and the channel hears only how many there were.
+- A file both can open is listed as the company's.
+
+`drive_read` reads a Google Doc, a Sheet (its first tab, as CSV), Slides, uploaded text and CSV
+files, and lists a folder. Given a word to match, it reads the whole file and returns only the
+lines containing it, under a CSV's header: the way to look up one row in a long sheet. A PDF or an
+Office file cannot be read this way; a synced folder's copy of it is in Documents.
+
+A search that went through somebody's own Drive is on Activity like any other call on their
+account: whose account it was and the size of the answer, never what was searched for or found.
 
 ## What writes do
 

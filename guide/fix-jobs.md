@@ -54,8 +54,9 @@ that one job — every call the worker makes back to the bot carries it, it expi
 timeout plus fifteen minutes, and it is revoked two minutes after the job ends. The worker claims
 the spec, the repository token and a model key back over `POST /api/worker/jobs/{id}/claim`, then
 clones the base branch (token in an HTTP header, never in argv, the remote URL or on disk; tags,
-submodules and LFS objects come with it), resolves the recipe, installs the dependencies, builds
-and tests, runs the engine, builds and tests again, commits, pushes a new branch named by the
+submodules and LFS objects come with it), resolves the recipe of every package the brief points
+at, installs their dependencies, builds and tests each, runs the engine, builds and tests again,
+commits, pushes a new branch named by the
 organisation's convention — `bugfix/fix-12-retry-storm-attest_tag` by default: a prefix picked by
 the kind of change, `fix-<id>-<slug>`, then the suffix that marks it as the bot's (see
 `worker_branch_prefix` in [configuration](configuration.md#console-settings)) — and opens a
@@ -101,18 +102,40 @@ What a job runs is a **recipe**, and three things can decide it, in this order:
 
    Every command is a program and its arguments — pipes, redirection and chaining are refused
    rather than quietly run, so a file a contributor commits is not a shell in the worker.
-2. **The recipe on the repository connection**, set by an admin in the console.
+2. **The recipe on the repository connection**, set by an admin in the console. What the first
+   job on a repository worked out is remembered there too, but only to route later jobs to the
+   right worker image — it never decides what a later job runs, since that job may be about
+   another package.
 3. **Detection**, which reads the marker files in the clone: Go, Rust, Python (uv, Poetry,
    Pipenv, requirements), Node (npm, pnpm, Yarn, Bun), Maven, Gradle, .NET, Ruby, PHP, Elixir,
-   Dart, Swift, CMake and a plain Makefile. It picks the package directory nearest the files the
-   brief pointed at, so a monorepo runs the right package's suite; where a repository declares
-   several ecosystems, each contributes its install step and the most specific one names the
-   recipe. An authored recipe is merged over the detected one, so correcting the test command
-   does not cost you the rest.
+   Dart, Swift, CMake and a plain Makefile. It picks the package directory nearest the first file
+   the brief pointed at, and checks the other packages the brief points into as well (below);
+   where one directory declares several ecosystems, each contributes its install step and the
+   most specific one names the recipe. An authored recipe is merged over the detected one, so
+   correcting the test command does not cost you the rest.
 
 Whichever decided it, the resolved recipe reaches the engine's prompt — the exact commands, the
 directory, and what they said before the change — so it runs the same checks the harness will
 grade it with instead of going looking for them.
+
+#### Monorepos and more than one package
+
+A job checks every package its brief points at, up to three. The first file's package is the
+primary; each other package the brief names a file in is set up and checked the same way — its
+own toolchains, its own install, its own build and tests before and after the change — within the
+time the engine can spare, and one that no longer fits is named as not checked, with the reason.
+A package the change touched that the brief never named is listed as *changed, not checked* in the
+pull request, the thread and the console, so its silence is never read as a pass. The other
+packages are always detected: a `.attest/recipe.yaml` or a console recipe speaks for the package
+it names. Documentation, examples and tooling folders (`docs/`, `examples/`, `scripts/`, …) are
+never checked as packages of their own.
+
+Folders can pin different versions of the same tool — `web/` on Node 20 beside `tools/` on
+Node 22, one service on Python 3.9 and another on 3.12 — and every command, the checks' and the
+engine's, runs the version pinned where it runs. A pin nothing can serve is said, never swapped
+in silence: a folder pinning a Python older than 3.8, which no longer exists in any form the
+worker can obtain, runs on 3.8 and the pull request and the engine are told so; any other
+unobtainable version runs on the image's own, and says that.
 
 #### Toolchains and the dependency cache
 
@@ -120,9 +143,12 @@ Toolchains come from two places. The worker image bakes in Python, Node, Go and 
 second, heavier image adds a JDK, Maven, Gradle and the .NET SDK, which the bot routes to per
 repository with `WORKER_JOB_NAMES` — once the repository's ecosystem is known, from an admin's
 recipe or from the first job, which runs on the base image). Everything else, and every *other
-version* of those, is fetched per job by [mise](https://mise.jdx.dev) from what the repository
-already pins — `.tool-versions`, `.nvmrc`, `.python-version`, `rust-toolchain.toml`,
-`.java-version`. Fetched toolchains and every package-manager store land in a **dependency cache**
+version* of those, is fetched per job by [mise](https://mise.jdx.dev) from what each folder of the
+repository pins — `.tool-versions`, `mise.toml`, `.nvmrc`, `.python-version`, `.java-version`,
+`.ruby-version` — and mise's shims pick the right one wherever a command runs. Go and Rust switch
+per folder on their own (`GOTOOLCHAIN=auto` from `go.mod`, rustup from `rust-toolchain.toml`). A
+range in a manifest (`requires-python`, `engines.node`, a Maven release) counts as its floor, the
+oldest version it allows. Fetched toolchains and every package-manager store land in a **dependency cache**
 kept per organisation, repository and base branch in a Google Cloud Storage bucket
 (`WORKER_CACHE_BUCKET`, else `LITESTREAM_BUCKET`), which the bot hands the worker as two
 short-lived signed URLs with the claim, so the container holds no storage credential and the bot
@@ -130,8 +156,9 @@ proxies no bytes. `WORKER_CACHE=off` turns it off; on any other storage, without
 without permission to sign, jobs simply install from cold.
 
 A gate that cannot run is never reported as a gate that failed. A missing toolchain, a suite that
-needs a database the worker cannot start, a monorepo where nothing said which package — each comes
-back as itself, in the pull request and in the thread, together with what would fix it.
+needs a database the worker cannot start, a monorepo where nothing said which package, a package
+the change touched outside the brief — each comes back as itself, in the pull request and in the
+thread, together with what would fix it.
 
 #### The coding agent and its model key
 

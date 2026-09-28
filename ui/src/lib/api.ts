@@ -1347,12 +1347,36 @@ export type JobPR = { url: string; number: number; branch: string; base: string;
 
 export type JobTestRun = { ran: boolean; ok: boolean; passed?: number; failed?: number; seconds?: number; output?: string };
 
-export type JobTests = {
+/** A gate run before the change and after it: the build, the suite, the linter. */
+export type JobCheck = {
   command?: string;
   /** Why nothing ran: no suite found, or its runner is not installed in the worker. */
   skipped?: string;
   before: JobTestRun;
   after: JobTestRun;
+};
+
+/** The suite, which is one JobCheck among several; the name stays because old code reads it. */
+export type JobTests = JobCheck;
+
+/** A step that runs once: the dependency install. */
+export type JobStepRun = { command?: string; ran: boolean; ok: boolean; seconds?: number; output?: string };
+
+/** One package of a repository a job set up and checked on its own toolchain — a monorepo's
+ * web/ beside its services/api/. */
+export type JobPackage = {
+  /** Relative to the repository root; "." is the root. */
+  workdir: string;
+  recipe?: Recipe | null;
+  setup?: JobStepRun;
+  build: JobCheck;
+  tests: JobCheck;
+  /** Run after the change only. */
+  lint?: JobCheck;
+  /** A caveat on how this package was checked, such as a toolchain it pins that the worker could not provide. */
+  note?: string;
+  /** Why nothing ran here at all. */
+  skipped?: string;
 };
 
 export type JobDiffStat = { files: number; insertions: number; deletions: number };
@@ -1368,7 +1392,23 @@ export type JobResult = {
   pr?: JobPR | null;
   branch?: string;
   head_sha?: string;
+  // The primary package's checks. Only `tests` is on every row: the rest came later, so a row
+  // written before them has none.
   tests: JobTests;
+  /** The compile/typecheck gate. */
+  build?: JobCheck;
+  /** Run after the change only, when the recipe has a linter. */
+  lint?: JobCheck;
+  /** The dependency install. */
+  setup?: JobStepRun;
+  /** What the worker ran on the primary package, and who decided it. */
+  recipe?: Recipe | null;
+  /** A caveat on how the primary package was checked, shown apart from `note`, which says the engine stopped early. */
+  check_note?: string;
+  /** The OTHER packages checked; the primary stays in the fields above. */
+  packages?: JobPackage[] | null;
+  /** Package directories the change touched that nothing checked. */
+  unchecked?: string[] | null;
   diff_stat: JobDiffStat;
   files_changed?: string[] | null;
   usage: JobUsage;

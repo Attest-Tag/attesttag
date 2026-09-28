@@ -37,8 +37,50 @@ const (
 )
 
 // cacheSubdirs are what is worth carrying between jobs. Anything else under the cache directory
-// is left behind.
-var cacheSubdirs = []string{"uv", "npm", "go", "cargo", "mise", "gradle", "maven", "composer", "bundle", "nuget", "pub"}
+// is left behind. uv-python holds the interpreters uv fetches (UV_PYTHON_INSTALL_DIR, proc.go).
+var cacheSubdirs = []string{"uv", "uv-python", "npm", "go", "cargo", "mise", "gradle", "maven", "composer", "bundle", "nuget", "pub"}
+
+// wholeDir is whether a cache directory is an installed toolchain, which is carried whole or not
+// at all. A store of packages cut off halfway is a smaller store; a Python cut off halfway is
+// "installed" to mise and uv and broken to everything that runs it.
+func wholeDir(rel string) bool {
+	parts := strings.Split(filepath.ToSlash(rel), "/")
+	return (len(parts) == 4 && parts[0] == "mise" && parts[1] == "installs") || (len(parts) == 2 && parts[0] == "uv-python")
+}
+
+// cacheLink is the target a symlink at path can carry: relative, and landing inside root. A
+// toolchain is full of them — node's npx, python's python3, mise's version aliases — and
+// dropping them left an install that mise counts as present with half its programs missing, so
+// the steps quietly ran on the image's own. A link that leaves the cache is not carried.
+func cacheLink(root, path string) (string, bool) {
+	target, err := os.Readlink(path)
+	if err != nil {
+		return "", false
+	}
+	if filepath.IsAbs(target) {
+		if target, err = filepath.Rel(filepath.Dir(path), target); err != nil {
+			return "", false
+		}
+	}
+	resolved := filepath.Join(filepath.Dir(path), target)
+	if rel, err := filepath.Rel(root, resolved); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return target, true
+}
+
+func dirSize(dir string) int64 {
+	var n int64
+	filepath.WalkDir(dir, func(_ string, d os.DirEntry, err error) error {
+		if err == nil && d.Type().IsRegular() {
+			if info, err := d.Info(); err == nil {
+				n += info.Size()
+			}
+		}
+		return nil
+	})
+	return n
+}
 
 // restoreCache unpacks the previous run's cache over the work directory. Every failure is a
 // miss: a job with a cold cache is slower, never wrong.
@@ -145,14 +187,26 @@ func tarFrom(w io.Writer, root string, max int64) (int64, error) {
 			if err != nil {
 				return nil
 			}
-			if fi.Mode()&os.ModeSymlink != 0 || (!fi.Mode().IsRegular() && !fi.IsDir()) {
-				return nil // a cache is files; links out of it are not worth carrying
+			if fi.IsDir() && wholeDir(rel) && written+dirSize(path) > max {
+				return filepath.SkipDir
 			}
-			h, err := tar.FileInfoHeader(fi, "")
+			link := ""
+			if fi.Mode()&os.ModeSymlink != 0 {
+				var ok bool
+				if link, ok = cacheLink(root, path); !ok {
+					return nil
+				}
+			} else if !fi.Mode().IsRegular() && !fi.IsDir() {
+				return nil
+			}
+			h, err := tar.FileInfoHeader(fi, link)
 			if err != nil {
 				return nil
 			}
 			h.Name = filepath.ToSlash(rel)
+			if link != "" {
+				return tw.WriteHeader(h)
+			}
 			if err := tw.WriteHeader(h); err != nil {
 				return err
 			}
@@ -192,18 +246,45 @@ func (c *countWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// untarInto unpacks under root, refusing any entry that would land outside it.
-func untarInto(r io.Reader, root string) (int64, error) {
+// insideRoot is path, cleaned, when it is root or under it.
+func insideRoot(root, path string) (string, bool) {
+	rel, err := filepath.Rel(root, filepath.Clean(path))
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return rel, true
+}
+
+// untarInto unpacks under root, refusing any entry that would land outside it. Links are made
+// last, once every file is down, and only where they stay inside root, so no entry is ever
+// written through one. A restore that fails partway leaves no toolchain behind, since a partial
+// one reads as installed.
+func untarInto(r io.Reader, root string) (total int64, err error) {
+	defer func() {
+		if err != nil {
+			os.RemoveAll(filepath.Join(root, "mise"))
+			os.RemoveAll(filepath.Join(root, "uv-python"))
+		}
+	}()
 	gz, err := gzip.NewReader(r)
 	if err != nil {
 		return 0, err
 	}
 	defer gz.Close()
 	tr := tar.NewReader(gz)
-	var total int64
+	type link struct{ at, to string }
+	var links []link
 	for {
 		h, err := tr.Next()
 		if err == io.EOF {
+			for _, l := range links {
+				if _, ok := insideRoot(root, filepath.Join(filepath.Dir(l.at), l.to)); !ok || filepath.IsAbs(l.to) {
+					continue
+				}
+				os.MkdirAll(filepath.Dir(l.at), 0o755)
+				os.Remove(l.at)
+				os.Symlink(l.to, l.at)
+			}
 			return total, nil
 		}
 		if err != nil {
@@ -218,6 +299,8 @@ func untarInto(r io.Reader, root string) (int64, error) {
 			continue
 		}
 		switch h.Typeflag {
+		case tar.TypeSymlink:
+			links = append(links, link{dest, filepath.FromSlash(h.Linkname)})
 		case tar.TypeDir:
 			os.MkdirAll(dest, 0o755)
 		case tar.TypeReg:

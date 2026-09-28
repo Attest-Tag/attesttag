@@ -60,7 +60,8 @@ func privateArgs(ctx context.Context, c *Call, conn *Connection, req ProxyReques
 // the status when the request reached the service, and otherwise the first sentence of why it did
 // not — held for a Confirm, waiting on an approver, not connected yet. A memory call keeps only its
 // size, because its errors can quote the note, and so does a run_js script: what it printed, and
-// any error it threw, is whatever it made of the mail or calendar it fetched.
+// any error it threw, is whatever it made of the mail or calendar it fetched. So do the Drive
+// tools: their first sentence is a count of somebody's files, and their errors name the file.
 func privateResult(name string, req ProxyRequest, out string, size int, err error) string {
 	kept := struct {
 		Status  int    `json:"status,omitempty"`
@@ -69,7 +70,7 @@ func privateResult(name string, req ProxyRequest, out string, size int, err erro
 		Outcome string `json:"outcome,omitempty"`
 	}{Bytes: size}
 	switch {
-	case personalMemoryTool(name), name == "run_js":
+	case personalMemoryTool(name), name == "run_js", isDriveTool(name):
 	case err != nil:
 		kept.Error = privateLine(err.Error(), req.URL)
 	default:

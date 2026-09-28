@@ -237,6 +237,25 @@ func TestALivemodeMismatchCreditsNothing(t *testing.T) {
 	}
 }
 
+// The other side of the check above: a deployment on a restricted live key is live. Read as test,
+// it answered 200 to every real event and credited none of them.
+func TestARestrictedLiveKeyCreditsALiveEvent(t *testing.T) {
+	cfg := billingCfg()
+	cfg.StripeSecretKey = "rk_live_x"
+	b, st := billingBot(t, cfg)
+	org := testOrg(t, st, "Restricted Ltd")
+	body := strings.Replace(topUpEvent("evt_rk_live", org.PublicID, "pi_rk_live", 25000), `"livemode":false`, `"livemode":true`, 1)
+
+	if w := postWebhook(t, b, body, true); w.Code != 200 {
+		t.Fatalf("answered %d: %s", w.Code, w.Body.String())
+	}
+	acct, _ := st.BillingAccountOf(context.Background(), org.ID)
+	if acct.CreditBalanceMicros != usdToMicros(250) {
+		t.Fatalf("balance is %s after a live $250 top-up on a restricted live key, want $250",
+			creditAmount(acct.CreditBalanceMicros))
+	}
+}
+
 // The attack shape: a checkout naming organisation B for a customer already bound to A. Neither
 // is credited, and the one that pays for it is nobody.
 func TestACheckoutCannotBeAttachedToAnotherOrganisation(t *testing.T) {
