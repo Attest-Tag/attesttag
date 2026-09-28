@@ -30,8 +30,12 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 COPY --from=uibuild /ui/out ./ui/out
+# The release workflow passes the tag (v0.1.0) for `attesttag version` and the startup line, which
+# print it without the v. Declared here, after the module download, so a new version reuses that
+# layer; a build that passes none, a Cloud Run source deploy among them, says "dev".
+ARG VERSION="dev"
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -trimpath -ldflags="-s -w" -o /attesttag ./cmd/attesttag
+    go build -trimpath -ldflags="-s -w -X attesttag/internal/app.Version=${VERSION#v}" -o /attesttag ./cmd/attesttag
 
 FROM litestream/litestream:0.5.17 AS litestream
 
@@ -52,7 +56,8 @@ USER attest
 # -trimpath strips the VCS stamp out of build info, so the commit has to arrive as a build arg —
 # the first thing worth knowing about a bug report. It becomes the revision label at the bottom of
 # this file, and, where SQLite is replicated to a bucket, the commit the write lease records for
-# the container holding the database (internal/app/lease.go). Neither !whoami nor /health says it.
+# the container holding the database (internal/app/lease.go). `attesttag version` and the startup
+# line print it beside the version; neither !whoami nor /health says it.
 ARG GIT_COMMIT=""
 ENV GIT_COMMIT=$GIT_COMMIT
 ENV DB_PATH=/data/attesttag.db DOCS_DIR=/app/docs PORT=8080

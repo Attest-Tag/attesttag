@@ -107,6 +107,17 @@ Small and single-purpose travels fastest. Please:
 For anything large, open an issue first and let's agree on the shape before you spend a weekend
 on it. That is for your benefit, not the project's.
 
+## Releases
+
+For maintainers. A release is a `v*` tag on `main`, and the tag is the whole ceremony:
+[`release.yml`](.github/workflows/release.yml) runs the suite, publishes the images and the Helm
+chart to GHCR, builds the binaries with `make dist`, and creates the GitHub release. Before
+tagging, add the version's section to [`CHANGELOG.md`](CHANGELOG.md): the workflow refuses a tag
+without one, and the release notes open with it. A patch release never carries a migration,
+because deployments pinned to a minor version restart onto it unread. When the workflow itself
+has changed, tag a release candidate first (`v0.2.0-rc.1`), which publishes everything except
+`:latest` and is marked as a prerelease.
+
 ## Security
 
 Do not open a public issue for a vulnerability. [`SECURITY.md`](SECURITY.md) says where to send

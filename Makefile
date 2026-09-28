@@ -1,10 +1,35 @@
-.PHONY: build ui hooks test test-deploy evals run deploy worker-build worker-deploy worker-deploy-aws worker-deploy-azure
+.PHONY: build ui dist hooks test test-deploy evals run deploy worker-build worker-deploy worker-deploy-aws worker-deploy-azure
 
 build: ui
 	go build -o attesttag ./cmd/attesttag
 
 ui:
 	cd ui && npm ci --no-audit --no-fund && npm run build
+
+# The binaries a GitHub release carries, in dist/: one archive per platform, holding the binary
+# with the console embedded beside LICENSE and README.md, and a SHA256SUMS over them. The release
+# workflow runs it after `make ui` with VERSION=<the tag without its v>; run it yourself to see
+# what a release would hold. CGO_ENABLED=0 and pure-Go SQLite make each one a plain cross-compile
+# from any machine. COPYFILE_DISABLE keeps a Mac's tar from adding ._ files for extended attributes.
+VERSION ?= dev
+COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null)
+DIST_PLATFORMS ?= linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
+DIST_VERSION = $(patsubst v%,%,$(VERSION))
+
+dist:
+	@test -d ui/out/_next || { echo "the console is not built: run make ui first, or every binary serves a blank one" >&2; exit 1; }
+	rm -rf dist && mkdir dist
+	set -e; for p in $(DIST_PLATFORMS); do \
+		os=$${p%/*}; arch=$${p#*/}; name=attesttag_$(DIST_VERSION)_$${os}_$${arch}; \
+		mkdir dist/$$name; \
+		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath \
+			-ldflags="-s -w -X attesttag/internal/app.Version=$(DIST_VERSION) -X attesttag/internal/app.Commit=$(COMMIT)" \
+			-o dist/$$name/attesttag ./cmd/attesttag; \
+		cp LICENSE README.md dist/$$name/; \
+		COPYFILE_DISABLE=1 tar -C dist -czf dist/$$name.tar.gz $$name; \
+		rm -r dist/$$name; \
+	done
+	cd dist && if command -v sha256sum >/dev/null; then sha256sum *.tar.gz; else shasum -a 256 *.tar.gz; fi > SHA256SUMS
 
 # The pre-push check: this repository is public, so a push that would publish a secret, a
 # dotenv file or one of your deployment's identifiers is refused before it leaves (.githooks/).

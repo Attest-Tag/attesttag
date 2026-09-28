@@ -152,8 +152,9 @@ published image can be pulled anonymously:
 docker manifest inspect ghcr.io/attest-tag/attesttag:latest >/dev/null 2>&1 && echo published || echo "build from source"
 ```
 
-If it cannot be pulled, the image has not been released yet. That is expected on a fresh
-checkout and is not an error — build locally instead:
+It should be: every release publishes it. If it cannot be pulled — this machine cannot reach
+ghcr.io, or the user wants this checkout rather than the latest release — build locally
+instead:
 
 - **Docker/compose:** `docker build -t attesttag-local .` now, and after step 1 add
   `ATTEST_IMAGE=attesttag-local` to `.env` (an `export` does not survive to a later command).
