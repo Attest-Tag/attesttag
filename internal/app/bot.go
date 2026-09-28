@@ -283,7 +283,7 @@ func Run() {
 	teams, _ := store.ActiveTeams(ctx)
 	// The startup line describes the deployment, not any one organisation, so the model and
 	// approver summary come from the environment defaults rather than a customer's settings.
-	slog.Info("started", "workspaces", len(teams), "model", cfg.Model, "db", describeDSN(dsn), "docs", describeDocStore(docs), "selftest", cfg.SelfTest,
+	slog.Info("started", "version", VersionString(), "workspaces", len(teams), "model", cfg.Model, "db", describeDSN(dsn), "docs", describeDocStore(docs), "selftest", cfg.SelfTest,
 		"llm_key", cfg.LLMKeyFingerprint()+" ("+cfg.LLMKeyName+" from "+cfg.LLMKeySource+")", "usable_by", describeBotAccess(), "writer", g.writerState())
 	if len(teams) == 0 {
 		what := "a Slack workspace"
