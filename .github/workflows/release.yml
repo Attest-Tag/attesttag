@@ -1,6 +1,7 @@
-# Publish a release from a v* tag: the bot image, the fix-job worker images, the Helm chart, and
-# the GitHub release that names them — the images every deploy path pulls by default
-# (ghcr.io/attest-tag/attesttag), and the chart the Kubernetes guide installs.
+# Publish a release from a v* tag: the bot image, the fix-job worker images, the Helm chart, the
+# binaries, and the GitHub release that names them and carries the binaries — the images every
+# deploy path pulls by default (ghcr.io/attest-tag/attesttag), the chart the Kubernetes guide
+# installs, and the binary for running without a container.
 #
 # Multi-arch here costs almost nothing, and the reason is worth knowing before anyone
 # "optimises" it: the binary is CGO_ENABLED=0 with pure-Go SQLite (modernc.org/sqlite), so Go
@@ -37,14 +38,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      # The GitHub release opens with this version's section of CHANGELOG.md: what changed and
+      # what an upgrade asks of you. A tag with no section stops here, before anything is
+      # published. A prerelease (0.2.0-rc.1) is checked for the section of the release it leads to.
+      - name: CHANGELOG.md has a section for this version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v want="## ${version%%-*}" 'index($0, want " ") == 1 || $0 == want { found = 1 } END { exit !found }' CHANGELOG.md \
+            || { echo "::error::CHANGELOG.md has no '## ${version%%-*}' section for ${GITHUB_REF_NAME}" >&2; exit 1; }
       - uses: actions/setup-node@v7
-        with: { node-version: "22", cache: npm, cache-dependency-path: ui/package-lock.json }
+        with: { node-version: "24", cache: npm, cache-dependency-path: ui/package-lock.json }
       - uses: actions/setup-go@v7
         with: { go-version-file: go.mod, cache: true }
       # The console is embedded with //go:embed, so it has to exist before anything compiles.
       - run: cd ui && npm ci --no-audit --no-fund && npm run build
       - run: go vet ./...
-      - run: go test ./...
+      # As ci.yml runs it: TestEvals skips itself without -eval, and the whole suite on one runner
+      # can outlast go test's default ten minutes.
+      - run: go test -skip TestEvals -timeout 30m ./...
 
   bot:
     needs: test
@@ -237,15 +248,46 @@ jobs:
           [ -n "$digest" ] || { echo "helm push printed no digest to sign" >&2; exit 1; }
           cosign sign --yes "${repo}/attest-tag@${digest}"
 
-  # The GitHub release, last, so that it never names an image or a chart that failed to publish.
-  # GitHub writes the notes from the pull requests merged since the previous tag, and what to pull
-  # goes in front of them. A security fix's reporter is credited in its advisory (SECURITY.md).
-  release:
-    needs: [bot, worker, chart]
+  # The binaries the GitHub release carries, for running without a container: Linux and macOS,
+  # amd64 and arm64, each a cross-compile for the reason at the top of this file, with the console
+  # embedded. `make dist` is the whole recipe, so what a release holds can be built and looked at
+  # locally first. SHA256SUMS lists the archives and is signed keylessly, as the images are, so
+  # one verify-blob vouches for every archive.
+  binaries:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
-      contents: write # create the release; this job runs nothing but gh
+      contents: read
+      id-token: write # keyless cosign signing of SHA256SUMS
     steps:
+      - uses: actions/checkout@v7
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@v7
+        with: { node-version: "24", cache: npm, cache-dependency-path: ui/package-lock.json }
+      - uses: actions/setup-go@v7
+        with: { go-version-file: go.mod, cache: true }
+      - run: make ui
+      - run: make dist VERSION="${GITHUB_REF_NAME#v}" COMMIT="$GITHUB_SHA"
+      - uses: sigstore/cosign-installer@v3
+      - name: Sign the checksums
+        run: cosign sign-blob --yes --bundle dist/SHA256SUMS.cosign.bundle dist/SHA256SUMS
+      - uses: actions/upload-artifact@v7
+        with: { name: binaries, path: dist/, if-no-files-found: error, retention-days: 7 }
+
+  # The GitHub release, last, so that it never names an image, a chart or a binary that failed to
+  # publish. Its notes open with this version's section of CHANGELOG.md, then say what was
+  # published and how to check it, then list the pull requests GitHub finds since the previous
+  # release. A security fix's reporter is credited in its advisory (SECURITY.md).
+  release:
+    needs: [bot, worker, chart, binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release and attach the binaries; this job builds nothing
+    steps:
+      - uses: actions/checkout@v7
+        with: { persist-credentials: false } # for CHANGELOG.md
+      - uses: actions/download-artifact@v8
+        with: { name: binaries, path: dist }
       - name: Create the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -255,7 +297,11 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           image="${REGISTRY}/${GITHUB_REPOSITORY,,}"
           chart="oci://${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}/charts/attest-tag"
-          cat > notes.md <<NOTES
+          # The section under "## <version>", up to the next release's heading. The test job has
+          # already refused a tag without one.
+          awk -v want="## ${version%%-*}" 'index($0, want " ") == 1 || $0 == want { on = 1; next } on && /^## / { exit } on' CHANGELOG.md > notes.md
+          cat >> notes.md <<NOTES
+
           **Images**, signed by this workflow with cosign:
 
           - \`${image}:${version}\` for linux/amd64 and linux/arm64, \`${DIGEST}\`
@@ -268,9 +314,42 @@ jobs:
           \`\`\`
 
           **Helm chart**: \`helm install attest-tag ${chart} --version ${version}\`
+
+          **Binaries** for Linux and macOS, amd64 and arm64, are attached below with the console
+          built in. Outside the image, PDFs need poppler's \`pdftotext\` on the PATH and SQLite
+          replicated to a bucket needs \`litestream\`; the image carries both. \`SHA256SUMS\` lists
+          the archives and is signed like the images:
+
+          \`\`\`bash
+          cosign verify-blob SHA256SUMS --bundle SHA256SUMS.cosign.bundle \\
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}" \\
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          shasum -a 256 --ignore-missing -c SHA256SUMS
+          \`\`\`
           NOTES
-          # A tag with a hyphen (v1.2.0-rc1) is a prerelease, as it is for the :latest tag above.
+          # GitHub shows a release's notes the way it shows a comment, every newline a line break,
+          # so the hard-wrapped lines of CHANGELOG.md and of the text above are joined back into
+          # paragraphs and list items. Code blocks are left as they are.
+          awk '
+            function flush() { if (buf != "") print buf; buf = "" }
+            /^```/ { flush(); fence = !fence; print; next }
+            fence { print; next }
+            /^$/ { flush(); print; next }
+            /^(#|- |\* |[0-9]+\. |\|)/ { flush(); buf = $0; next }
+            { sub(/^ +/, ""); buf = (buf == "" ? $0 : buf " " $0) }
+            END { flush() }
+          ' notes.md > release-notes.md
+          # A tag with a hyphen (v1.2.0-rc1) is a prerelease, as it is for the :latest tag above. A
+          # release lists the pull requests since the previous release rather than since its own
+          # prerelease, which would list next to nothing.
           flags=()
-          case "$GITHUB_REF_NAME" in *-*) flags+=(--prerelease) ;; esac
+          case "$GITHUB_REF_NAME" in
+            *-*) flags+=(--prerelease) ;;
+            *)
+              prev="$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases \
+                --limit 1 --json tagName --jq '.[0].tagName // empty')"
+              [ -z "$prev" ] || flags+=(--notes-start-tag "$prev")
+              ;;
+          esac
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
-            --title "$GITHUB_REF_NAME" --notes-file notes.md --generate-notes "${flags[@]}"
+            --title "$GITHUB_REF_NAME" --notes-file release-notes.md --generate-notes "${flags[@]}" dist/*

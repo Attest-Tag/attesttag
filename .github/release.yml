@@ -1,0 +1,11 @@
+# How GitHub groups the pull requests in a release's generated notes, which the release workflow
+# (workflows/release.yml) asks for after the CHANGELOG.md section. Dependabot's bumps are grouped
+# rather than dropped: a Go toolchain or base image bump can be the security fix in a release.
+changelog:
+  categories:
+    - title: Changes
+      labels: ["*"]
+      exclude:
+        labels: [dependencies]
+    - title: Dependencies
+      labels: [dependencies]
