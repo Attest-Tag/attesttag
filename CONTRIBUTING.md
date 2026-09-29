@@ -118,6 +118,11 @@ because deployments pinned to a minor version restart onto it unread. When the w
 has changed, tag a release candidate first (`v0.2.0-rc.1`), which publishes everything except
 `:latest` and is marked as a prerelease.
 
+0.1.0 was released as the source alone: the release workflow was disabled first
+(`gh workflow disable release.yml`), so its tag built nothing, and the GitHub release was made
+by hand with its CHANGELOG section as the notes. `gh workflow enable release.yml` turns the
+builds back on for the next tag.
+
 ## Security
 
 Do not open a public issue for a vulnerability. [`SECURITY.md`](SECURITY.md) says where to send

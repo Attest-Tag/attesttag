@@ -16,9 +16,9 @@ the template changed. `DOMAIN` is optional here, because ingress comes with a ma
 on an `azurecontainerapps.io` name.
 
 It runs `ghcr.io/attest-tag/attesttag:latest` unless `IMAGE` names another, and the app spec
-carries no registry credential, so the image must be one that can be pulled anonymously, as the
-released one is. To run this checkout instead, build it for `linux/amd64`, push it to a public
-repository of your own, and pass that as `IMAGE`:
+carries no registry credential, so the image must be one that can be pulled anonymously. Nothing
+is published there yet: build this checkout for `linux/amd64`, push it to a public repository of
+your own, and pass that as `IMAGE`:
 
 ```bash
 docker buildx build --platform linux/amd64 -t <registry>/<you>/attesttag:<tag> --push .
