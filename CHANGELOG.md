@@ -19,6 +19,10 @@ Versions follow [semantic versioning](https://semver.org). Before 1.0 that means
 The first release. It is the code that has run one organisation's Slack for months and runs the
 hosted service, with everything that was specific to that deployment turned into configuration.
 
+It is the source alone: no images, Helm chart or binaries are published for it yet, so build
+from the checkout as the deploy guides say (`docker build -t attesttag-local .`, or
+`make build`).
+
 - **Answers in Slack and Microsoft Teams**, in threads and DMs, on open-weight models through any
   OpenAI-compatible endpoint (OpenRouter and GLM-5.3-Flash by default).
 - **Tools with no setup:** Slack history and search, your documents, web search and fetch, memory

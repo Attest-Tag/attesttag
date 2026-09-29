@@ -6,7 +6,7 @@
 #   helm install attest-tag ./deploy/helm/attest-tag -n attest-tag \
 #     --set ingress.host=bot.example.com --set existingSecret=attest-tag-secrets
 #
-# From the first release on, oci://ghcr.io/attest-tag/charts/attest-tag --version <x.y.z> is the
+# Once a release publishes it, oci://ghcr.io/attest-tag/charts/attest-tag --version <x.y.z> is the
 # same chart, pinned to that release's images, in place of ./deploy/helm/attest-tag.
 #
 # The secrets come from the .env that deploy/local/bootstrap.sh wrote, whose MASTER_KEY you have

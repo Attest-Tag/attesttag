@@ -16,8 +16,8 @@ nobody expects one. `$MASTER_KEY` is a key you made first — `openssl rand -bas
 backed up somewhere other than the cluster: it seals every stored credential, and generating one
 inside the command line leaves the only copy in Helm's release history.
 
-Each release also publishes this chart, pinned to that release's images, so the path can be the
-registry instead of a checkout ([`CHANGELOG.md`](../../CHANGELOG.md) lists the releases):
+A release that publishes images publishes this chart too, pinned to them, and from then on the
+path can be the registry instead of a checkout. None has yet: 0.1.0 is the source alone.
 
 ```bash
 helm install attest-tag oci://ghcr.io/attest-tag/charts/attest-tag --version <x.y.z> ...
@@ -25,11 +25,11 @@ helm install attest-tag oci://ghcr.io/attest-tag/charts/attest-tag --version <x.
 
 ## Before you run it
 
-**The image.** The chart runs `ghcr.io/attest-tag/attesttag` at its `appVersion`: the release's
-own version in a chart pulled from the registry, and `latest` in the copy in this repository. To
-run this checkout instead, build it for your nodes' architecture, push it somewhere the cluster
-can pull from, and add `--set image.repository=<registry>/attesttag --set image.tag=<tag>` to the
-install (and `imagePullSecrets` if the registry is private):
+**No image has been published yet.** The chart runs `ghcr.io/attest-tag/attesttag` at its
+`appVersion`, `latest`, and nothing is published there. Build this checkout for your nodes'
+architecture, push it somewhere the cluster can pull from, and add
+`--set image.repository=<registry>/attesttag --set image.tag=<tag>` to the install (and
+`imagePullSecrets` if the registry is private):
 
 ```bash
 docker buildx build --platform linux/amd64 -t <registry>/attesttag:<tag> --push .
@@ -163,10 +163,10 @@ helm upgrade attest-tag ./deploy/helm/attest-tag -n attest-tag --reuse-values \
 
 `--reuse-values` keeps what the install set, the secrets included; without it the upgrade starts
 again from the chart's defaults and refuses to render. The Job runs
-`ghcr.io/attest-tag/attesttag-worker`, which each release publishes for `linux/amd64` only — so
-the bot pins each worker pod to amd64 nodes (`kubernetes.io/arch`), and a cluster with no amd64
-node needs an image of its own. `worker.arch` moves the pin, and `any` lifts it for an image
-built for every architecture you run. To run a worker built from this checkout, build
+`ghcr.io/attest-tag/attesttag-worker`, which a release that publishes images publishes for
+`linux/amd64` only — so the bot pins each worker pod to amd64 nodes (`kubernetes.io/arch`), and a
+cluster with no amd64 node needs an image of its own. `worker.arch` moves the pin, and `any` lifts
+it for an image built for every architecture you run. None has been published yet: build
 [`Dockerfile.worker`](../../Dockerfile.worker) for `linux/amd64`, push it, and set
 `worker.image.repository` and `worker.image.tag` to it.
 
