@@ -3,6 +3,7 @@ package app
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -40,6 +41,26 @@ func TestSameSiteOnlyRefusesCrossSite(t *testing.T) {
 		h(w, r)
 		if ok := w.Code == 200; ok != c.wantOK {
 			t.Errorf("%s: status %d, want ok=%v", c.name, w.Code, c.wantOK)
+		}
+	}
+}
+
+// The wrapper only helps on the routes that carry it, and the one that was missing it was the
+// last step of a sign-in: the post that trades a login challenge for a session. Every signed-out
+// post that can set or clear a session is listed here and driven through the real mux, so a new
+// one registered bare fails this rather than shipping.
+func TestSessionSettingPostsRefuseCrossSite(t *testing.T) {
+	_, mux, _ := installTestBot(t)
+	for _, path := range []string{
+		"/api/auth/signup", "/api/auth/login", "/api/auth/two-factor", "/api/auth/verify",
+		"/api/auth/forgot", "/api/auth/reset", "/api/auth/sso/start", "/api/auth/logout",
+	} {
+		r := httptest.NewRequest("POST", path, strings.NewReader(`{}`))
+		r.Header.Set("Sec-Fetch-Site", "cross-site")
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		if w.Code != http.StatusForbidden {
+			t.Errorf("POST %s from another site: status %d, want 403", path, w.Code)
 		}
 	}
 }

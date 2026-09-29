@@ -194,7 +194,11 @@ func (b *Bot) routes(mux *http.ServeMux, uiFS fs.FS) {
 	// Signed in: the account itself, rather than the organisation's configuration.
 	mux.HandleFunc("POST /api/auth/resend-verification", b.requireAdmin(b.handleResendVerification))
 	mux.HandleFunc("POST /api/auth/password", b.requireAdmin(b.handleChangePassword))
-	mux.HandleFunc("POST /api/auth/two-factor", b.handleTwoFactorLogin) // finishes a sign-in that owed a code
+	// Finishes a sign-in that owed a code. It sets a session just as the password post does, so it
+	// takes the same sameSiteOnly: the challenge names an account, not the browser that asked for
+	// it, and without this a page elsewhere could finish somebody else's sign-in in the visitor's
+	// browser.
+	mux.HandleFunc("POST /api/auth/two-factor", sameSiteOnly(b.handleTwoFactorLogin))
 	mux.HandleFunc("GET /api/auth/invite", b.requireAdmin(b.handleInvitePreview))
 	mux.HandleFunc("POST /api/auth/accept-invite", b.requireAdmin(b.handleAcceptInvite))
 	// Your own account: profile, and the second factor behind your password. Never anybody
