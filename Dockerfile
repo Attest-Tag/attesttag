@@ -1,28 +1,33 @@
 # attest_tag: console (Next.js static export) + static Go binary + Litestream.
 #
-# Multi-arch without QEMU. CGO_ENABLED=0 and pure-Go SQLite (modernc.org/sqlite) mean Go
-# cross-compiles, so the two build stages are pinned to the BUILDER's platform and only the
-# `go build` is told what to target. Building linux/arm64 on an amd64 runner therefore costs
-# the same as building amd64, with no emulation anywhere.
+# Multi-arch without emulating the build. CGO_ENABLED=0 and pure-Go SQLite (modernc.org/sqlite)
+# mean Go cross-compiles, so the two build stages are pinned to the BUILDER's platform and only
+# the `go build` is told what to target. Building linux/arm64 on an amd64 runner therefore costs
+# the same as building amd64: npm and Go always run natively, and the only foreign-architecture
+# work is the final stage's two short RUN lines, which the builder emulates.
 #
 # The last two stages are deliberately NOT pinned: they contribute real binaries (litestream,
 # alpine's poppler) and must resolve to the TARGET architecture.
 
-# BUILDPLATFORM carries a default so that a builder which does not set it — Cloud Build's source
-# deploys run classic `docker build`, not buildx — still parses these FROM lines rather than dying
-# on `failed to parse platform ""`. BuildKit overrides it, so buildx is unaffected. TARGETOS and
-# TARGETARCH must NOT be declared here: a global default wins over BuildKit's own value, and an
-# arm64 image would quietly get an amd64 binary. Declared per stage, they stay the builder's.
-ARG BUILDPLATFORM=linux/amd64
+# BuildKit sets BUILDPLATFORM to the platform of the machine doing the build, and it is declared
+# here without a default on purpose: a global ARG's default replaces BuildKit's value rather than
+# backing it up, so a default of linux/amd64 had an arm64 Mac build these stages as amd64 under
+# emulation. The fallback is in the FROM lines instead, where it only fills a blank: the classic
+# `docker build` that Cloud Build runs for `gcloud run deploy --source .` (deploy/gcp/cloudrun.sh)
+# sets no platform ARGs, `gcloud` has no way to pass one, and it would die on `failed to parse
+# platform ""`. A bare `linux` is completed with the daemon's own architecture, so that builder
+# stays native too. TARGETOS and TARGETARCH get no default for the same reason: declared bare in
+# the build stage they stay BuildKit's, where a default would give an arm64 image an amd64 binary.
+ARG BUILDPLATFORM
 
-FROM --platform=$BUILDPLATFORM node:24-alpine AS uibuild
+FROM --platform=${BUILDPLATFORM:-linux} node:24-alpine AS uibuild
 WORKDIR /ui
 COPY ui/package.json ui/package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY ui/ ./
 RUN npm run build
 
-FROM --platform=$BUILDPLATFORM golang:1.27.1-alpine AS build
+FROM --platform=${BUILDPLATFORM:-linux} golang:1.27.1-alpine AS build
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src
