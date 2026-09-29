@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -155,13 +156,13 @@ func pkcePair() (verifier, challenge string) {
 }
 
 // oauthStart builds the authorization URL for a connection and remembers the PKCE verifier.
-func (b *Bot) oauthStart(ctx context.Context, orgID int64, conn *Connection, redirectURI string) (string, error) {
+func (b *Bot) oauthStart(ctx context.Context, orgID int64, conn *Connection, redirectURI string) (authURL, state string, err error) {
 	sec, err := b.proxy.secret(conn)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if sec.MCPURL == "" {
-		return "", errors.New("the connection has no MCP server url")
+		return "", "", errors.New("the connection has no MCP server url")
 	}
 	st := sec.OAuth
 	if st == nil {
@@ -170,7 +171,7 @@ func (b *Bot) oauthStart(ctx context.Context, orgID int64, conn *Connection, red
 	if st.AuthURL == "" || st.TokenURL == "" {
 		md, resource, err := discoverAuthServer(ctx, sec.MCPURL)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		st.AuthURL, st.TokenURL, st.Resource = md.AuthorizationEndpoint, md.TokenEndpoint, resource
 		if st.Scopes == "" && len(md.ScopesSupported) > 0 {
@@ -179,7 +180,7 @@ func (b *Bot) oauthStart(ctx context.Context, orgID int64, conn *Connection, red
 		if st.ClientID == "" {
 			id, secret, err := registerClient(ctx, md, redirectURI)
 			if err != nil {
-				return "", err
+				return "", "", err
 			}
 			st.ClientID, st.ClientSecret = id, secret
 		}
@@ -187,22 +188,22 @@ func (b *Bot) oauthStart(ctx context.Context, orgID int64, conn *Connection, red
 	for _, rawURL := range []string{st.AuthURL, st.TokenURL} {
 		u, err := url.Parse(rawURL)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		if err := publicURL(u); err != nil {
-			return "", err
+			return "", "", err
 		}
 	}
 	sec.OAuth = st
 	enc, err := b.sealSecret(sec)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if err := b.store.UpdateConnection(ctx, orgID, conn, enc); err != nil {
-		return "", err
+		return "", "", err
 	}
 	verifier, challenge := pkcePair()
-	state := randomToken()
+	state = randomToken()
 	me := adminFromCtx(ctx)
 	var userID int64
 	if me != nil {
@@ -210,7 +211,7 @@ func (b *Bot) oauthStart(ctx context.Context, orgID int64, conn *Connection, red
 	}
 	if err := b.store.PutOAuthPending(ctx, b.sealer, state,
 		oauthPending{userID: userID, orgID: orgID, connID: conn.ID, verifier: verifier}); err != nil {
-		return "", err
+		return "", "", err
 	}
 	q := url.Values{"response_type": {"code"}, "client_id": {st.ClientID}, "redirect_uri": {redirectURI}, "state": {state},
 		"code_challenge": {challenge}, "code_challenge_method": {"S256"}}
@@ -224,7 +225,7 @@ func (b *Bot) oauthStart(ctx context.Context, orgID int64, conn *Connection, red
 	if strings.Contains(st.AuthURL, "?") {
 		sep = "&"
 	}
-	return st.AuthURL + sep + q.Encode(), nil
+	return st.AuthURL + sep + q.Encode(), state, nil
 }
 
 // oauthCallback exchanges the code and stores the tokens on the connection.
@@ -370,16 +371,29 @@ func (b *Bot) oauthRoutes(mux *http.ServeMux) {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 		defer cancel()
-		u, err := b.oauthStart(ctx, orgOf(r), conn, b.baseURL(r)+"/api/oauth/callback")
+		u, state, err := b.oauthStart(ctx, orgOf(r), conn, b.baseURL(r)+"/api/oauth/callback")
 		if err != nil {
 			writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
+		http.SetCookie(w, &http.Cookie{Name: mcpOAuthStateCookie, Value: state, Path: "/api/oauth/", HttpOnly: true,
+			MaxAge: int(oauthPendingTTL.Seconds()), SameSite: http.SameSiteLaxMode, Secure: b.secureCookies(r)})
 		writeJSON(w, 200, map[string]any{"ok": true, "url": u})
 	}))
 	mux.HandleFunc("GET /api/oauth/callback", func(w http.ResponseWriter, r *http.Request) {
+		// The provider sends back whichever browser approved, so the state row alone cannot say it
+		// is the browser that started here. The cookie set at the start can: a state this browser
+		// does not also hold is refused before its code is exchanged, as the Slack and GitHub
+		// installs do. Cleared either way.
+		state := r.URL.Query().Get("state")
+		c, cerr := r.Cookie(mcpOAuthStateCookie)
+		http.SetCookie(w, &http.Cookie{Name: mcpOAuthStateCookie, Value: "", Path: "/api/oauth/", MaxAge: -1})
 		if e := r.URL.Query().Get("error"); e != "" {
 			http.Error(w, "authorization failed: "+e+" "+r.URL.Query().Get("error_description"), http.StatusBadRequest)
+			return
+		}
+		if state == "" || cerr != nil || c.Value == "" || !hmac.Equal([]byte(c.Value), []byte(state)) {
+			http.Error(w, "This sign-in was started in a different browser. Start it again from the console, in this browser.", http.StatusForbidden)
 			return
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)

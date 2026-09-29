@@ -520,6 +520,14 @@ func (a *Agent) connectURL(ctx context.Context, orgID, connID int64, teamID, sla
 
 const connectCSRFCookie = "attest_connect_csrf"
 
+// connectStateCookie binds a personal sign-in to the browser that started it, and
+// mcpOAuthStateCookie does the same for an MCP connection's sign-in (oauth_mcp.go). The state rows
+// say what a sign-in is for; only a cookie can say which browser may finish it.
+const (
+	connectStateCookie  = "attest_connect_state"
+	mcpOAuthStateCookie = "attest_mcp_oauth_state"
+)
+
 // connectGrant is one box: reading a part, or writing to it. They are separate scopes at Google
 // and they are separate decisions here — "read my mail and draft replies, but only look at my
 // calendar" is an ordinary thing to want, and a single per-part switch cannot say it.
@@ -772,6 +780,8 @@ func (b *Bot) handleConnectPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Could not start the sign-in. Try again.", http.StatusInternalServerError)
 		return
 	}
+	http.SetCookie(w, &http.Cookie{Name: connectStateCookie, Value: state, Path: "/connect/", HttpOnly: true,
+		MaxAge: int(connectStateTTL.Seconds()), SameSite: http.SameSiteLaxMode, Secure: b.secureCookies(r)})
 	q := url.Values{
 		"response_type": {"code"}, "client_id": {st.ClientID}, "redirect_uri": {redirect}, "state": {state},
 		"code_challenge": {challenge}, "code_challenge_method": {"S256"},
@@ -805,9 +815,19 @@ func (b *Bot) handleConnectCallback(w http.ResponseWriter, r *http.Request) {
 		b.renderConnect(w, map[string]any{"Done": "Nothing was connected: " + e + ". You can close this page."})
 		return
 	}
+	// The state row names whose Slack account this sign-in is for; the cookie set when the sign-in
+	// started names the browser. Both have to agree, or the account of whoever approved on the
+	// provider's page would be saved under the Slack identity of whoever started it.
+	state := r.URL.Query().Get("state")
+	c, cerr := r.Cookie(connectStateCookie)
+	http.SetCookie(w, &http.Cookie{Name: connectStateCookie, Value: "", Path: "/connect/", MaxAge: -1})
+	if state == "" || cerr != nil || c.Value == "" || !hmac.Equal([]byte(c.Value), []byte(state)) {
+		http.Error(w, "This sign-in was started in a different browser. Ask the bot again for a fresh link and open it in this browser.", http.StatusForbidden)
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
-	cs, err := b.store.TakeConnectState(ctx, r.URL.Query().Get("state"))
+	cs, err := b.store.TakeConnectState(ctx, state)
 	if err != nil || cs == nil {
 		http.Error(w, "This sign-in has expired or was already finished. Ask the bot again for a fresh link.", http.StatusForbidden)
 		return

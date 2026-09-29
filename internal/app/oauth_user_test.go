@@ -442,10 +442,32 @@ func TestConnectRoundTrip(t *testing.T) {
 	if q.Get("code_challenge") == "" || q.Get("state") == "" {
 		t.Fatal("no PKCE challenge or state on the authorize URL")
 	}
+	var bound *http.Cookie
+	for _, c := range w.Result().Cookies() {
+		if c.Name == connectStateCookie {
+			bound = c
+		}
+	}
+	if bound == nil || bound.Value != q.Get("state") || !bound.HttpOnly {
+		t.Fatalf("the start did not bind its state to this browser: %+v", bound)
+	}
 
-	// 5. The provider sends them back; the tokens land against USAM and nobody else.
+	// 5. Approving on the provider's page from a browser that did not start this sign-in saves
+	// nothing and exchanges nothing, and leaves the sign-in open for the browser that did.
 	w = httptest.NewRecorder()
-	mux.ServeHTTP(w, httptest.NewRequest("GET", "/connect/callback?code=thecode&state="+q.Get("state"), nil))
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/connect/callback?code=othercode&state="+q.Get("state"), nil))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("a callback from another browser got %d, want 403", w.Code)
+	}
+	if tokenForm.Get("code") == "othercode" {
+		t.Fatal("a callback from another browser had its code exchanged")
+	}
+
+	// 6. The provider sends them back; the tokens land against USAM and nobody else.
+	w = httptest.NewRecorder()
+	r = httptest.NewRequest("GET", "/connect/callback?code=thecode&state="+q.Get("state"), nil)
+	r.AddCookie(bound)
+	mux.ServeHTTP(w, r)
 	if w.Code != 200 {
 		t.Fatalf("callback: %d %s", w.Code, w.Body.String())
 	}
@@ -463,9 +485,11 @@ func TestConnectRoundTrip(t *testing.T) {
 		t.Fatal("somebody else reached the token that was just granted")
 	}
 
-	// 5. The state is spent, so a replayed callback grants nothing.
+	// 7. The state is spent, so a replayed callback grants nothing, even from the same browser.
 	w = httptest.NewRecorder()
-	mux.ServeHTTP(w, httptest.NewRequest("GET", "/connect/callback?code=thecode&state="+q.Get("state"), nil))
+	r = httptest.NewRequest("GET", "/connect/callback?code=thecode&state="+q.Get("state"), nil)
+	r.AddCookie(bound)
+	mux.ServeHTTP(w, r)
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("a replayed callback got %d, want 403", w.Code)
 	}
