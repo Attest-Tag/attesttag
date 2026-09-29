@@ -236,6 +236,48 @@ func TestRemovingAMemberRevokesKeysAndSessions(t *testing.T) {
 	}
 }
 
+// Removing a member takes the same coverage as changing their role: a custom role holding
+// users.manage and little else may remove people whose roles it covers, and nobody above that.
+func TestRemovingAMemberNeedsTheirRole(t *testing.T) {
+	b, mux, st := identityBot(t)
+	ctx := context.Background()
+	owner, orgID, _ := signedUp(t, b, mux, st, "owner@example.com")
+	for _, r := range []*ConsoleRole{
+		{Key: "people_ops", Label: "People ops", Permissions: []string{string(PermUsersManage), string(PermActivityView)}},
+		{Key: "intern", Label: "Intern", Permissions: []string{string(PermActivityView)}},
+	} {
+		if err := st.UpsertConsoleRole(ctx, orgID, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	member := func(email, role string) *User {
+		u, err := st.CreateUser(ctx, email, email, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.AddMembership(ctx, u.ID, orgID, role, 0); err != nil {
+			t.Fatal(err)
+		}
+		return u
+	}
+	hr := member("hr@example.com", "people_ops")
+	intern := member("intern@example.com", "intern")
+	tok, err := st.CreateAdminSession(ctx, AdminUser{ID: hr.ID, OrgID: orgID, Via: "password"}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if code, body := authReq(t, mux, "DELETE", "/api/console/users/"+owner.PublicID, nil, tok); code != 403 {
+		t.Fatalf("users.manage alone removed the owner: %d %v", code, body)
+	}
+	if m, _ := st.Membership(ctx, owner.ID, orgID); m == nil {
+		t.Fatal("the owner's membership is gone after a refused removal")
+	}
+	if code, body := authReq(t, mux, "DELETE", "/api/console/users/"+intern.PublicID, nil, tok); code != 200 {
+		t.Fatalf("removing a member whose role is covered = %d %v", code, body)
+	}
+}
+
 func TestSessionWithoutOrgIsUnauthenticated(t *testing.T) {
 	b, mux, st := identityBot(t)
 	u, _, _ := signedUp(t, b, mux, st, "founder@example.com")

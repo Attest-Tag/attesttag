@@ -110,7 +110,8 @@ what to do next. Everything here exists because one of those is eventually hosti
   than copied into each install, so a permission added in a later release actually reaches them.
   Custom roles are rows. Two rules do the real work: you may only grant a role whose access you
   hold yourself (checked against both the role being given *and* the one being taken away, or an
-  editor could demote an admin), and a change that would leave nobody able to manage users or
+  editor could demote an admin — and removing somebody counts as taking their role away), and a
+  change that would leave nobody able to manage users or
   credentials is refused — on the capability, not on counting people called "admin". Knowing
   which credentials exist is itself `connections.view`: without it a member still sees a scope's
   settings and the Drive syncs, but not the connections, repositories, and inherited instructions

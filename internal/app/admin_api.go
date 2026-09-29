@@ -2000,6 +2000,16 @@ func (b *Bot) routes(mux *http.ServeMux, uiFS fs.FS) {
 			writeJSON(w, 404, map[string]any{"error": "that person is not in this organisation"})
 			return
 		}
+		// The same coverage the role change above asks for. Removing somebody is the far end of
+		// demoting them — re-inviting at a lower role finishes the job — so a role that may not
+		// change a person's role may not remove them either. Without this, users.manage alone
+		// could take out every admin, and with the owner gone any remaining admin may delete the
+		// account. A role that grants nothing (gone, or empty) needs no covering.
+		custom := b.store.CustomRoleMap(r.Context(), me.OrgID)
+		if len(permissionsForRole(cur.Role, custom)) > 0 && !canAssignRole(me.Permissions, cur.Role, custom) {
+			writeJSON(w, 403, map[string]any{"error": "You can only remove somebody whose role you hold yourself."})
+			return
+		}
 		if err := b.lastHolderGuard(r.Context(), me.OrgID, target, cur.Role, ""); err != nil {
 			writeJSON(w, 409, map[string]any{"error": err.Error()})
 			return
