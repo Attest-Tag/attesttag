@@ -2551,7 +2551,7 @@ func (b *Bot) routes(mux *http.ServeMux, uiFS fs.FS) {
 		cw := csv.NewWriter(w)
 		cw.Write([]string{"time", "channel", "thread_ts", "model", "tokens_in", "tokens_out", "cost_usd"})
 		for _, t := range turns {
-			cw.Write([]string{t.At, t.Channel, t.ThreadTS, t.Model, fmt.Sprint(t.In), fmt.Sprint(t.Out), fmt.Sprintf("%.6f", t.Cost)})
+			cw.Write(csvRow(t.At, t.Channel, t.ThreadTS, t.Model, fmt.Sprint(t.In), fmt.Sprint(t.Out), fmt.Sprintf("%.6f", t.Cost)))
 		}
 		cw.Flush()
 	}))
