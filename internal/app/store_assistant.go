@@ -33,6 +33,9 @@ type AssistantTurn struct {
 	ToolCalls    int     `json:"tool_calls"`
 	Proposals    int     `json:"proposals"`
 	Error        string  `json:"error"`
+	// Redacted is set by the API, not the store: the question and reply were withheld from this
+	// reader because they may quote what only audit.view may see. The metadata is still present.
+	Redacted bool `json:"redacted,omitempty"`
 }
 
 const assistantTurnCols = `select id, created_at, coalesce(actor_name,''), coalesce(conversation,''),

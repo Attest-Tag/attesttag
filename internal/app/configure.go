@@ -42,9 +42,27 @@ func (a *Agent) configureURL(ctx context.Context, orgID int64, teamID, channel s
 	return fmt.Sprintf("%s/configure/%s/%s?t=%s", base, teamID, channel, tok)
 }
 
+// sharedConfigureURL is the channel link for posting in the channel — the footer under a reply,
+// the help card, the memory signpost. It is withheld in a channel shared with another Slack
+// organisation (Slack Connect, Enterprise Grid): the link is read by everyone present, and there
+// that includes another company's members, who have no business holding even the read-only page.
+func (a *Agent) sharedConfigureURL(ctx context.Context, c *Call) string {
+	if c == nil {
+		return ""
+	}
+	// Withhold it only when Slack positively says the channel is shared with another organisation.
+	// Where there is no Slack handle to ask (a local run, a non-Slack surface) there is also no
+	// cross-org channel to worry about, so the link is shown as before.
+	if c.SL != nil && c.SL.IsSharedExternally(ctx, c.Channel) {
+		return ""
+	}
+	return a.configureURL(ctx, c.OrgID, c.TeamID, c.Channel)
+}
+
 // personalConfigureURL is the same page opened as one person, which is what makes the Personal
-// tab appear. It is never posted in a channel: the footer link is seen by everybody who can read
-// the reply, and this one carries the authority to read and rewrite somebody's own settings.
+// tab appear, and the only link that may change anything. It is never posted in a channel: the
+// footer link is seen by everybody who can read the reply, and this one carries the authority to
+// read and rewrite that person's own settings and, through them, the channel's.
 func (a *Agent) personalConfigureURL(ctx context.Context, orgID int64, teamID, channel, slackUserID string) string {
 	if slackUserID == "" {
 		return ""
@@ -268,7 +286,7 @@ button.danger:hover{color:var(--bad);border-color:var(--bad)}
 </style>
 <main>
 <h1>Configure {{.Bot}} for {{.Scope.Name}}</h1>
-<p class="sub">{{if .ReadOnly}}Only admins can change how {{.Bot}} behaves here.{{else}}Anyone in this Slack channel can adjust how {{.Bot}} behaves here.{{end}}</p>
+<p class="sub">{{if .SharedLink}}This shared link only shows the settings. To change them, send me <code>!configure</code> in the channel and I'll DM you a link of your own.{{else if .ReadOnly}}Only admins can change how {{.Bot}} behaves here.{{else}}Changes here are yours — this link was sent to you alone.{{end}}</p>
 <div class="id">{{.Scope.SlackID}}</div>
 <div class="tabs"><a class="{{if eq .Tab "general"}}on{{end}}" href="?t={{.Token}}&tab=general">General</a><a class="{{if eq .Tab "tools"}}on{{end}}" href="?t={{.Token}}&tab=tools">Tools and access</a><a class="{{if eq .Tab "memory"}}on{{end}}" href="?t={{.Token}}&tab=memory">Memory</a><a class="{{if eq .Tab "routines"}}on{{end}}" href="?t={{.Token}}&tab=routines">Routines</a></div>
 {{if .Saved}}<p class="saved">Saved.</p>{{end}}
@@ -316,7 +334,7 @@ button.danger:hover{color:var(--bad);border-color:var(--bad)}
 <div class="card"><div class="t" style="font-weight:600">Tool packs</div><div class="note">Named tools available to {{.Bot}} in this channel, from the attached bundles.</div>
 {{if .Packs}}<p>{{range .Packs}}<span class="chip">{{.}}</span> {{end}}</p>{{else}}<p class="note">No tool packs enabled.</p>{{end}}</div>
 <div class="card"><div class="t" style="font-weight:600">Connections</div><div class="note">Services {{.Bot}} can reach for sessions in this channel, named bundle/connection. Set by your admins, through a bundle or one connection at a time.</div>
-{{if .Access}}<table><tr><th>Name</th><th>Access</th><th>From</th></tr>{{range .Access}}<tr><td>{{.Name}}</td><td class="mono">{{.Hosts}}</td><td class="note">{{.Origin}}</td></tr>{{end}}</table>{{else}}<div class="empty">No connections configured.</div>{{end}}</div>
+{{if .Access}}<table><tr><th>Name</th><th>Access</th><th>From</th></tr>{{range .Access}}<tr><td>{{.Name}}</td><td class="mono">{{.Hosts}}</td><td class="note">{{.Origin}}</td></tr>{{end}}</table>{{else if .SharedLink}}<div class="empty">Open your own link (send me <code>!configure</code> in the channel) to see the connections this channel can reach.</div>{{else}}<div class="empty">No connections configured.</div>{{end}}</div>
 <div class="card"><div class="t" style="font-weight:600">Pre-approved actions</div><div class="note">Writes {{.Bot}} may do here without someone pressing Confirm first. Set by your admins.</div>
 {{if .AllowRules}}<ul>{{range .AllowRules}}<li>{{.}}</li>{{end}}</ul>
 <p class="note">{{if .EmailAutoWritesOn}}These also apply to mail forwarded here, judged on where the write goes rather than on anything the mail says. Opening a pull request never is: that always waits for a named approver.{{else}}These do not apply to mail forwarded here — a turn nobody in the workspace started holds every write.{{end}}</p>{{else}}<p class="note">None. Every write waits for someone in the thread to press Confirm; reading is never held.</p>{{end}}</div>
@@ -447,7 +465,14 @@ func (b *Bot) handleConfigure(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "This link was revoked. Open Configure from one of the bot's newer replies in the channel.", http.StatusForbidden)
 		return
 	}
-	readOnly := b.memberEditsBlocked(ctx, orgID, sc)
+	// A shared link (v1, names nobody) is view-only. It sits in the footer of every reply, where a
+	// guest or a member of another company in the channel can read it, so it must not be able to
+	// rewrite the channel's instructions or toggle its settings — that would let an outsider steer
+	// the bot for the org's own members. Editing is done through a personal link (v2), which names
+	// its holder and is only ever sent to one person in a DM (see `!configure`). An admin can lock
+	// even that per scope with member_edits = block.
+	sharedLink := asUser == ""
+	readOnly := sharedLink || b.memberEditsBlocked(ctx, orgID, sc)
 	tab := r.URL.Query().Get("tab")
 	if tab == "" {
 		tab = "general"
@@ -561,26 +586,32 @@ func (b *Bot) handleConfigure(w http.ResponseWriter, r *http.Request) {
 				names[bd.ID] = bd.Name
 			}
 		}
-		for _, rl := range acc.Rules {
-			origin := "workspace"
-			if rl.Rank == 2 {
-				origin = "this channel"
+		// Which services this channel can reach, and on which hosts, is the shape of the
+		// organisation's credentials — not something to spell out on the shared link that anyone in
+		// the channel holds. It is drawn only on a personal link, the same rule the Personal and
+		// Memory tabs already follow.
+		if !sharedLink {
+			for _, rl := range acc.Rules {
+				origin := "workspace"
+				if rl.Rank == 2 {
+					origin = "this channel"
+				}
+				from := "bundle " + names[rl.Conn.BundleID] + " · " + origin
+				if rl.Direct {
+					from = "on its own · " + origin
+				}
+				rows = append(rows, accessRow{Name: names[rl.Conn.BundleID] + "/" + rl.Conn.Name, Hosts: strings.Join(rl.Conn.AllowedHosts, ", "), Origin: from})
 			}
-			from := "bundle " + names[rl.Conn.BundleID] + " · " + origin
-			if rl.Direct {
-				from = "on its own · " + origin
+			for _, d := range acc.Domains {
+				rows = append(rows, accessRow{Name: "(no credential)", Hosts: d.Host, Origin: names[d.BundleID]})
 			}
-			rows = append(rows, accessRow{Name: names[rl.Conn.BundleID] + "/" + rl.Conn.Name, Hosts: strings.Join(rl.Conn.AllowedHosts, ", "), Origin: from})
-		}
-		for _, d := range acc.Domains {
-			rows = append(rows, accessRow{Name: "(no credential)", Hosts: d.Host, Origin: names[d.BundleID]})
-		}
-		for p := range acc.ToolPacks {
-			if pr := presetByID(p); pr != nil {
-				packs = append(packs, pr.Name)
+			for p := range acc.ToolPacks {
+				if pr := presetByID(p); pr != nil {
+					packs = append(packs, pr.Name)
+				}
 			}
+			sortStrings(packs)
 		}
-		sortStrings(packs)
 	}
 	// The Personal tab shows wherever this channel has a connection that runs on each person's
 	// own account. Its *contents* need a link that names somebody, and the footer link under
@@ -635,7 +666,7 @@ func (b *Bot) handleConfigure(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	configurePage.Execute(w, map[string]any{
 		"Bot": b.settings.Get(ctx, orgID).BotName, "Scope": sc, "Token": mintConfigureToken(teamID, channel, asUser, sc.LinkEpoch, time.Now()), "CSRF": csrf, "Tab": tab, "Saved": saved,
-		"ReadOnly": readOnly, "Access": rows, "Packs": packs, "Routines": routines, "AllowRules": allow,
+		"ReadOnly": readOnly, "SharedLink": sharedLink, "Access": rows, "Packs": packs, "Routines": routines, "AllowRules": allow,
 		"Personal": personal, "AsUser": asUser, "HasPersonal": hasPersonal,
 		"Memories": sharedRows, "MyNotes": mine, "SubMine": subMine,
 		"DefaultModel": inheritedDefault(ctx, b.store, b.settings.Get(ctx, orgID), orgID, sc.TeamID), "HeavyModel": b.settings.Get(ctx, orgID).HeavyModel,
@@ -756,8 +787,19 @@ func (a *Agent) postMemoryLink(ctx context.Context, c *Call) {
 	if !c.memoryTouched || c.AnswerTS == "" {
 		return
 	}
-	if link := a.configureURL(ctx, c.OrgID, c.TeamID, c.Channel); link != "" {
-		c.SL.PostText(ctx, c.Channel, c.ThreadTS, "<"+link+"&tab=memory|Edit what I remember here> — no sign-in needed.")
+	// Editing what the channel remembers is done through a link that names its holder — the shared
+	// footer link is read-only now. DM the asker a personal one; only fall back to signposting the
+	// shared page (a view) where the channel is not shared with another organisation.
+	if link := a.personalConfigureURL(ctx, c.OrgID, c.TeamID, c.Channel, c.UserID); link != "" && c.SL != nil {
+		mem := strings.Replace(link, "&tab=personal", "&tab=memory", 1)
+		if a.dmLink(ctx, c, "Edit what I remember", "Change what I keep for this channel, and the notes I keep for you.", mem) {
+			c.SL.PostText(ctx, c.Channel, c.ThreadTS,
+				"I've sent you a private link to edit what I remember here — it's in our DM.")
+			return
+		}
+	}
+	if link := a.sharedConfigureURL(ctx, c); link != "" {
+		c.SL.PostText(ctx, c.Channel, c.ThreadTS, "<"+link+"&tab=memory|See what I remember here>.")
 	}
 }
 

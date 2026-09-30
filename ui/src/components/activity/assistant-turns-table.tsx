@@ -36,7 +36,9 @@ export function AssistantTurnsTable({ rows }: { rows: AssistantTurnRow[] }) {
           <Disclosure
             label={
               <span className="flex min-w-0 items-center gap-2">
-                <span className="min-w-0 truncate text-sm">{r.question || "(a file, with no question)"}</span>
+                <span className="min-w-0 truncate text-sm">
+                  {r.redacted ? "(hidden — needs audit access to read)" : r.question || "(a file, with no question)"}
+                </span>
                 {r.error && <StatusChip variant="danger">failed</StatusChip>}
                 {r.proposals > 0 && (
                   <StatusChip variant="ai">
@@ -54,7 +56,11 @@ export function AssistantTurnsTable({ rows }: { rows: AssistantTurnRow[] }) {
             }
           >
             <div className="space-y-2">
-              {r.reply ? (
+              {r.redacted ? (
+                <p className="text-sm text-muted-foreground italic">
+                  The question and answer are hidden — they can quote the audit log or connections, which need audit access to read.
+                </p>
+              ) : r.reply ? (
                 <Markdown text={r.reply} className="text-sm" />
               ) : (
                 <p className="text-sm text-muted-foreground italic">It answered with nothing.</p>

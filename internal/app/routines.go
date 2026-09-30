@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -254,7 +255,15 @@ var broadcasts = strings.NewReplacer(
 	"<!everyone|@everyone>", "@everyone", "<!everyone>", "@everyone",
 )
 
-func defuseBroadcasts(s string) string { return broadcasts.Replace(s) }
+// subteamMention matches a user-group ping, <!subteam^S123|@team> or <!subteam^S123>, whose id is
+// dynamic so the fixed replacer above cannot name it. It pings everyone in the group, so it is
+// defused the same way; the group's handle is kept where the mention carried one.
+var subteamMention = regexp.MustCompile(`<!subteam\^[A-Z0-9]+(?:\|([^>]*))?>`)
+
+func defuseBroadcasts(s string) string {
+	s = broadcasts.Replace(s)
+	return subteamMention.ReplaceAllString(s, "$1")
+}
 
 // quietVerdict is what a silent turn decided: whether to post, the text to post, and the note
 // for the log. A decision made with the tools is taken as it stands; only a run that ignored

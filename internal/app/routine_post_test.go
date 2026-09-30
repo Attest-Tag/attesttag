@@ -113,6 +113,9 @@ func TestBroadcastsAreDefusedAndNothingElseIs(t *testing.T) {
 		{"<!everyone> quarterly numbers", "@everyone quarterly numbers"},
 		{"<@UALICE> owns this one", "<@UALICE> owns this one"},
 		{"*Lead:* <https://app.hubspot.com/contacts/1|Fabrizio> — 25/100", "*Lead:* <https://app.hubspot.com/contacts/1|Fabrizio> — 25/100"},
+		// User-group pings ping everyone in the group, so they are defused too, keeping the handle.
+		{"ping <!subteam^SENG|@eng> now", "ping @eng now"},
+		{"<!subteam^SENG> now", " now"},
 	} {
 		if got := defuseBroadcasts(tc.in); got != tc.want {
 			t.Errorf("defuseBroadcasts(%q) = %q, want %q", tc.in, got, tc.want)

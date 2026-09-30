@@ -194,7 +194,11 @@ func (b *Bot) routes(mux *http.ServeMux, uiFS fs.FS) {
 	// Signed in: the account itself, rather than the organisation's configuration.
 	mux.HandleFunc("POST /api/auth/resend-verification", b.requireAdmin(b.handleResendVerification))
 	mux.HandleFunc("POST /api/auth/password", b.requireAdmin(b.handleChangePassword))
-	mux.HandleFunc("POST /api/auth/two-factor", b.handleTwoFactorLogin) // finishes a sign-in that owed a code
+	// Finishes a sign-in that owed a code. It sets a session just as the password post does, so it
+	// takes the same sameSiteOnly: the challenge names an account, not the browser that asked for
+	// it, and without this a page elsewhere could finish somebody else's sign-in in the visitor's
+	// browser.
+	mux.HandleFunc("POST /api/auth/two-factor", sameSiteOnly(b.handleTwoFactorLogin))
 	mux.HandleFunc("GET /api/auth/invite", b.requireAdmin(b.handleInvitePreview))
 	mux.HandleFunc("POST /api/auth/accept-invite", b.requireAdmin(b.handleAcceptInvite))
 	// Your own account: profile, and the second factor behind your password. Never anybody
@@ -454,6 +458,17 @@ func (b *Bot) routes(mux *http.ServeMux, uiFS fs.FS) {
 		if err != nil {
 			fail(w, err)
 			return
+		}
+		// The assistant runs as the admin who asked, so a reply can quote the audit log, the
+		// settings or the connections — things a plain activity.view holder may not read directly.
+		// Everyone with activity.view still sees that a question was asked, by whom and what it cost;
+		// the question and the answer themselves are shown only to a reader who holds audit.view, the
+		// most sensitive of what the assistant can reach.
+		if me := adminFromCtx(r.Context()); me == nil || !me.Permissions[PermAuditView] {
+			for i := range ts {
+				ts[i].Question, ts[i].Reply = "", ""
+				ts[i].Redacted = true
+			}
 		}
 		writeJSON(w, 200, ts)
 	}))
@@ -1996,6 +2011,16 @@ func (b *Bot) routes(mux *http.ServeMux, uiFS fs.FS) {
 			writeJSON(w, 404, map[string]any{"error": "that person is not in this organisation"})
 			return
 		}
+		// The same coverage the role change above asks for. Removing somebody is the far end of
+		// demoting them — re-inviting at a lower role finishes the job — so a role that may not
+		// change a person's role may not remove them either. Without this, users.manage alone
+		// could take out every admin, and with the owner gone any remaining admin may delete the
+		// account. A role that grants nothing (gone, or empty) needs no covering.
+		custom := b.store.CustomRoleMap(r.Context(), me.OrgID)
+		if len(permissionsForRole(cur.Role, custom)) > 0 && !canAssignRole(me.Permissions, cur.Role, custom) {
+			writeJSON(w, 403, map[string]any{"error": "You can only remove somebody whose role you hold yourself."})
+			return
+		}
 		if err := b.lastHolderGuard(r.Context(), me.OrgID, target, cur.Role, ""); err != nil {
 			writeJSON(w, 409, map[string]any{"error": err.Error()})
 			return
@@ -2537,7 +2562,7 @@ func (b *Bot) routes(mux *http.ServeMux, uiFS fs.FS) {
 		cw := csv.NewWriter(w)
 		cw.Write([]string{"time", "channel", "thread_ts", "model", "tokens_in", "tokens_out", "cost_usd"})
 		for _, t := range turns {
-			cw.Write([]string{t.At, t.Channel, t.ThreadTS, t.Model, fmt.Sprint(t.In), fmt.Sprint(t.Out), fmt.Sprintf("%.6f", t.Cost)})
+			cw.Write(csvRow(t.At, t.Channel, t.ThreadTS, t.Model, fmt.Sprint(t.In), fmt.Sprint(t.Out), fmt.Sprintf("%.6f", t.Cost)))
 		}
 		cw.Flush()
 	}))

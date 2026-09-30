@@ -135,8 +135,13 @@ in-process proxy that:
    a mutation unless an allow rule covers it or the connection's writes are `auto`. A request that
    asks the server to treat it as another verb — an `X-HTTP-Method-Override`, `X-Method-Override`
    or `X-HTTP-Method` header, or `_method` (or `_httpmethod`) in the query string or the body,
-   naming a write — is refused before it is sent, because the gate reads the method.
-   Reads are never held — a channel that may reach a service may look at it. The bot posts what
+   naming a write — is refused before it is sent, because the gate reads the method. AWS is the one
+   place a GET is treated as a write: its "query protocol" services (EC2, RDS, ELB, CloudWatch, Auto
+   Scaling, the older IAM and STS) put the operation in `?Action=` over GET, so `TerminateInstances`
+   travels in the shape of `DescribeInstances`. On an AWS connection a GET carrying an `Action` that
+   is not a read verb — `Describe`, `List`, `Get`, `Lookup`, `Search`, `BatchGet`, `Simulate`,
+   `Estimate`, `Check` or `View` — waits for Confirm; a GET with no `Action` (an S3 object read) does
+   not. Reads are never held — a channel that may reach a service may look at it. The bot posts what
    it wants to do and, under that reply, a card with three buttons: **Confirm** runs it,
    **Cancel** drops it, **Something else…** drops it and hands the thread back — the person just
    says what they want in the thread, and their next message is the next turn. Replying

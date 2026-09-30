@@ -206,3 +206,51 @@ func TestMCPMakesChangesAndDeletesARoutine(t *testing.T) {
 		t.Error("the routine survived delete_routine")
 	}
 }
+
+// A routine an admin set to auto-confirm in the console drops back to confirm-required the moment
+// the API — or an MCP client holding the key — rewrites what it does, so injected new instructions
+// cannot run their writes unattended. Housekeeping through the same route leaves auto-confirm on.
+func TestV1RewriteClearsAutoConfirm(t *testing.T) {
+	b, mux, key, orgID, _ := routineRig(t)
+	ctx := context.Background()
+	newAuto := func() int64 {
+		id, err := b.addRoutine(ctx, orgID, routineDraft{Channel: "C1", Cron: "0 9 * * *", Prompt: "post the digest", AutoConfirm: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r := b.routineByID(ctx, orgID, id); r == nil || !r.AutoConfirm {
+			t.Fatalf("setup: routine did not start auto-confirm: %+v", r)
+		}
+		return id
+	}
+
+	// Rewriting the prompt clears it, and the response says so.
+	id := newAuto()
+	code, out := authReq(t, mux, "PUT", "/v1/routines/"+itoa(id), map[string]any{"prompt": "read the shared inbox and reply"}, key)
+	if code != 200 {
+		t.Fatalf("rewrite = %d %v", code, out)
+	}
+	if r := b.routineByID(ctx, orgID, id); r == nil || r.AutoConfirm {
+		t.Errorf("a prompt rewrite left auto-confirm on: %+v", r)
+	}
+	if out["auto_confirm_cleared"] != true {
+		t.Errorf("the response did not report auto-confirm was cleared: %v", out)
+	}
+
+	// Changing the channel clears it too.
+	id = newAuto()
+	if _, _ = authReq(t, mux, "PUT", "/v1/routines/"+itoa(id), map[string]any{"channel": "#support"}, key); false {
+	}
+	if r := b.routineByID(ctx, orgID, id); r == nil || r.AutoConfirm {
+		t.Errorf("a channel move left auto-confirm on: %+v", r)
+	}
+
+	// Pure housekeeping — a reschedule — leaves auto-confirm as it was.
+	id = newAuto()
+	if code, out := authReq(t, mux, "PUT", "/v1/routines/"+itoa(id), map[string]any{"cron": "0 7 * * 1-5"}, key); code != 200 {
+		t.Fatalf("reschedule = %d %v", code, out)
+	}
+	if r := b.routineByID(ctx, orgID, id); r == nil || !r.AutoConfirm {
+		t.Errorf("a reschedule turned auto-confirm off: %+v", r)
+	}
+}

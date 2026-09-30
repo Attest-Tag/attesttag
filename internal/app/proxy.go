@@ -51,7 +51,7 @@ type Access struct {
 	// rules it governs — a rule and the permission to use it going stale apart is the one way
 	// this could be wrong in the direction that matters.
 	EmailAutoWrites bool
-	fetched      time.Time
+	fetched         time.Time
 }
 
 // Repos lists the repository connections reachable here, narrowest grant first, one per repo.
@@ -535,7 +535,7 @@ func needsConfirm(conn *Connection, method string, u *url.URL) bool {
 	case "all":
 		return true
 	}
-	return changesData(method, u)
+	return changesData(method, u) || awsGetActionWrites(conn, method, u)
 }
 
 // changesData is whether a request is a write, whatever any connection's policy says about
@@ -543,6 +543,37 @@ func needsConfirm(conn *Connection, method string, u *url.URL) bool {
 // change whatever the path says, so no amount of "…/search" in it earns the exemption.
 func changesData(method string, u *url.URL) bool {
 	return isWrite(method) && !(strings.ToUpper(method) == "POST" && readShapedPOST(u))
+}
+
+// awsGetActionWrites catches the writes the HTTP verb cannot see. AWS "query protocol" services —
+// EC2, RDS, ELB, CloudWatch, Auto Scaling, the older IAM and STS APIs — run over GET with the
+// operation in ?Action=, so TerminateInstances arrives in exactly the shape of DescribeInstances
+// and changesData waves it through as a read. For an aws_sigv4 connection a GET carrying an Action
+// is therefore held unless the Action names a read; the default is write, the stance
+// mcpLooksReadOnly already takes for a tool whose verb it does not know. A GET with no Action is an
+// ordinary REST read (S3 GetObject travels as a path, not an Action) and is left alone.
+func awsGetActionWrites(conn *Connection, method string, u *url.URL) bool {
+	if conn == nil || conn.CredType != "aws_sigv4" || u == nil || strings.ToUpper(method) != "GET" {
+		return false
+	}
+	action := u.Query().Get("Action")
+	if action == "" {
+		return false
+	}
+	for _, read := range awsReadActionPrefixes {
+		if strings.HasPrefix(action, read) {
+			return false
+		}
+	}
+	return true
+}
+
+// The verbs an AWS query-protocol read begins with. Everything else — Create, Delete, Terminate,
+// Stop, Start, Reboot, Modify, Put, Run, Attach, Authorize, Revoke, … — is held. Kept short on
+// purpose: a read wrongly held costs a Confirm card, a write wrongly waved through is the finding
+// this exists to close.
+var awsReadActionPrefixes = []string{
+	"Describe", "List", "Get", "Lookup", "Search", "BatchGet", "Simulate", "Estimate", "Check", "View",
 }
 
 // The three headers and two field names by which a caller asks a server to treat one verb as
@@ -624,8 +655,8 @@ var ErrNeedsUserAuth = errors.New("needs the requester to connect their account"
 // readShapedPOSTs is not consulted here on purpose. It buys a nicer thread on a calendar lookup,
 // which is worth nothing on a connection that hands out access, and the cost of getting the table
 // wrong is an unapproved grant rather than an unapproved read.
-func needsApproval(conn *Connection, method string) bool {
-	return conn != nil && conn.AllowGrants && isWrite(method)
+func needsApproval(conn *Connection, method string, u *url.URL) bool {
+	return conn != nil && conn.AllowGrants && (isWrite(method) || awsGetActionWrites(conn, method, u))
 }
 
 // hasDotSegment reports a path carrying a "." or ".." segment, in either its plain or its
@@ -957,10 +988,10 @@ func (p *Proxy) Do(ctx context.Context, orgID int64, acc *Access, req ProxyReque
 		return nil, errors.New(why)
 	}
 	if !confirmed {
-		if needsApproval(conn, method) {
+		if needsApproval(conn, method, u) {
 			return nil, ErrNeedsApproval
 		}
-		if needsConfirm(conn, method, u) || req.HoldWrites && changesData(method, u) {
+		if needsConfirm(conn, method, u) || req.HoldWrites && (changesData(method, u) || awsGetActionWrites(conn, method, u)) {
 			return nil, ErrNeedsConfirmation
 		}
 	}

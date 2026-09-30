@@ -169,6 +169,14 @@ type Call struct {
 	// a link to the page that edits it. Flags rather than the link itself, because the link must
 	// not pass through a tool result: askToConnect says why, and it is the same rule here.
 	memoryTouched, personalMemoryTouched bool
+	// personalSpent latches once any tool call in this turn spends somebody's own connection —
+	// their Gmail, Calendar, Drive or personal notes. From then on every tool call is logged
+	// redacted, not just the one that spent it: the model routinely carries a personal result into
+	// a following call (run_js input, create_artifact content, send_dm, post_to_thread), and that
+	// call, spending nothing itself, would otherwise write the private content to tool_calls in
+	// full — which /activity shows to anyone holding activity.view. Atomic because a run_js fetch
+	// sets it from the sandbox goroutine.
+	personalSpent atomic.Bool
 	// The organisation's per-person connections that this channel has not been given, worked out
 	// at most once a turn and only for a turn that can reach none of its own. Both the prompt and
 	// the connect tool ask, and the answer is a query.
@@ -1427,16 +1435,19 @@ func (a *Agent) runToolRaw(ctx context.Context, c *Call, name, rawArgs string) (
 	// Log the result the model actually receives, so the console shows the same text.
 	result := truncateToolOutput(redact(out))
 	logArgs, logResult := truncate(string(args), 2000), result
+	// This call is private if it spent somebody's own connection, and so is every call after it in
+	// the turn: once personal content is in play the model carries it forward — into a run_js
+	// input, an artifact, a DM — and that following call, which spends nothing itself, would leak
+	// the content it was handed. The latch makes the whole rest of the turn redact.
 	if privateCall(name, conn) || spent.spentPersonal() {
-		// Two things must not be logged in full. Personal memory is one. The other is a call that
-		// spent somebody's own connection — their Gmail, Calendar or Drive: the result is that
-		// person's private content, and tool_calls is rendered on /activity to anyone holding
-		// activity.view (a viewer holds it), so logging the body would publish to the whole
-		// organisation what a personal connection promises only its owner can read. redact()
-		// strips secret-shaped tokens and does nothing for prose. What is logged instead says
-		// whose it was, what was called and how it went, and nothing that was asked or answered
-		// (privateMark). A run_js script that fetched through such a connection is the same call
-		// made another way; only its note knows (private_spend.go).
+		c.personalSpent.Store(true)
+	}
+	if c.personalSpent.Load() {
+		// tool_calls is rendered on /activity to anyone holding activity.view (a viewer holds it),
+		// so a personal call's body — and the body of anything downstream of it — is never written
+		// as it was. What is logged instead says whose it was, what was called and how it went, and
+		// nothing that was asked or answered (privateMark). A run_js script that fetched through such
+		// a connection is the same call made another way; only its note knows (private_spend.go).
 		logArgs, logResult = privateArgs(ctx, c, conn, req), privateResult(name, req, out, len(result), err)
 		if conn == nil && spent.spentPersonal() {
 			logArgs = privateScriptArgs(ctx, c, spent.personalConns())
@@ -1667,7 +1678,7 @@ func (a *Agent) footer(ctx context.Context, c *Call, model string, us Usage) str
 			parts = append(parts, fmtCost(us.CostUSD))
 		}
 	}
-	if url := a.configureURL(ctx, c.OrgID, c.TeamID, c.Channel); url != "" {
+	if url := a.sharedConfigureURL(ctx, c); url != "" {
 		parts = append(parts, fmt.Sprintf("<%s|Configure>", url))
 	}
 	return strings.Join(parts, " · ")

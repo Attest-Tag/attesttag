@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -428,18 +429,19 @@ func TestReplayRefusesWhenGrantsRevoked(t *testing.T) {
 // A grant-capable connection must not be satisfiable by the in-thread Confirm card, whichever
 // path composed the write.
 func TestGrantConnectionNeedsApprovalNotConfirmation(t *testing.T) {
+	read, _ := url.Parse("https://api.example.com/thing")
 	grant := &Connection{ID: 1, Name: "g", Writes: "confirm", AllowGrants: true}
-	if !needsApproval(grant, "POST") {
+	if !needsApproval(grant, "POST", read) {
 		t.Fatal("a write on a grant-capable connection must need approval")
 	}
 	// Even "auto", which normally lets writes straight through.
-	if auto := (&Connection{ID: 2, Name: "a", Writes: "auto", AllowGrants: true}); !needsApproval(auto, "POST") {
+	if auto := (&Connection{ID: 2, Name: "a", Writes: "auto", AllowGrants: true}); !needsApproval(auto, "POST", read) {
 		t.Fatal("writes:auto must not let a grant skip its approver")
 	}
-	if needsApproval(grant, "GET") {
+	if needsApproval(grant, "GET", read) {
 		t.Fatal("reads do not grant anything and should not need an approver")
 	}
-	if needsApproval(&Connection{ID: 3, Writes: "confirm"}, "POST") {
+	if needsApproval(&Connection{ID: 3, Writes: "confirm"}, "POST", read) {
 		t.Fatal("an ordinary connection must keep the ordinary confirm path")
 	}
 }
