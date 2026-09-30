@@ -741,6 +741,8 @@ export type AssistantTurnRow = {
   tool_calls: number;
   proposals: number;
   error: string;
+  /** The question and reply were withheld: they can quote what only audit.view may read. */
+  redacted?: boolean;
 };
 
 /** One file that was attached to a question, as the reply reports it back. */

@@ -459,6 +459,17 @@ func (b *Bot) routes(mux *http.ServeMux, uiFS fs.FS) {
 			fail(w, err)
 			return
 		}
+		// The assistant runs as the admin who asked, so a reply can quote the audit log, the
+		// settings or the connections — things a plain activity.view holder may not read directly.
+		// Everyone with activity.view still sees that a question was asked, by whom and what it cost;
+		// the question and the answer themselves are shown only to a reader who holds audit.view, the
+		// most sensitive of what the assistant can reach.
+		if me := adminFromCtx(r.Context()); me == nil || !me.Permissions[PermAuditView] {
+			for i := range ts {
+				ts[i].Question, ts[i].Reply = "", ""
+				ts[i].Redacted = true
+			}
+		}
 		writeJSON(w, 200, ts)
 	}))
 

@@ -1110,7 +1110,18 @@ func (b *Bot) runConsoleTool(ctx context.Context, c *consoleCall, byName map[str
 	}
 	result, _ := cutRunes(truncateToolOutput(redact(out)), assistantResultC)
 	logArgs, _ := cutRunes(string(args), 2000)
-	b.store.LogToolCall(ctx, c.OrgID, "", assistantChannel, "", name, logArgs, result, err == nil, ms)
+	// The assistant runs as an admin, and its reads reach what that admin may see — the audit log,
+	// the settings, the connections — none of which a plain activity.view holder is allowed to read
+	// directly. tool_calls is rendered on /activity to activity.view, so the result is kept out of
+	// it: the row records that the assistant ran a tool and how it went, not what came back. The
+	// person who ran it still sees the full result in the assistant panel (c.calls, below) and in
+	// their own turn history. The mark is what makes unmarkPrivate lay the row out as private.
+	loggedArgs := privateMark + " " + logArgs
+	loggedResult := markPrivate(struct {
+		Bytes int  `json:"bytes"`
+		OK    bool `json:"ok"`
+	}{Bytes: len(result), OK: err == nil})
+	b.store.LogToolCall(ctx, c.OrgID, "", assistantChannel, "", name, loggedArgs, loggedResult, err == nil, ms)
 	c.calls = append(c.calls, assistantTool{Name: name, Args: logArgs, Result: result, OK: err == nil, MS: ms})
 	return result
 }
