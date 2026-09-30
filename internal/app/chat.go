@@ -328,6 +328,12 @@ func (s *Chat) IsPrivateConversation(ctx context.Context, id string) bool {
 // Connect channel or one shared across an Enterprise Grid org. A lookup that fails counts as
 // shared: "we could not tell" must not read as "safe to expose a channel-wide edit link in".
 func (s *Chat) IsSharedExternally(ctx context.Context, id string) bool {
+	// No Slack transport to ask — a Chat stood up without one, in a test or a non-Slack surface —
+	// means there is no cross-org Slack channel to withhold a link from. Say not-shared, which is
+	// what the caller (sharedConfigureURL) turns into "show the link", the pre-existing behaviour.
+	if s == nil || s.t == nil {
+		return false
+	}
 	ci, err := s.conv(ctx, id)
 	if err != nil {
 		slog.Debug("conversations.info", "channel", id, "err", err)
