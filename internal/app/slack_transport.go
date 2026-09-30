@@ -261,6 +261,10 @@ func (t *slackTransport) postText(ctx context.Context, channel, threadTS, text s
 // postMarkdown posts a Markdown block over an optional footer, and retries as markdown_text for
 // the older workspaces that do not take markdown blocks.
 func (t *slackTransport) postMarkdown(ctx context.Context, channel, threadTS, md, footer string) (string, error) {
+	// @channel/@here/@everyone in anything the bot posts pings the whole channel, and the text is
+	// the model's — a prompt injection can plant one. Routines defuse their own posts; this catches
+	// the interactive path too, and the replacer is idempotent so a double pass costs nothing.
+	md = defuseBroadcasts(md)
 	blocks := []slack.Block{slack.NewMarkdownBlock("", md)}
 	if footer != "" {
 		blocks = append(blocks, slack.NewContextBlock(replyFooterBlockID, slack.NewTextBlockObject(slack.MarkdownType, footer, false, false)))
@@ -291,6 +295,7 @@ func (t *slackTransport) postMarkdown(ctx context.Context, channel, threadTS, md
 // updateMarkdown rewrites a posted message as a Markdown block over an optional footer.
 // fallback is the plain text that notifications and screen readers get instead.
 func (t *slackTransport) updateMarkdown(ctx context.Context, channel, ts, md, footer, fallback string) error {
+	md = defuseBroadcasts(md)
 	blocks := []slack.Block{slack.NewMarkdownBlock("", md)}
 	if footer != "" {
 		blocks = append(blocks, slack.NewContextBlock(replyFooterBlockID, slack.NewTextBlockObject(slack.MarkdownType, footer, false, false)))
@@ -479,7 +484,7 @@ func slackTaskStatus(s taskStatus) slack.TaskCardStatus {
 func (t *slackTransport) stopStream(ctx context.Context, channel, ts, markdown, footer string) (string, error) {
 	var chunks []slack.StreamChunk
 	if markdown != "" {
-		chunks = append(chunks, slack.NewMarkdownTextChunk(markdown))
+		chunks = append(chunks, slack.NewMarkdownTextChunk(defuseBroadcasts(markdown)))
 	}
 	if footer != "" {
 		chunks = append(chunks, slack.NewBlocksChunk(slack.NewContextBlock(replyFooterBlockID, slack.NewTextBlockObject(slack.MarkdownType, footer, false, false))))
