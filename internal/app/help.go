@@ -45,6 +45,7 @@ var botCommands = []botCommand{
 	{[]string{"!usage"}, "this month's spend by channel"},
 	{[]string{"!access"}, "access requests you have waiting; !access cancel withdraws them"},
 	{[]string{"!connect"}, "services here that run on your own account (calendar, mail, contacts): what each one lets you ask for, and a private link to connect it"},
+	{[]string{"!configure", "!config"}, "a private link to this channel's Configure page — model, instructions, tools, memory and routines; the footer link only shows them"},
 	{[]string{"!personal_instructions"}, "how I should go about things when I act as your account (\"only ever look at my inbox\", \"sign my drafts off with my first name\"); clear removes them"},
 }
 
@@ -159,9 +160,10 @@ func (a *Agent) botManual(ctx context.Context, c *Call) string {
 	fmt.Fprintf(&b, "Every turn costs the organisation a fraction of a cent. `!usage` shows this month's spend by channel against "+
 		"the budget, and the console's Overview has the same in detail. On the free plan the budget is fixed; to raise it, %s.\n\n", raise)
 
-	if link := a.configureURL(ctx, c.OrgID, c.TeamID, c.Channel); link != "" {
+	if link := a.sharedConfigureURL(ctx, c); link != "" {
 		fmt.Fprintf(&b, "## The Configure page for this channel\n%s — the same link that sits at the bottom of my replies. "+
-			"Model, channel instructions, tools and access, memory and routines, no sign-in.\n\n", link)
+			"It shows the model, channel instructions, tools and access, memory and routines. To change any of them, "+
+			"send me `!configure` and I'll DM you a link of your own.\n\n", link)
 	}
 
 	b.WriteString("## Every command\n" + commandLines("-"))

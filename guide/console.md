@@ -105,12 +105,16 @@ curl -s -H "Authorization: Bearer $SESSION" http://127.0.0.1:8080/api/overview
 
 ## Configure page for channel members
 
-**Member Configure page.** Every channel reply's footer links to `/configure/<workspace>/<channel>`,
-where channel members (not just admins) can toggle read-every-message, turn email intake off,
-choose a model, set how many rounds of tool calls a reply may spend, write channel instructions,
-edit or delete the channel's memories, enable or disable its routines, and view the tools,
-connections and pre-approved actions available. The link carries a token signed for that
-workspace and channel under a key derived from `MASTER_KEY`, so only people who can see the
-footer have it; it expires a day after the reply that printed it, and
-`POST /api/scopes/{id}/configure-links/revoke` (`scopes.manage`) voids every link printed so far
-— the console has no button for that. Admins can lock the page per scope with `member_edits`.
+**Member Configure page.** Every channel reply's footer links to `/configure/<workspace>/<channel>`.
+That footer link is **shared** — everyone who can read the reply holds it, which in a Slack Connect
+channel includes another company's members — so it only **shows** the settings (model, channel
+instructions, tools, memory, routines) and never reveals which services the channel can reach. To
+**change** anything a member sends `!configure` in the channel and the bot DMs them a **personal**
+link, signed for that one person; that link can toggle read-every-message, turn email intake off,
+choose a model, set the tool-round budget, write channel instructions, edit or delete the channel's
+memories, and enable or disable routines. Both links carry a token signed for the workspace and
+channel under a key derived from `MASTER_KEY`; the personal one also names its holder inside the MAC.
+The footer link is withheld entirely in an externally shared (Slack Connect) channel. Links expire a
+day after the reply that printed them, and `POST /api/scopes/{id}/configure-links/revoke`
+(`scopes.manage`) voids every link printed so far — the console has no button for that. Admins can
+lock even the personal link per scope with `member_edits = block`, leaving edits to the console.

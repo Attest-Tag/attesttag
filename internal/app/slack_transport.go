@@ -64,7 +64,8 @@ func (t *slackTransport) conversation(ctx context.Context, id string) (string, c
 	if err != nil {
 		return "", convInfo{}, err
 	}
-	return c.Name, convInfo{IsPrivate: c.IsPrivate, IsIM: c.IsIM, IsMPIM: c.IsMpIM}, nil
+	return c.Name, convInfo{IsPrivate: c.IsPrivate, IsIM: c.IsIM, IsMPIM: c.IsMpIM,
+		IsExtShared: c.IsExtShared || c.IsPendingExtShared || c.IsOrgShared, IsShared: c.IsShared}, nil
 }
 
 // members reads a conversation's whole roster, a page at a time.

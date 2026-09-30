@@ -47,6 +47,8 @@ func (a *Agent) command(ctx context.Context, c *Call, text string) (bool, string
 		return true, a.notesCommand(ctx, c, arg)
 	case "!connect":
 		return true, a.connectCommand(ctx, c)
+	case "!configure", "!config":
+		return true, a.configureCommand(ctx, c)
 	case "!personal_instructions", "!personal":
 		return true, a.personalInstructionsCommand(ctx, c, arg)
 	case "!access":

@@ -368,6 +368,29 @@ func (a *Agent) connectCommand(ctx context.Context, c *Call) string {
 	return a.connectReply(ctx, c, "", false)
 }
 
+// configureCommand DMs the asker a personal link to the channel's Configure page. The footer link
+// under every reply is shared and read-only — anyone in the channel can see it — so changing a
+// setting needs a link that names one person, and that link is only ever handed over in a DM,
+// never posted where the channel can read it. What the link may then change is still gated: on a
+// scope with member_edits = block it opens read-only, the same as for the shared link.
+func (a *Agent) configureCommand(ctx context.Context, c *Call) string {
+	link := a.personalConfigureURL(ctx, c.OrgID, c.TeamID, c.Channel, c.UserID)
+	if link == "" {
+		return "There's no configure page for this channel right now."
+	}
+	const says = "Change the model, channel instructions, tools, memory and routines here — and your own settings. This link is yours alone, so please don't share it."
+	if c.Kind == "dm" {
+		if a.threadCard(ctx, c, "Configure this channel", says, link) {
+			return ""
+		}
+		return "<" + link + "|Configure this channel> — it's yours alone, so please don't share it."
+	}
+	if a.dmLink(ctx, c, "Configure this channel", says, link) {
+		return "I've sent you a private link to configure this channel — it's in our DM, and it's yours alone, so please don't share it."
+	}
+	return "I couldn't send you a direct message. Open a DM with me and try `!configure` there."
+}
+
 // connectReply is that answer, written once for the two ways of asking for it. only names a
 // single connection or is empty for all of them; forModel swaps the lines addressed to the
 // person for lines addressed to the model, which is holding a tool result and not a reply.

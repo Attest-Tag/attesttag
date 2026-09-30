@@ -1667,7 +1667,7 @@ func (a *Agent) footer(ctx context.Context, c *Call, model string, us Usage) str
 			parts = append(parts, fmtCost(us.CostUSD))
 		}
 	}
-	if url := a.configureURL(ctx, c.OrgID, c.TeamID, c.Channel); url != "" {
+	if url := a.sharedConfigureURL(ctx, c); url != "" {
 		parts = append(parts, fmt.Sprintf("<%s|Configure>", url))
 	}
 	return strings.Join(parts, " · ")

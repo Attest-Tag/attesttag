@@ -230,7 +230,9 @@ func TestOldStaticConfigureTokenIsRefused(t *testing.T) {
 func TestConfigurePostNeedsCSRF(t *testing.T) {
 	_, mux, st, orgID := configureBot(t)
 	ctx := context.Background()
-	tok := mintConfigureToken("T1", "C1", "", 0, time.Now())
+	// A personal (v2) link — the one that may edit; the shared footer link is read-only, and its
+	// own read-only behaviour is pinned in TestConfigureSharedLinkIsReadOnly. CSRF guards both.
+	tok := mintConfigureToken("T1", "C1", "U1", 0, time.Now())
 	w := configureGet(t, mux, tok)
 	var csrf *http.Cookie
 	for _, c := range w.Result().Cookies() {
