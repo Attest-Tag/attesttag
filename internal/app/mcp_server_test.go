@@ -437,7 +437,7 @@ func TestMCPConsentTakesWhatAKeyTakes(t *testing.T) {
 	}
 }
 
-func TestMCPAuthorizeSendsErrorsOnlyWhereItCanTrust(t *testing.T) {
+func TestMCPAuthorizeShowsErrorsOnItsOwnDomain(t *testing.T) {
 	_, mux, _ := docsBot(t)
 	good := "https://claude.ai/api/mcp/auth_callback"
 	clientID := registerMCPClient(t, mux, good)
@@ -454,30 +454,34 @@ func TestMCPAuthorizeSendsErrorsOnlyWhereItCanTrust(t *testing.T) {
 		mux.ServeHTTP(w, httptest.NewRequest("GET", "/oauth/authorize?"+q.Encode(), nil))
 		return w.Header().Get("Location")
 	}
+	// Every pre-consent error is shown on this server's own consent page, never 302'd to the
+	// client's registered redirect. Dynamic registration lets anyone register an https redirect, so
+	// an automatic bounce here would make /oauth/authorize an open redirector on this domain
+	// (RFC 9700 §4.11.2). A victim cannot be handed a link that silently forwards off-site.
 	cases := []struct {
 		name   string
 		change func(url.Values)
-		// toClient is whether the error goes back to the client's redirect address, which it
-		// may only when that address is one the client registered.
-		toClient bool
-		code     string
+		code   string
 	}{
-		{"an unknown client", func(q url.Values) { q.Set("client_id", "mcpc_nobody") }, false, "invalid_client"},
-		{"an unregistered redirect", func(q url.Values) { q.Set("redirect_uri", "https://evil.example/cb") }, false, "invalid_request"},
-		{"no PKCE", func(q url.Values) { q.Del("code_challenge") }, true, "invalid_request"},
-		{"plain PKCE", func(q url.Values) { q.Set("code_challenge_method", "plain") }, true, "invalid_request"},
-		{"a token response", func(q url.Values) { q.Set("response_type", "token") }, true, "unsupported_response_type"},
-		{"another server's resource", func(q url.Values) { q.Set("resource", "https://other.example/mcp") }, true, "invalid_target"},
+		{"an unknown client", func(q url.Values) { q.Set("client_id", "mcpc_nobody") }, "invalid_client"},
+		{"an unregistered redirect", func(q url.Values) { q.Set("redirect_uri", "https://evil.example/cb") }, "invalid_request"},
+		{"no PKCE", func(q url.Values) { q.Del("code_challenge") }, "invalid_request"},
+		{"plain PKCE", func(q url.Values) { q.Set("code_challenge_method", "plain") }, "invalid_request"},
+		{"a token response", func(q url.Values) { q.Set("response_type", "token") }, "unsupported_response_type"},
+		{"another server's resource", func(q url.Values) { q.Set("resource", "https://other.example/mcp") }, "invalid_target"},
 	}
 	for _, c := range cases {
 		loc := try(c.change)
-		u, _ := url.Parse(loc)
-		toClient := strings.HasPrefix(loc, good)
-		if toClient != c.toClient || u.Query().Get("error") != c.code {
-			t.Errorf("%s: redirected to %q, want error %s sent to the client=%v", c.name, loc, c.code, c.toClient)
+		if !strings.HasPrefix(loc, mcpConsentPage+"?") {
+			t.Errorf("%s: redirected to %q, want the consent page on this domain", c.name, loc)
+			continue
 		}
-		if toClient && (u.Query().Get("state") != "s" || u.Query().Get("iss") != mcpTestOrigin) {
-			t.Errorf("%s: %q lost the state or the issuer", c.name, loc)
+		if strings.HasPrefix(loc, good) || strings.Contains(loc, "evil.example") {
+			t.Errorf("%s: error was forwarded off-domain: %q", c.name, loc)
+		}
+		u, _ := url.Parse(loc)
+		if u.Query().Get("error") != c.code {
+			t.Errorf("%s: error = %q, want %q", c.name, u.Query().Get("error"), c.code)
 		}
 	}
 }

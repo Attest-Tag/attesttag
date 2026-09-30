@@ -464,10 +464,12 @@ func mcpRedirectWith(redirect, origin, state string, add url.Values) string {
 // be trusted to hear it, and to the consent page's error otherwise.
 func (b *Bot) handleMCPAuthorize(w http.ResponseWriter, r *http.Request) {
 	if _, perr := b.checkMCPAuthRequest(r.Context(), r.URL.Query()); perr != nil {
-		if perr.Redirect != "" {
-			http.Redirect(w, r, perr.Redirect, http.StatusFound)
-			return
-		}
+		// A pre-consent error is shown on this domain, never 302'd to the client's redirect_uri.
+		// Dynamic client registration lets anyone register any https redirect, so auto-redirecting
+		// here — on a GET a victim can be handed with a deliberately invalid parameter, no
+		// interaction needed — would make /oauth/authorize an open redirector wearing this site's
+		// name (RFC 9700 §4.11.2). The consent page shows the error and, once a person is there and
+		// has chosen to act, may offer the client's own address as a link to click.
 		http.Redirect(w, r, mcpConsentPage+"?"+url.Values{"error": {perr.Code}, "error_description": {perr.Desc}}.Encode(), http.StatusFound)
 		return
 	}
