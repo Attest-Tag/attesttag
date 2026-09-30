@@ -219,8 +219,54 @@ export function SecurityPanel({
           >
             <ExternalUsersField allowed={settings.AllowExternalUsers} onSaved={onSaved} />
           </SettingsSection>
+          <SettingsSection
+            title="Web access"
+            description="Whether the bot may reach the open web with fetch_url and web_search. On for looking things up. Turn it off when the bot connects sensitive services and reads untrusted content (web pages, GitHub issues, shared documents): an instruction hidden in that content then has no open channel to send what a connection returned out over."
+          >
+            <WebEgressField restricted={settings.RestrictWebEgress} onSaved={onSaved} />
+          </SettingsSection>
         </SettingsGroup>
       )}
+    </div>
+  );
+}
+
+// The lever behind restrict_web_egress. Framed the natural way round — "Web access: On/Off" — while
+// the stored setting is the restriction, so on-screen "Off" writes restrict_web_egress=1.
+function WebEgressField({ restricted, onSaved }: { restricted: boolean; onSaved: () => void }) {
+  const [on, setOn] = useState(!restricted);
+  const [seen, setSeen] = useState(restricted);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (restricted !== seen) {
+    setSeen(restricted);
+    setOn(!restricted);
+  }
+
+  const change = async (next: boolean) => {
+    setOn(next);
+    setBusy(true);
+    setError(null);
+    try {
+      await api.put("/api/settings", { restrict_web_egress: next ? "0" : "1" });
+      toast.success(next ? "The bot can reach the web" : "The bot cannot reach the open web");
+      onSaved();
+    } catch (err) {
+      setOn(!next);
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="space-y-2">
+      <label className="flex items-center gap-2.5">
+        <Switch id="restrict_web_egress" checked={on} disabled={busy} onCheckedChange={change} />
+        <span className="text-sm">{on ? "Allowed" : "Off"}</span>
+      </label>
+      {error && <p className="text-xs text-danger">{error}</p>}
     </div>
   );
 }

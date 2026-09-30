@@ -88,6 +88,13 @@ type Settings struct {
 	// when Slack returns no email for them. The list narrows members; this admits non-members.
 	AllowExternalUsers bool
 
+	// RestrictWebEgress removes fetch_url and web_search from every channel turn (they are always
+	// gone from a forwarded-mail turn already). Off by default: open web access is what lets the bot
+	// look something up. An organisation that connects sensitive services and reads untrusted
+	// content — web pages, GitHub issues, shared documents — can turn it on so that an instruction
+	// hidden in that content cannot carry what a connection returned out to a host of its choosing.
+	RestrictWebEgress bool
+
 	// The digging lane (investigations.go). Enabled by default: it is the seam that keeps a
 	// long question out of the reply path, and switching it off only sends those questions
 	// back into the path they were taken out of.
@@ -146,7 +153,7 @@ type Settings struct {
 // opens every pull request as a draft (internal/worker/run.go), by the owner's decision. A row an
 // organisation saved while the switch existed is simply never read.
 var settingKeys = []string{"model", "heavy_model", "embed_model", "monthly_budget_usd", "timezone",
-	"auth_policy", "require_two_factor", "allowed_email_domains", "allow_external_users",
+	"auth_policy", "require_two_factor", "allowed_email_domains", "allow_external_users", "restrict_web_egress",
 	"history_limit", "max_tool_rounds", "bot_name", "user_rate_limit", "alert_channel",
 	"long_answer_chars", "channel_models", "show_cost", "allow_rules", "access_allow_self_approve", "config_version",
 	"investigations", "investigation_rounds", "investigation_minutes", "investigation_max_open",
@@ -251,7 +258,7 @@ func validateSecuritySetting(k, v string) error {
 		if !slices.Contains(authPolicies, v) {
 			return fmt.Errorf("auth_policy must be one of %s", strings.Join(authPolicies, ", "))
 		}
-	case "require_two_factor", "allow_external_users":
+	case "require_two_factor", "allow_external_users", "restrict_web_egress":
 		if v != "0" && v != "1" {
 			return fmt.Errorf("%s must be 0 or 1", k)
 		}
@@ -570,6 +577,7 @@ func (c *settingsCache) load(ctx context.Context, orgID int64) Settings {
 		RequireTwoFactor:    get("require_two_factor", "0") == "1",
 		AllowedEmailDomains: domains,
 		AllowExternalUsers:  get("allow_external_users", "0") == "1",
+		RestrictWebEgress:   get("restrict_web_egress", os.Getenv("RESTRICT_WEB_EGRESS")) == "1",
 		ChannelModels:       channelModels,
 
 		WebProvider:      get("web_provider", webProviderBuiltin),

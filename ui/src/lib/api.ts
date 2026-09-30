@@ -1565,6 +1565,8 @@ export type EffectiveSettings = {
   AllowedEmailDomains: string[] | null;
   /** Whether guests and Slack Connect members may use the bot at all. */
   AllowExternalUsers: boolean;
+  /** When on, fetch_url and web_search are withheld on every turn, so injected content cannot carry data out over the web. */
+  RestrictWebEgress: boolean;
   // How the bot reaches the public web (Settings → Web).
   /** The search engine: "builtin", "tavily", "exa", "brave", "serper", … */
   WebProvider: string;

@@ -846,6 +846,15 @@ func (a *Agent) toolsFor(ctx context.Context, c *Call) map[string]Tool {
 		delete(out, "fetch_url")
 		delete(out, "web_search")
 	}
+	// An organisation that turned on restrict_web_egress loses open web reach on every turn, not
+	// just the mail lane. The reasoning is the mail lane's, widened: a turn also reads web pages,
+	// GitHub issues and shared documents, all of which can carry an injected instruction, and
+	// fetch_url would let that instruction post what a connection returned out to a host of its
+	// own choosing. run_js's fetch() is not a way out — it is confined to connection hosts.
+	if a.settings != nil && a.settings.Get(ctx, c.OrgID).RestrictWebEgress {
+		delete(out, "fetch_url")
+		delete(out, "web_search")
+	}
 	// A scheduled run does not manage schedules. The routine tools exist for a person asking
 	// in the channel, and a routine that can create or delete routines is a footgun on top of
 	// being dead weight: create_routine alone is one of the largest definitions in the set, and
