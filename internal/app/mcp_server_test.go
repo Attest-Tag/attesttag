@@ -619,3 +619,34 @@ func TestMCPTheSDKClientConnectsWithOAuth(t *testing.T) {
 		t.Fatalf("whoami = %s", text)
 	}
 }
+
+// A JSON-RPC batch on /mcp is refused. The per-key and per-grant rate limit counts one request,
+// so a batch of many tools/call would run the heavy /v1 handlers as often as it liked under a
+// single count. Stateless JSON mode has no use for batches, so they are turned away whole.
+func TestMCPBatchRequestsAreRefused(t *testing.T) {
+	b, mux, st := docsBot(t)
+	_, _, session := signedUp(t, b, mux, st, "founder@example.com")
+	key, _ := mintKey(t, mux, session, "claude code")
+
+	// A single request still works (sanity), then the same call wrapped in a batch is rejected.
+	if code, _, _ := mcpRPC(t, mux, key, "tools/list", map[string]any{}); code != 200 {
+		t.Fatalf("a single request = %d, want 200", code)
+	}
+
+	one := map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": map[string]any{}}
+	raw, _ := json.Marshal([]any{one, one, one})
+	r := httptest.NewRequest("POST", "/mcp", bytes.NewReader(raw))
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Accept", "application/json, text/event-stream")
+	r.Header.Set("Authorization", "Bearer "+key)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	if w.Code != 400 {
+		t.Fatalf("a batch = %d, want 400", w.Code)
+	}
+	var out map[string]any
+	json.Unmarshal(w.Body.Bytes(), &out)
+	if e, _ := out["error"].(map[string]any); e == nil || e["code"] != float64(-32600) {
+		t.Errorf("a batch was not refused as a JSON-RPC error: %v", out)
+	}
+}
