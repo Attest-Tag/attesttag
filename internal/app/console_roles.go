@@ -52,6 +52,14 @@ const (
 	// one kills work in flight, which a read-only member should not be able to do.
 	PermJobsView   Permission = "jobs.view"
 	PermJobsManage Permission = "jobs.manage"
+	// Code review. Reading a review means reading what a model said about somebody's code, which
+	// a viewer may; managing is the review's noise — types, rules, strictness, which repositories
+	// are reviewed in shadow — and starting one by hand, which spends review money inside caps
+	// somebody else set. What reaches further than that — posting live, every push, forks, which
+	// other repositories a review may read, the model and what one review may spend — stays with
+	// connections.manage, which the editor deliberately lacks (review_api.go checks each field).
+	PermReviewsView   Permission = "reviews.view"
+	PermReviewsManage Permission = "reviews.manage"
 	// Spending the organisation's money: starting a checkout, buying credit, opening the card on
 	// file. READING what it costs is every member's, like the API key list — the balance is the
 	// answer to "why has the bot gone quiet", which is a question anybody may have. This is the
@@ -70,7 +78,7 @@ var allPermissions = []Permission{
 	PermDocsManage, PermMemoryManage, PermRoutinesManage,
 	PermArtifactsView, PermArtifactsManage, PermActivityView, PermAuditView,
 	PermApproversManage, PermAccessView, PermAccessClose, PermAPIKeysManage,
-	PermJobsView, PermJobsManage, PermBillingManage,
+	PermJobsView, PermJobsManage, PermReviewsView, PermReviewsManage, PermBillingManage,
 }
 
 func AllPermissions() []Permission { return append([]Permission{}, allPermissions...) }
@@ -96,10 +104,10 @@ var builtinRoles = map[string][]Permission{
 		PermScopesManage, PermBundlesManage, PermDocsManage, PermMemoryManage,
 		PermRoutinesManage, PermArtifactsManage, PermArtifactsView,
 		PermActivityView, PermConnView, PermAccessView, PermAPIKeysManage,
-		PermJobsView, PermJobsManage,
+		PermJobsView, PermJobsManage, PermReviewsView, PermReviewsManage,
 	},
 	"viewer": {
-		PermConnView, PermArtifactsView, PermActivityView, PermAccessView, PermJobsView,
+		PermConnView, PermArtifactsView, PermActivityView, PermAccessView, PermJobsView, PermReviewsView,
 	},
 }
 

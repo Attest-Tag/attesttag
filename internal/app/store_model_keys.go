@@ -18,6 +18,7 @@ type ModelKeyRef struct {
 	DefaultModel string `json:"default_model"`
 	EmbedModel   string `json:"embed_model"` // "" = document search is off while this key is in use
 	FixJobs      bool   `json:"fix_jobs"`
+	Reviews      bool   `json:"reviews"` // code review may spend this key; off until an admin says so (0027)
 	UpdatedBy    string `json:"updated_by"`
 	CreatedAt    string `json:"created_at"`
 	UpdatedAt    string `json:"updated_at"`
@@ -57,15 +58,15 @@ func urlHost(raw string) string {
 	return strings.ToLower(s)
 }
 
-const modelKeyCols = `preset, base_url, key_hint, key_fp, default_model, embed_model, fix_jobs, updated_by,
+const modelKeyCols = `preset, base_url, key_hint, key_fp, default_model, embed_model, fix_jobs, reviews, updated_by,
 	created_at, updated_at, last_ok_at, last_error, last_error_at`
 
 // ModelKeyRef reads an organisation's own endpoint without its key. No row is nil and no error.
 func (s *Store) ModelKeyRef(ctx context.Context, orgID int64) (*ModelKeyRef, error) {
 	var r ModelKeyRef
-	var fixJobs int
+	var fixJobs, reviews int
 	err := s.db.QueryRowContext(ctx, `select `+modelKeyCols+` from org_model_keys where org_id=?`, orgID).Scan(
-		&r.Preset, &r.BaseURL, &r.KeyHint, &r.KeyFP, &r.DefaultModel, &r.EmbedModel, &fixJobs, &r.UpdatedBy,
+		&r.Preset, &r.BaseURL, &r.KeyHint, &r.KeyFP, &r.DefaultModel, &r.EmbedModel, &fixJobs, &reviews, &r.UpdatedBy,
 		&r.CreatedAt, &r.UpdatedAt, &r.LastOKAt, &r.LastError, &r.LastErrorAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -73,7 +74,7 @@ func (s *Store) ModelKeyRef(ctx context.Context, orgID int64) (*ModelKeyRef, err
 	if err != nil {
 		return nil, err
 	}
-	r.FixJobs = fixJobs == 1
+	r.FixJobs, r.Reviews = fixJobs == 1, reviews == 1
 	return &r, nil
 }
 
@@ -91,10 +92,10 @@ var errModelKeyChanged = errors.New("the model key was changed while this was be
 // errModelKeyUnreadable, with the row.
 func (s *Store) ModelKeyRow(ctx context.Context, orgID int64, sealer *Sealer) (*ModelKeyRef, string, error) {
 	var r ModelKeyRef
-	var fixJobs int
+	var fixJobs, reviews int
 	var enc []byte
 	err := s.db.QueryRowContext(ctx, `select `+modelKeyCols+`, key_enc from org_model_keys where org_id=?`, orgID).Scan(
-		&r.Preset, &r.BaseURL, &r.KeyHint, &r.KeyFP, &r.DefaultModel, &r.EmbedModel, &fixJobs, &r.UpdatedBy,
+		&r.Preset, &r.BaseURL, &r.KeyHint, &r.KeyFP, &r.DefaultModel, &r.EmbedModel, &fixJobs, &reviews, &r.UpdatedBy,
 		&r.CreatedAt, &r.UpdatedAt, &r.LastOKAt, &r.LastError, &r.LastErrorAt, &enc)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, "", nil
@@ -102,7 +103,7 @@ func (s *Store) ModelKeyRow(ctx context.Context, orgID int64, sealer *Sealer) (*
 	if err != nil {
 		return nil, "", err
 	}
-	r.FixJobs = fixJobs == 1
+	r.FixJobs, r.Reviews = fixJobs == 1, reviews == 1
 	plain, err := sealer.Open(enc)
 	if err != nil {
 		return &r, "", fmt.Errorf("%w: %v", errModelKeyUnreadable, err)
@@ -128,21 +129,18 @@ func (s *Store) ModelKeySecret(ctx context.Context, orgID int64, sealer *Sealer)
 }
 
 // PutModelKey writes an organisation's own endpoint. An empty key keeps the one already stored, so
-// changing a model or the fix-jobs switch does not make anybody paste the key again — and then the
-// write only lands on the row it was made against: ref.BaseURL and ref.KeyFP are what the caller
-// read, and if another save has replaced either since, nothing is written and the answer is
-// errModelKeyChanged. A save that carries a key has just been checked against the endpoint
+// changing a model or the fix-jobs or reviews switch does not make anybody paste the key again —
+// and then the write only lands on the row it was made against: ref.BaseURL and ref.KeyFP are what
+// the caller read, and if another save has replaced either since, nothing is written and the answer
+// is errModelKeyChanged. A save that carries a key has just been checked against the endpoint
 // (handleModelKeyPut), so the status starts out as that check's success.
 func (s *Store) PutModelKey(ctx context.Context, orgID int64, ref ModelKeyRef, key, by string, sealer *Sealer) error {
-	fixJobs := 0
-	if ref.FixJobs {
-		fixJobs = 1
-	}
+	fixJobs, reviews := boolInt(ref.FixJobs), boolInt(ref.Reviews)
 	at := now()
 	if key == "" {
 		res, err := s.db.ExecContext(ctx, `update org_model_keys set preset=?, default_model=?, embed_model=?,
-			fix_jobs=?, updated_by=?, updated_at=? where org_id=? and base_url=? and key_fp=?`,
-			ref.Preset, ref.DefaultModel, ref.EmbedModel, fixJobs, by, at, orgID, ref.BaseURL, ref.KeyFP)
+			fix_jobs=?, reviews=?, updated_by=?, updated_at=? where org_id=? and base_url=? and key_fp=?`,
+			ref.Preset, ref.DefaultModel, ref.EmbedModel, fixJobs, reviews, by, at, orgID, ref.BaseURL, ref.KeyFP)
 		if err != nil {
 			return err
 		}
@@ -156,14 +154,15 @@ func (s *Store) PutModelKey(ctx context.Context, orgID int64, ref ModelKeyRef, k
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, `insert into org_model_keys (org_id, preset, base_url, key_enc, key_hint, key_fp,
-		default_model, embed_model, fix_jobs, updated_by, created_at, updated_at, last_ok_at, last_error, last_error_at)
-		values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '')
+		default_model, embed_model, fix_jobs, reviews, updated_by, created_at, updated_at, last_ok_at, last_error, last_error_at)
+		values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '')
 		on conflict(org_id) do update set preset=excluded.preset, base_url=excluded.base_url, key_enc=excluded.key_enc,
 			key_hint=excluded.key_hint, key_fp=excluded.key_fp, default_model=excluded.default_model,
-			embed_model=excluded.embed_model, fix_jobs=excluded.fix_jobs, updated_by=excluded.updated_by,
-			updated_at=excluded.updated_at, last_ok_at=excluded.last_ok_at, last_error='', last_error_at=''`,
+			embed_model=excluded.embed_model, fix_jobs=excluded.fix_jobs, reviews=excluded.reviews,
+			updated_by=excluded.updated_by, updated_at=excluded.updated_at, last_ok_at=excluded.last_ok_at,
+			last_error='', last_error_at=''`,
 		orgID, ref.Preset, ref.BaseURL, enc, fingerprint(key), secretFingerprint(key), ref.DefaultModel, ref.EmbedModel,
-		fixJobs, by, at, at, at)
+		fixJobs, reviews, by, at, at, at)
 	return err
 }
 

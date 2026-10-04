@@ -1332,6 +1332,18 @@ func (s *Store) AlertOnce(ctx context.Context, orgID int64, key string, window t
 	return true
 }
 
+// AlertSentAt is when one alert key last fired, for a condition an alert also stands as the record of
+// — GitHub refusing an installation's threads to be resolved (review_thread_resolve.go) — and false
+// when it never has, or was cleared since.
+func (s *Store) AlertSentAt(ctx context.Context, orgID int64, key string) (time.Time, bool) {
+	var at string
+	if err := s.db.QueryRowContext(ctx, `select created_at from alerts_sent where org_id=? and key=?`, orgID, key).Scan(&at); err != nil {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.DateTime, at)
+	return t, err == nil
+}
+
 // ClearAlert forgets one alert key, so the next occurrence warns again inside the window that
 // would otherwise have suppressed it. A top-up is exactly that case: the account was told it was
 // running low, they fixed it, and the next time it runs low is news rather than a repeat.
@@ -1573,6 +1585,9 @@ type ToolCallRow struct {
 	// Private is a call whose arguments and result were one person's, so Args and Result are
 	// what the log kept instead (privateMark). Only the console's reads set it (unmarkPrivate).
 	Private bool
+	// Withheld is a console assistant call whose arguments this reader may not be shown, as the
+	// permissions they would need; Args is then empty (unmarkPrivateFor).
+	Withheld []string `json:",omitempty"`
 }
 
 const toolCallCols = `id, coalesce(team_id,''), created_at, coalesce(channel,''), coalesce(thread_ts,''), name, coalesce(args,''), coalesce(result,''), ok, ms`

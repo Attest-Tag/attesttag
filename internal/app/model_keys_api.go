@@ -148,6 +148,7 @@ type modelKeyInput struct {
 	DefaultModel string `json:"default_model"`
 	EmbedModel   string `json:"embed_model"`
 	FixJobs      *bool  `json:"fix_jobs"` // nil keeps what is stored; a new key starts with them off
+	Reviews      *bool  `json:"reviews"`  // the same for code review
 	Password     string `json:"password"`
 	Code         string `json:"code"`
 }
@@ -233,11 +234,25 @@ func (b *Bot) handleModelKeyPut(w http.ResponseWriter, r *http.Request) {
 	if in.FixJobs != nil {
 		fixJobs = *in.FixJobs
 	}
+	// Code review starts OFF on a new key too (0027's default), for a reason of its own: a review is
+	// started by a pull request opening, not by anybody here pressing a button, so turning it on lets
+	// people outside the organisation — anybody who can open a pull request on a public repository
+	// it reviews — spend the key.
+	reviews := false
+	if cur != nil {
+		reviews = cur.Reviews
+	}
+	if in.Reviews != nil {
+		reviews = *in.Reviews
+	}
 	moved := cur == nil || in.Key != "" || cur.BaseURL != in.BaseURL
 	// Turning fix jobs on widens where the key can be read, so it is held to the same identity
 	// proof as changing the key or its address — a stolen session must not be able to do it alone.
+	// Turning reviews on is held to it as well: it hands the key's spending to events from outside,
+	// which is the quiet way a stolen session would run up the organisation's bill.
 	enablingJobs := fixJobs && (cur == nil || !cur.FixJobs)
-	if moved || enablingJobs {
+	enablingReviews := reviews && (cur == nil || !cur.Reviews)
+	if moved || enablingJobs || enablingReviews {
 		if ok, why := b.proveIdentity(ctx, me, in.Password, in.Code); !ok {
 			writeJSON(w, http.StatusForbidden, map[string]any{"error": why, "proof": b.proofKind(ctx, me)})
 			return
@@ -248,7 +263,7 @@ func (b *Bot) handleModelKeyPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ref := ModelKeyRef{Preset: presetOf(in.Preset), BaseURL: in.BaseURL, DefaultModel: in.DefaultModel,
-		EmbedModel: in.EmbedModel, FixJobs: fixJobs}
+		EmbedModel: in.EmbedModel, FixJobs: fixJobs, Reviews: reviews}
 	if in.Key == "" {
 		ref.KeyFP = cur.KeyFP // the row this save was made against; another save since refuses it
 	}
@@ -272,7 +287,7 @@ func (b *Bot) handleModelKeyPut(w http.ResponseWriter, r *http.Request) {
 	b.audit(r, "model_key.saved", AuditEvent{TargetKind: "model_key", TargetName: saved.Host(), Details: auditDetails(map[string]any{
 		"preset": saved.Preset, "host": saved.Host(), "key_hint": saved.KeyHint, "key_fp": saved.KeyFP,
 		"new_key": in.Key != "", "moved": moved, "default_model": saved.DefaultModel, "embed_model": saved.EmbedModel,
-		"fix_jobs": saved.FixJobs})})
+		"fix_jobs": saved.FixJobs, "reviews": saved.Reviews})})
 	if moved {
 		b.mailModelKeyChange(ctx, orgID, me, saved)
 	}

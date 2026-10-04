@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/hmac"
@@ -18,6 +19,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -234,6 +236,15 @@ func (b *Bot) githubAppRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /github/connect", b.handleGitHubConnect)
 	mux.HandleFunc("GET /github/setup", b.handleGitHubSetup)
 	mux.Handle("GET /api/github/installations", b.requirePerm(PermConnView, b.handleGitHubInstallations))
+	// Not behind requireAdmin, which would demand a session and a CSRF token and so refuse every
+	// delivery: the authority is the signature over the body (github_webhook.go), and auditedWrites
+	// does not wrap it, so each effect the dispatcher has writes its own audit row. Registered
+	// whether or not a secret is set, so a deployment without one answers GitHub with a 503 that
+	// names the reason in its logs rather than a 404 that looks like a wrong URL.
+	if b.ghHook != nil {
+		b.ghHook.badSigs.shareAcross(b.store)
+	}
+	mux.HandleFunc("POST /github/webhook", b.handleGitHubWebhook)
 }
 
 // githubBack sends the browser home with a message. Relative on purpose: the answer belongs on
@@ -334,14 +345,16 @@ func (b *Bot) handleGitHubSetup(w http.ResponseWriter, r *http.Request) {
 	}
 	// installation_id is present when GitHub sent the browser here itself, straight after an
 	// install; it is absent on the authorize hop, which knows who the person is but not what they
-	// just clicked. Zero means "bind everything they can see" rather than "nothing named".
+	// just clicked. Zero means "bind everything they can see and may claim" rather than "nothing
+	// named".
 	id, _ := strconv.ParseInt(strings.TrimSpace(q.Get("installation_id")), 10, 64)
 	if id < 0 {
 		id = 0
 	}
 	// The installation id in this URL is a claim, not evidence. Exchange GitHub's code for the
 	// installer's own token and take the installations from what that token can see — so an id
-	// typed in by somebody who cannot see it is not in the list, and is refused.
+	// typed in by somebody who cannot see it is not in the list, and is refused. Seeing it is not
+	// enough either: mayClaim asks whether they control it.
 	code := strings.TrimSpace(q.Get("code"))
 	if code == "" {
 		githubBack(w, r, "github_error", "GitHub did not ask you to authorise the app, so we cannot confirm the "+
@@ -356,17 +369,33 @@ func (b *Bot) handleGitHubSetup(w http.ResponseWriter, r *http.Request) {
 	if id == 0 {
 		redirectURI = githubSetupURL(r)
 	}
-	mine, err := b.ghApp.userInstallations(ctx, code, redirectURI)
+	mine, installer, err := b.ghApp.userInstallations(ctx, code, redirectURI)
 	if err != nil {
 		slog.Warn("github installer check", "installation", id, "err", err)
 		githubBack(w, r, "github_error", "Could not confirm the installation with GitHub. Start the install again.")
 		return
 	}
-	saved, n, elsewhere := b.bindInstallations(ctx, orgID, mine, id, installedBy)
+	claim := func(ctx context.Context, ins ghInstallation) error { return b.ghApp.mayClaim(ctx, installer, ins) }
+	res := b.bindInstallations(ctx, orgID, mine, id, installedBy, claim)
+	saved, n := res.bound, res.repos
 	if saved == 0 {
-		if len(elsewhere) > 0 {
-			githubBack(w, r, "github_error", strings.Join(elsewhere, ", ")+" is already connected to another attest_tag "+
+		switch {
+		case len(res.elsewhere) > 0:
+			githubBack(w, r, "github_error", strings.Join(res.elsewhere, ", ")+" is already connected to another attest_tag "+
 				"organisation. Ask whoever set it up to invite you, or uninstall it at GitHub first.")
+			return
+		case len(res.tooLarge) > 0:
+			githubBack(w, r, "github_error", strings.Join(res.tooLarge, ", ")+" covers more repositories than can be checked "+
+				"here. Choose the repositories it needs at GitHub, under the app's Configure page, and connect it again.")
+			return
+		case len(res.refused) > 0:
+			githubBack(w, r, "github_error", "Only an owner of "+strings.Join(res.refused, ", ")+", or someone who administers "+
+				"every repository the app was given there, can connect it to attest_tag. Ask one of them to connect it, "+
+				"or to invite you once they have.")
+			return
+		case len(res.unchecked) > 0:
+			githubBack(w, r, "github_error", "Could not confirm with GitHub that you may connect "+
+				strings.Join(res.unchecked, ", ")+". Try again in a minute.")
 			return
 		}
 		// Either a spoofed id, or a genuine race where the install has not landed on GitHub's
@@ -399,16 +428,82 @@ func (b *Bot) handleGitHubInstallations(w http.ResponseWriter, r *http.Request) 
 	} else {
 		out["install_missing"] = b.ghApp.installMissing()
 	}
+	// Code review needs more than installing does — the webhook secret above all, without which
+	// GitHub's deliveries cannot be verified and no pull request is ever heard about — so it says
+	// what it is missing on its own line, and install_missing keeps meaning "cannot install". Where
+	// code review is off (CODE_REVIEW=off) it needs nothing, and nobody is asked to set up, or to grant
+	// write access at GitHub for, a feature this deployment does not have; code_review says so, for
+	// the console to word the webhook's facts without it.
+	reviewOff := b.cfg.codeReviewOff()
+	out["code_review"] = !reviewOff
+	out["review_missing"] = []string{}
+	if !reviewOff {
+		out["review_missing"] = b.reviewMissing()
+	}
+	// Where GitHub should send deliveries, and whether the secret is set, are this deployment's
+	// own facts: on a single-tenant self-host the person reading this is the one who has to paste
+	// the URL into the App's settings. A hosted tenant never set up the App and never will, and
+	// is not told where the operator's webhook lives.
+	if b.cfg.SignupMode != SignupOpen {
+		out["webhook_url"] = b.baseURL(r) + "/github/webhook"
+		out["webhook_secret_set"] = b.ghHook.configured()
+	}
 	list, err := b.store.GitHubInstalls(r.Context(), orgOf(r))
 	if err != nil {
 		writeJSON(w, 500, map[string]any{"error": err.Error()})
 		return
 	}
+	views := make([]githubInstallView, 0, len(list))
 	for _, g := range list {
 		g.AppSlug = b.ghApp.slugOrEmpty()
+		missing, known := []string{}, false
+		if !reviewOff {
+			missing, known = reviewMissingPermissions(g.Permissions)
+		}
+		views = append(views, githubInstallView{GitHubInstall: g, MissingPermissions: missing, PermissionsKnown: known})
 	}
-	out["installations"] = list
+	out["installations"] = views
 	writeJSON(w, 200, out)
+}
+
+// githubInstallView is an installation as the console reads it: the stored row, and what code
+// review would still need the installation's owner to accept at GitHub.
+type githubInstallView struct {
+	*GitHubInstall
+	// MissingPermissions are the permissions code review's tokens ask for that this installation
+	// has not granted, as "pull_requests:write"; empty when it has them all, or when what it
+	// granted was never recorded (PermissionsKnown false), which is not the same thing.
+	MissingPermissions []string `json:"missing_permissions"`
+	PermissionsKnown   bool     `json:"permissions_known"`
+}
+
+// reviewMissingPermissions compares what an installation granted — its permissions as GitHub
+// sent them at install, JSON — with what code review's two token purposes ask for
+// (githubPurposePermissions), so the console can say "accept the new permissions" before the
+// first review fails on a 403 instead of after. A write grant covers a read. Nothing recorded is
+// unknown, not "missing everything": installations bound before permissions were stored have none.
+func reviewMissingPermissions(granted string) (missing []string, known bool) {
+	missing = []string{}
+	var have map[string]string
+	if strings.TrimSpace(granted) == "" || json.Unmarshal([]byte(granted), &have) != nil || len(have) == 0 {
+		return missing, false
+	}
+	rank := map[string]int{"read": 1, "write": 2, "admin": 3}
+	need := map[string]string{}
+	for _, purpose := range []string{githubPurposeReviewRead, githubPurposeReviewPost} {
+		for k, v := range githubPurposePermissions[purpose] {
+			if rank[v] > rank[need[k]] {
+				need[k] = v
+			}
+		}
+	}
+	for k, v := range need {
+		if rank[have[k]] < rank[v] {
+			missing = append(missing, k+":"+v)
+		}
+	}
+	slices.Sort(missing)
+	return missing, true
 }
 
 func (g *githubApp) slugOrEmpty() string {
@@ -467,9 +562,10 @@ func (b *Bot) connectInstalledRepos(ctx context.Context, orgID int64, ins ghInst
 //
 // So the code GitHub sends is exchanged for a token belonging to the person who just clicked
 // Install, and that token is asked which installations it can see. An id that is not in the
-// answer is refused. The token is used for this one question and thrown away: it is proof of
-// identity, never a credential we keep.
-func (g *githubApp) userInstallations(ctx context.Context, code, redirectURI string) ([]ghInstallation, error) {
+// answer is refused. Seeing one is not yet the right to claim it (mayClaim), so the person comes
+// back with the list: their token is kept for the rest of this one request, to ask GitHub what
+// they may do, and thrown away with it — proof of identity, never a credential we keep.
+func (g *githubApp) userInstallations(ctx context.Context, code, redirectURI string) ([]ghInstallation, *ghInstaller, error) {
 	form := url.Values{"client_id": {g.clientID}, "client_secret": {g.clientSecret}, "code": {code}}
 	// Repeat whatever the authorize step sent, and only that. GitHub matches the two, so passing
 	// one here when the install-time flow sent none is itself an error.
@@ -479,13 +575,13 @@ func (g *githubApp) userInstallations(ctx context.Context, code, redirectURI str
 	req, err := http.NewRequestWithContext(ctx, "POST", "https://github.com/login/oauth/access_token",
 		strings.NewReader(form.Encode()))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 	resp, err := oauthHTTPClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer resp.Body.Close()
 	var tok struct {
@@ -495,35 +591,170 @@ func (g *githubApp) userInstallations(ctx context.Context, code, redirectURI str
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	json.Unmarshal(raw, &tok)
 	if tok.AccessToken == "" {
-		return nil, fmt.Errorf("GitHub would not confirm who installed the app: %s", truncate(tok.Error, 160))
+		return nil, nil, fmt.Errorf("GitHub would not confirm who installed the app: %s", truncate(tok.Error, 160))
 	}
+	u := &ghInstaller{token: tok.AccessToken}
 
 	// One page is enough: nobody reaches this having installed the app on more than a handful of
 	// accounts in the same click, and the id we are checking for is from the click that just
 	// happened.
-	req, err = http.NewRequestWithContext(ctx, "GET", "https://api.github.com/user/installations?per_page=100", nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	resp2, err := oauthHTTPClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp2.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp2.Body, 1<<20))
-	if resp2.StatusCode >= 400 {
-		return nil, fmt.Errorf("GitHub returned %d listing the installer's installations", resp2.StatusCode)
-	}
 	var out struct {
 		Installations []ghInstallation `json:"installations"`
 	}
-	if err := json.Unmarshal(body, &out); err != nil {
-		return nil, err
+	if err := ghGet(ctx, u.token, "/user/installations?per_page=100", &out); err != nil {
+		return nil, nil, fmt.Errorf("listing the installer's installations: %w", err)
 	}
-	return out.Installations, nil
+	return out.Installations, u, nil
+}
+
+// ghInstaller is the person who came back from GitHub, as their own user token shows them. It
+// lives for one request.
+type ghInstaller struct {
+	token string
+}
+
+// ghGet is one read from GitHub's API with the token given — the installer's, or an installation
+// token minted for the question — decoded into into. oauthHTTPClient, like every exchange in the
+// install flow: this is the platform's own plumbing, not a tenant's call.
+func ghGet(ctx context.Context, token, path string, into any) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", "https://api.github.com"+path, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	resp, err := oauthHTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("GitHub returned %d", resp.StatusCode)
+	}
+	return json.Unmarshal(body, into)
+}
+
+// errMayNotClaim is mayClaim's "no": GitHub answered, and what it said does not make this person
+// someone who may attach the installation here. Any other error is GitHub not answering.
+var errMayNotClaim = errors.New("may not claim this installation")
+
+// claimProofPages bounds how many pages of an organisation installation's repositories mayClaim
+// reads: 1,000 repositories. Past that the installation is refused rather than half-checked, and
+// the person is told to narrow its repository selection at GitHub.
+const claimProofPages = 10
+
+// errClaimTooLarge is an organisation installation with more repositories than mayClaim reads.
+var errClaimTooLarge = errors.New("installation has too many repositories to check")
+
+// mayClaim decides whether this person may attach installation ins to an attest_tag organisation.
+//
+// Seeing an installation is not owning it. For a user token GitHub lists every installation on a
+// repository the person can read, so an organisation's members and its outside collaborators all
+// see it. On visibility alone any of them could attach their employer's installation, while
+// nobody has claimed it yet, to an organisation of their own: first claim wins, the installation
+// tokens follow it, and so does every pull request code review is sent.
+//
+// Who may claim it is whoever controls what it covers. For a personal account, that is the account
+// itself. For an organisation, it is someone with admin on every repository the installation
+// covers: an owner, or the repository admin who chose them. The organisation case uses the person's
+// own view of the installation's repositories, which carries their permission on each, and checks
+// it against the installation's own count, so a repository hidden from them counts against them. An
+// installation with no repositories proves nothing and is refused until it has some.
+func (g *githubApp) mayClaim(ctx context.Context, u *ghInstaller, ins ghInstallation) error {
+	if strings.EqualFold(ins.Account.Type, "User") {
+		var me struct {
+			ID int64 `json:"id"`
+		}
+		if err := ghGet(ctx, u.token, "/user", &me); err != nil {
+			return fmt.Errorf("asking GitHub who the installer is: %w", err)
+		}
+		if me.ID == 0 || me.ID != ins.Account.ID {
+			return errMayNotClaim
+		}
+		return nil
+	}
+	total, err := g.installationRepoCount(ctx, ins.ID)
+	if err != nil {
+		return err
+	}
+	if total == 0 {
+		return errMayNotClaim
+	}
+	seen := 0
+	for page := 1; seen < total; page++ {
+		if page > claimProofPages {
+			return errClaimTooLarge
+		}
+		var body struct {
+			TotalCount   int `json:"total_count"`
+			Repositories []struct {
+				Permissions struct {
+					Admin bool `json:"admin"`
+				} `json:"permissions"`
+			} `json:"repositories"`
+		}
+		path := fmt.Sprintf("/user/installations/%d/repositories?per_page=100&page=%d", ins.ID, page)
+		if err := ghGet(ctx, u.token, path, &body); err != nil {
+			return fmt.Errorf("reading the installer's repositories: %w", err)
+		}
+		if body.TotalCount != total {
+			return errMayNotClaim
+		}
+		if len(body.Repositories) == 0 {
+			break
+		}
+		for _, r := range body.Repositories {
+			if !r.Permissions.Admin {
+				return errMayNotClaim
+			}
+		}
+		seen += len(body.Repositories)
+	}
+	if seen < total {
+		return errMayNotClaim
+	}
+	return nil
+}
+
+// installationRepoCount is how many repositories installation id covers, as the installation
+// itself sees them. The token minted for it asks for metadata only and is not kept.
+func (g *githubApp) installationRepoCount(ctx context.Context, id int64) (int, error) {
+	jwt, err := g.jwt(time.Now())
+	if err != nil {
+		return 0, err
+	}
+	body, _ := json.Marshal(map[string]any{"permissions": map[string]string{"metadata": "read"}})
+	req, err := http.NewRequestWithContext(ctx, "POST",
+		fmt.Sprintf("https://api.github.com/app/installations/%d/access_tokens", id), bytes.NewReader(body))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+jwt)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := oauthHTTPClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	var tok struct {
+		Token string `json:"token"`
+	}
+	json.Unmarshal(raw, &tok)
+	if resp.StatusCode >= 400 || tok.Token == "" {
+		return 0, fmt.Errorf("GitHub would not issue a token for installation %d (%d)", id, resp.StatusCode)
+	}
+	var list struct {
+		TotalCount int `json:"total_count"`
+	}
+	if err := ghGet(ctx, tok.Token, "/installation/repositories?per_page=1", &list); err != nil {
+		return 0, fmt.Errorf("counting installation %d's repositories: %w", id, err)
+	}
+	return list.TotalCount, nil
 }
 
 // handleGitHubConnect binds whatever this person has installed, from wherever they are.
@@ -566,38 +797,83 @@ func (b *Bot) handleGitHubConnect(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, b.ghApp.authorizeURL(state, githubSetupURL(r)), http.StatusFound)
 }
 
-// bindInstallations records the installations this person can see, files their repositories, and
-// says what happened. One named id binds only that one — the install-time redirect knows which
-// was just created. None named binds everything they can see that is not already spoken for,
-// which is what the authorize hop has to do: it is told who the person is, not what they just
-// clicked.
-func (b *Bot) bindInstallations(ctx context.Context, orgID int64, mine []ghInstallation, want int64, by string) (bound, repos int, elsewhere []string) {
+// bindResult is what bindInstallations did with the installations it was shown: how many it
+// bound and how many repositories that filed, and, by account login, the ones it did not bind
+// and why.
+type bindResult struct {
+	bound, repos int
+	elsewhere    []string // claimed by another attest_tag organisation
+	refused      []string // GitHub answered, and this person may not claim it (mayClaim)
+	tooLarge     []string // too many repositories to check
+	unchecked    []string // GitHub could not be asked
+}
+
+// bindInstallations records the installations this person can see and may claim, files their
+// repositories, and says what happened. One named id binds only that one — the install-time
+// redirect knows which was just created. None named binds everything they can see that is not
+// already spoken for and that claim allows, which is what the authorize hop has to do: it is told
+// who the person is, not what they just clicked.
+//
+// claim is asked before an installation is attached to this organisation for the first time, or
+// again after it was disconnected here. One this organisation already holds is refreshed without
+// it: re-reading its account and permissions grants nothing new.
+func (b *Bot) bindInstallations(ctx context.Context, orgID int64, mine []ghInstallation, want int64, by string,
+	claim func(context.Context, ghInstallation) error) bindResult {
+	var res bindResult
 	for _, ins := range mine {
 		if want > 0 && ins.ID != want {
 			continue
+		}
+		have, err := b.store.GitHubInstall(ctx, ins.ID)
+		if err != nil {
+			slog.Warn("reading github install", "installation", ins.ID, "err", err)
+			res.unchecked = append(res.unchecked, ins.Account.Login)
+			continue
+		}
+		if have != nil && have.OrgID != orgID {
+			// Somebody else's: the tenancy guard in SaveGitHubInstall would say the same.
+			res.elsewhere = append(res.elsewhere, ins.Account.Login)
+			continue
+		}
+		if have == nil || have.Status == "revoked" {
+			if err := claim(ctx, ins); err != nil {
+				switch {
+				case errors.Is(err, errMayNotClaim):
+					slog.Warn("github install refused: the installer does not control it", "installation", ins.ID,
+						"account", ins.Account.Login, "org", orgID)
+					res.refused = append(res.refused, ins.Account.Login)
+				case errors.Is(err, errClaimTooLarge):
+					res.tooLarge = append(res.tooLarge, ins.Account.Login)
+				default:
+					slog.Warn("github install claim check", "installation", ins.ID, "err", err)
+					res.unchecked = append(res.unchecked, ins.Account.Login)
+				}
+				continue
+			}
 		}
 		perms, _ := json.Marshal(ins.Permissions)
 		g := &GitHubInstall{ID: ins.ID, OrgID: orgID, AccountLogin: ins.Account.Login, AccountID: ins.Account.ID,
 			AccountType: ins.Account.Type, RepoSelection: ins.RepositorySelection, Permissions: string(perms),
 			AppSlug: ins.AppSlug, InstalledBy: by, SuspendedAt: ins.SuspendedAt}
 		if err := b.store.SaveGitHubInstall(ctx, g); err != nil {
-			// Somebody else's, or a write that failed. Neither is this person's to override, and
-			// the first is the tenancy guard doing its job rather than a fault.
+			// Claimed by another organisation between the read above and this write, or a write
+			// that failed. Neither is this person's to override, and the first is the tenancy guard
+			// doing its job rather than a fault.
 			if errors.Is(err, ErrInstallOwnedElsewhere) {
-				elsewhere = append(elsewhere, ins.Account.Login)
+				res.elsewhere = append(res.elsewhere, ins.Account.Login)
 			} else {
 				slog.Warn("saving github install", "installation", ins.ID, "err", err)
 			}
 			continue
 		}
-		bound++
+		res.bound++
 		n, err := b.connectInstalledRepos(ctx, orgID, ins, by)
 		if err != nil {
 			// The installation is saved and usable; only the shortcut failed. The picker can
 			// still add its repositories, so this is not the install failing.
 			slog.Warn("connecting installed repositories", "installation", ins.ID, "err", err)
 		}
-		repos += n
+		res.repos += n
 	}
-	return bound, repos, elsewhere
+	return res
 }

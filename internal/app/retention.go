@@ -44,6 +44,10 @@ var retentionTables = []struct {
 	// into a roughly weekly one — a control over their own cap. See
 	// TestRetentionKeepsThisMonthsUsage.
 	protectMonth bool
+	// unless is a condition a row must also meet to go, for a table some of whose old rows are
+	// still current state. Its one argument is the organisation, which it must name in any
+	// subquery for the reason every statement here does.
+	unless string
 }{
 	// credit_ledger is deliberately absent, and this is the note saying so rather than an
 	// omission somebody later "fixes". It carries org_id and a created_at like everything here,
@@ -64,6 +68,24 @@ var retentionTables = []struct {
 	{table: "assistant_turns", at: "created_at"},
 	{table: "turns", at: "created_at", byTeam: true},
 	{table: "file_texts", at: "created_at", byTeam: true},
+	// Code review's record of what it did. A finding goes by when it was last touched rather than
+	// when it was raised, and a standing one — open or disputed — on a pull request that is still
+	// open does not go at all, however long the pull request sits idle: its inline comment is still
+	// on GitHub, a reply in its thread is matched against it, and a re-review that no longer found
+	// its fingerprint would post it again as a duplicate comment. Touching the row cannot be relied
+	// on to save it, since an idle pull request touches nothing. Once the pull request is closed, or
+	// no longer known, its findings age out like any record. Its runs may go before it does, which
+	// leaves first_run_id naming a run that is gone; that is the cost of the policy, and the finding
+	// still reads on its own.
+	//
+	// review_prs is deliberately absent, like configuration: one row per pull request saying where
+	// its summary comment is and which commit was last reviewed, current state that the next
+	// review edits in place. Deleting it by age would have that review post a second summary.
+	// github_deliveries has its own week-long sweep (store_github_deliveries.go), and the review
+	// settings and types are configuration.
+	{table: "review_runs", at: "created_at"},
+	{table: "review_findings", at: "updated_at",
+		unless: `(status not in ('open','disputed') or review_pr_id not in (select id from review_prs where org_id=? and state='open'))`},
 }
 
 // retentionFloor is the shortest history an organisation may ask to keep. A number below this
@@ -101,7 +123,11 @@ func (s *Store) PurgeOrgData(ctx context.Context, orgID int64, keep time.Duratio
 		if t.byTeam {
 			where = `where team_id in (select team_id from teams where org_id=?) and `
 		}
-		res, err := tx.ExecContext(ctx, `delete from `+t.table+` `+where+t.at+` < ?`, orgID, cutoff)
+		stmt, args := `delete from `+t.table+` `+where+t.at+` < ?`, []any{orgID, cutoff}
+		if t.unless != "" {
+			stmt, args = stmt+` and `+t.unless, append(args, orgID)
+		}
+		res, err := tx.ExecContext(ctx, stmt, args...)
 		if err != nil {
 			return 0, err
 		}

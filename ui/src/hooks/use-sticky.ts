@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 // What the console remembers about how a page is arranged — which workspaces are folded, which
 // channels are starred, which bundles are open — lives in this browser and nowhere else. None of
@@ -87,4 +87,30 @@ export function useStickyFlags(key: string) {
     });
 
   return { get, set } as const;
+}
+
+/**
+ * One value that survives a reload — the node or the item a two-pane page had open last. `ready`
+ * turns true once the stored value has been read, so a page that falls back to a default when
+ * nothing is kept can wait for the answer rather than write its default over it.
+ */
+export function useStickyValue<T>(key: string) {
+  const [value, setValue] = useState<T | null>(null);
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    /* eslint-disable react-hooks/set-state-in-effect -- one-shot read of stored UI state */
+    setValue(read<T>(key));
+    setReady(true);
+    /* eslint-enable react-hooks/set-state-in-effect */
+  }, [key]);
+
+  const set = useCallback(
+    (next: T) => {
+      setValue(next);
+      write(key, next);
+    },
+    [key],
+  );
+
+  return { value, set, ready } as const;
 }

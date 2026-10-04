@@ -154,6 +154,9 @@ func (b *Bot) routes(mux *http.ServeMux, uiFS fs.FS) {
 	b.oauthRoutes(mux)
 	b.connectRoutes(mux)
 	b.jobsRoutes(mux)
+	// Code review's console API (review_api.go): its settings tree, review types, runs and Start
+	// review. The webhook GitHub calls is githubAppRoutes'.
+	b.reviewRoutes(mux)
 	b.apiKeyRoutes(mux)
 	// The audit log's own routes (audit.go); the recording itself happens inside requireAdmin.
 	b.auditRoutes(mux)
@@ -370,6 +373,20 @@ func (b *Bot) routes(mux *http.ServeMux, uiFS fs.FS) {
 					return
 				}
 			}
+			if strings.HasPrefix(k, "review_") {
+				if err := validateReviewSetting(k, v); err != nil {
+					bad(w, err)
+					return
+				}
+				// What code review may spend is decided by whoever may decide what one review spends
+				// and whether it posts (review_api.go): connections.manage, on top of the route's own
+				// settings.manage. Only a change is asked about, so a settings form that sends every
+				// key back as it found it is not refused for the two it did not touch.
+				if v != b.store.Setting(r.Context(), orgOf(r), k) && !adminFromCtx(r.Context()).Permissions[PermConnManage] {
+					writeJSON(w, http.StatusForbidden, map[string]any{"error": reviewMoneyDenial})
+					return
+				}
+			}
 			if err := validateModelSetting(k, v); err != nil {
 				bad(w, err)
 				return
@@ -454,17 +471,25 @@ func (b *Bot) routes(mux *http.ServeMux, uiFS fs.FS) {
 	// is no less revealing than the turns it took afterwards.
 	mux.HandleFunc("GET /api/assistant/turns", b.requirePerm(PermActivityView, func(w http.ResponseWriter, r *http.Request) {
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-		ts, err := b.store.AssistantTurns(r.Context(), orgOf(r), r.URL.Query().Get("q"), limit)
-		if err != nil {
-			fail(w, err)
-			return
-		}
 		// The assistant runs as the admin who asked, so a reply can quote the audit log, the
 		// settings or the connections — things a plain activity.view holder may not read directly.
 		// Everyone with activity.view still sees that a question was asked, by whom and what it cost;
 		// the question and the answer themselves are shown only to a reader who holds audit.view, the
-		// most sensitive of what the assistant can reach.
-		if me := adminFromCtx(r.Context()); me == nil || !me.Permissions[PermAuditView] {
+		// most sensitive of what the assistant can reach. Searching them is reading them: a search
+		// that narrowed the list for somebody who may not see the words would tell them, one guess at
+		// a time, which replies contain what, so theirs is the whole list whatever q says.
+		me := adminFromCtx(r.Context())
+		words := me != nil && me.Permissions[PermAuditView]
+		q := ""
+		if words {
+			q = r.URL.Query().Get("q")
+		}
+		ts, err := b.store.AssistantTurns(r.Context(), orgOf(r), q, limit)
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		if !words {
 			for i := range ts {
 				ts[i].Question, ts[i].Reply = "", ""
 				ts[i].Redacted = true
@@ -605,6 +630,12 @@ func (b *Bot) routes(mux *http.ServeMux, uiFS fs.FS) {
 			bad(w, err)
 			return
 		}
+		// A console assistant card names the organisation it was proposed in; it is no setting, so it is
+		// taken out before the fields are read and the audit row lists them.
+		if refuseOtherOrg(w, r, raw[stepOrgKey]) {
+			return
+		}
+		delete(raw, stepOrgKey)
 		sc, err := b.store.ScopeByID(r.Context(), orgOf(r), pathID(r, "id"))
 		if err != nil || sc == nil {
 			writeJSON(w, 404, map[string]any{"error": "no such scope"})
@@ -2234,9 +2265,13 @@ func (b *Bot) routes(mux *http.ServeMux, uiFS fs.FS) {
 			Rank          int     `json:"rank"`
 			BundleIDs     []int64 `json:"bundle_ids"`
 			ConnectionIDs []int64 `json:"connection_ids"`
+			Org           string  `json:"org"` // a console assistant card's organisation (refuseOtherOrg)
 		}
 		if err := decode(r, &in); err != nil {
 			bad(w, err)
+			return
+		}
+		if refuseOtherOrg(w, r, in.Org) {
 			return
 		}
 		if strings.TrimSpace(in.Name) == "" {
@@ -2260,9 +2295,13 @@ func (b *Bot) routes(mux *http.ServeMux, uiFS fs.FS) {
 		var in struct {
 			Name *string `json:"name"`
 			Rank *int    `json:"rank"`
+			Org  string  `json:"org"` // a console assistant card's organisation (refuseOtherOrg)
 		}
 		if err := decode(r, &in); err != nil {
 			bad(w, err)
+			return
+		}
+		if refuseOtherOrg(w, r, in.Org) {
 			return
 		}
 		if in.Name != nil {
@@ -2325,9 +2364,13 @@ func (b *Bot) routes(mux *http.ServeMux, uiFS fs.FS) {
 		var in struct {
 			Ref    string `json:"ref"`
 			TeamID string `json:"team_id"` // the workspace to resolve the entry in; optional with one workspace
+			Org    string `json:"org"`     // a console assistant card's organisation (refuseOtherOrg)
 		}
 		if err := decode(r, &in); err != nil {
 			bad(w, err)
+			return
+		}
+		if refuseOtherOrg(w, r, in.Org) {
 			return
 		}
 		ids, emails, badOnes := parseApprovers(in.Ref)
@@ -2529,8 +2572,12 @@ func (b *Bot) routes(mux *http.ServeMux, uiFS fs.FS) {
 			}
 		}
 		calls, _ := b.store.RecentToolCalls(r.Context(), orgOf(r), channel, limit, failedOnly, since)
+		perms := map[string]bool{}
+		if me := adminFromCtx(r.Context()); me != nil {
+			perms = me.Permissions
+		}
 		for i := range calls {
-			calls[i].unmarkPrivate()
+			calls[i].unmarkPrivateFor(perms)
 			calls[i].Result, calls[i].More = cutRunes(calls[i].Result, toolResultPreview)
 			calls[i].ChannelName = names.name(r.Context(), calls[i].TeamID, calls[i].Channel)
 		}
@@ -2547,7 +2594,11 @@ func (b *Bot) routes(mux *http.ServeMux, uiFS fs.FS) {
 			writeJSON(w, 404, map[string]any{"error": "no such tool call"})
 			return
 		}
-		call.unmarkPrivate()
+		perms := map[string]bool{}
+		if me := adminFromCtx(r.Context()); me != nil {
+			perms = me.Permissions
+		}
+		call.unmarkPrivateFor(perms)
 		writeJSON(w, 200, call)
 	}))
 	mux.HandleFunc("GET /api/activity.csv", b.requirePerm(PermActivityView, func(w http.ResponseWriter, r *http.Request) {

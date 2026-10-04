@@ -311,6 +311,16 @@ func (b *Bot) handleMe(w http.ResponseWriter, r *http.Request) {
 			"owed": b.twoFactorOwed(r.Context(), u),
 		}
 		out["auth_policy"] = set.AuthPolicy
+		// Whether pull requests can be reviewed as they open here: the GitHub App and the webhook
+		// secret its deliveries are verified with. The Reviews page reads it to say why nothing has
+		// been reviewed yet, rather than leave a team waiting for deliveries that are refused. A
+		// signed-in fact: the sign-in page has no use for it.
+		out["github_review"] = len(b.reviewMissing()) == 0
+		// Whether this organisation has code review at all, and why not: the deployment's CODE_REVIEW
+		// and its plan (review_plan.go). The Reviews page explains itself from this — "not on this
+		// deployment", or the plan that has it — and on "off" the console hides the page, whose
+		// routes are gone.
+		out["code_review"] = b.reviewAccess(r.Context(), u.OrgID)
 		// What the account may spend this month and what it has. The console draws a banner
 		// when the bot has stopped for the month, and that has to be true on every page rather
 		// than only the one with the number on it, so it rides along with the session the shell

@@ -8,7 +8,7 @@ database holds.
 ```
 Slack (signed webhooks)      Microsoft Teams (Bot Framework)      Console, API and links (HTTP, :8080)
   │ /slack/events              │ /msteams/messages                  │ /admin/ /api/ /v1/ /configure/ /setup/
-  │ /slack/interactions        │                                    │ /connect/ /invite/ /mcp /oauth/ /operator /health
+  │ /slack/interactions        │ /github/webhook (GitHub, signed)   │ /connect/ /invite/ /mcp /oauth/ /operator /health
   ▼                            ▼                                    ▼
 ┌───────────────────────────────────── attesttag (one Go process) ─────────────────────────────────────┐
 │  bot.go: event router, sessions, confirm flow      chat.go: one Chat per workspace, either platform  │
@@ -17,6 +17,7 @@ Slack (signed webhooks)      Microsoft Teams (Bot Framework)      Console, API a
 │  proxy.go: resolve access → match → inject credential → confirm writes → scrub → audit               │
 │  store.go + db.go: SQLite or Postgres (sessions, turns, memories, routines, chunks, usage, …)        │
 │  jobs_*.go: start a fix-job worker container on whichever platform this is (internal/worker)         │
+│  github_webhook.go: signed GitHub deliveries → sealed inbox    internal/review: code review's rules  │
 └────────────┬───────────────────────────────────────────────────────────────────┬─────────────────────┘
              │ chat / stream / embeddings                                        │ credential injected
              ▼                                                                   ▼
@@ -42,6 +43,30 @@ Slack (signed webhooks)      Microsoft Teams (Bot Framework)      Console, API a
   models are settings, and an organisation may bring its own endpoint and key
   ([plans.md](plans.md#its-own-model-key)); every call resolves which one through
   `model_endpoints.go`.
+
+## Code review and its webhook
+
+- **GitHub** delivers the App's webhook to `/github/webhook`, signed over the exact body with
+  `GITHUB_APP_WEBHOOK_SECRET` (and `GITHUB_APP_WEBHOOK_SECRET_PREVIOUS` during a rotation). Only an
+  installation's own events, and pull-request events for a repository an organisation reviews,
+  are kept; each is sealed into a bounded inbox — 4,096 pending for the deployment and 64 per
+  organisation, each body capped by its event (2 MiB for a pull request's, GitHub's own 25 MB for
+  an installation's) and 64 MiB held at once — and dispatched under a lease every later write is
+  fenced on. GitHub never retries a failed delivery by itself, so one that cannot be stored is a
+  503 it lists for Redeliver, and a week-long receipt makes the redelivery of a stored one a no-op.
+  A pull request whose delivery never arrived at all — the deployment was down — is found by the
+  catch-up, which lists each reviewed repository's open pull requests every ten minutes; a missed
+  comment or reply is not recovered.
+- **Code review** runs in this process rather than in a worker: no pull request's code is ever run,
+  so there is nothing to isolate and no container to start. A pull request opened, a command, a
+  reply or the console's Start review goes through one gate into the review lane — two workers per
+  instance, outside the cap on conversations. A worker claims a run under a fenced lease that also
+  holds its pull request, reserves the run's money, and runs the engine: Go builds the context, a
+  finder pass per review type works with read-only tools, Go checks every candidate against the
+  code, and a verifier tries to refute each one. The result is checkpointed, then posted as one
+  COMMENT review and one summary comment, both rendered by `internal/review` from what the database
+  holds. Every GitHub call goes through the proxy with a token minted for its purpose
+  ([code review](code-review.md)).
 
 ## Documents, storage and fix jobs
 
@@ -88,7 +113,7 @@ Slack (signed webhooks)      Microsoft Teams (Bot Framework)      Console, API a
 | `internal/app/commands.go`, `help.go`, `whoami.go` | bang commands; the bot's own manual (`about_me`); the `!whoami` report |
 | `internal/app/investigations.go`, `investigations_store.go` | the digging lane: the `start_investigation` tool, the worker pool that answers in the thread, and the queue that survives a deploy |
 | `internal/app/playground.go` | a real turn against a channel's real configuration, answered over HTTP to the console, with its writes held |
-| `internal/app/assistant.go`, `assistant_api.go`, `assistant_guide.go`, `store_assistant.go` | the console assistant: reads the console, searches this guide (embedded by `guide/embed.go`), and stages changes a person confirms |
+| `internal/app/assistant.go`, `assistant_api.go`, `assistant_focus.go`, `assistant_review.go`, `assistant_guide.go`, `store_assistant.go` | the console assistant: reads the console, knows what the page behind it has open, searches this guide (embedded by `guide/embed.go`), and stages changes a person confirms — on Reviews, to review types and to a level's branch rules |
 
 ### Tools
 
@@ -113,7 +138,7 @@ Slack (signed webhooks)      Microsoft Teams (Bot Framework)      Console, API a
 | `internal/app/confirm.go`, `allow_rules.go` | held writes — the approval card, buttons and "Something else" dialog — and the plain-sentence allow rules with the model check that applies them |
 | `internal/app/access_requests.go`, `approvers.go`, `store_access.go` | access requests: the tool, the approver's DM card, the press and the replay; approval tiers and who holds them |
 | `internal/app/oauth_user.go`, `store_user_conns.go`, `store_oauth_pending.go` | connections people sign into for themselves — each person's own Google account |
-| `internal/app/github_app.go`, `github_token.go`, `store_github_installs.go` | the GitHub App: installing it, and minting an installation token per request |
+| `internal/app/github_app.go`, `github_token.go`, `store_github_installs.go` | the GitHub App: installing it, and minting an installation token per request, narrowed to the repository and to the purpose the request is for |
 | `internal/app/aws_sigv4.go`, `aws_creds.go` | AWS Signature Version 4 for connections, and the task-role credential the ECS dispatcher signs with |
 | `internal/app/drive_sync.go`, `store_drive.go` | a Google Drive folder mirrored into Documents |
 | `internal/app/skills.go`, `setup_links.go`, `configure.go`, `scope_fields.go` | skills; setup links; the member Configure page; the one check every channel setting goes through |
@@ -135,6 +160,25 @@ Slack (signed webhooks)      Microsoft Teams (Bot Framework)      Console, API a
 | `internal/app/org_delete.go`, `store_org_delete.go` | deleting an account |
 | `internal/app/email.go`, `support_request.go` | transactional mail; the console's Help button |
 | `internal/app/store_charts.go` | the series behind the overview's charts |
+
+### Code review: the webhook, settings and the console API
+
+| path | what |
+|---|---|
+| `internal/app/github_webhook.go`, `store_github_deliveries.go` | the GitHub App's webhook: the signature check, the receipt filter, the sealed inbox deliveries wait in, and the dispatcher that keeps the stored installation in step with GitHub |
+| `internal/app/store_review.go` | code review's configuration: the settings tree by connection, group and repository, and the review types with their rules and versions |
+| `internal/app/review_github.go`, `store_review_runs.go` | code review's GitHub I/O — one client per pull request, every URL checked against an allowlist, reads raw and read-only, writes only a COMMENT review and its own comments — and its pull requests, run queue (a fenced lease per run and per pull request) and findings |
+| `internal/app/review_api.go` | code review's console API: the settings tree by connection, group and repository with where each value comes from, review types with their versions and Try on a PR, the run history and a run's detail, Start review, and the open pull requests and cost estimate the dialog shows — `reviews.view` to read, `reviews.manage` to change, and `connections.manage` on top for what posts live, spends or reads further |
+
+### Code review: the engine, the lane and the conversation
+
+| path | what |
+|---|---|
+| `internal/app/review_engine.go`, `review_context.go`, `review_checks.go`, `review_consolidate.go` | the review engine: the diff masked line for line, a finder pass per review type with read-only tools, Go's checks on every candidate's quotes and anchor, one finding for a problem said twice, a verifier that tries to refute each one a model raised, and the caps |
+| `internal/app/review_skills.go` | a review type's skills: folders in GitHub repositories read for its finder — the repository under review at the base, a connected one through its read token, a public one with no credentials — masked, held to a share of the prompt, cited as S1, S2, and recorded with the commit each was read at; and the console's Check of one link |
+| `internal/app/review_lane.go`, `review_post.go`, `review_plan.go`, `store_review_lane.go` | the review lane: the gate a pull request passes before a review is queued — `CODE_REVIEW` and the plan, the branch and label rules, the pause after five automatic reviews — the money each run reserves before it starts, two workers per instance claiming runs under a fenced lease, and the poster — one COMMENT review per run against the commit it reviewed, and one summary comment edited in place |
+| `internal/app/review_catchup.go` | code review's catch-up: every ten minutes, behind a leader lease and only beside the webhook, each reviewed repository's open pull requests are compared with what is stored — one opened after the repository started being reviewed that never had a review goes through the gate as its opening would have, one pushed to gets its footer re-rendered, and one the gate turned away stays turned away |
+| `internal/app/review_commands.go`, `review_replies.go`, `review_thread_resolve.go`, `store_review_threads.go` | code review's conversation: `@` commands from the repository's own people (review, full review, status, help, pause, resume), replies in a finding's thread — sorted on the light model, judged on the review's model with the code at the head, and turned by Go into a withdrawal, a downgrade, a dispute, a recorded "fixed" claim or a proposed rule, the summary and the score following — and a closed finding's thread resolved on GitHub |
 
 ### Plans and billing
 
@@ -172,6 +216,7 @@ Slack (signed webhooks)      Microsoft Teams (Bot Framework)      Console, API a
 |---|---|
 | `internal/app/*_test.go` | unit tests, the guard tests and the live eval harness |
 | `ui/` | admin console (Next.js static export), embedded via `ui/embed.go` |
+| `internal/review/` | code review's judgements, which need nothing but their inputs: diff anchors, findings and their fingerprints, the score, branch rules, settings inheritance, commands, signed markers, the sanitiser for model text, and the rendering of comments and the summary |
 | `guide/` | the documentation, which lives here rather than in `docs/` — and is embedded into the binary for the console assistant |
 | `docs/` | the document store's default folder — the bot's corpus, not documentation. Each organisation's documents live under `docs/org-<id>/` and are chunked, embedded and answered from; the four samples at the top belong to no organisation until copied into one |
 | `Dockerfile`, `Dockerfile.worker`, `Dockerfile.worker.jvm` | the bot image; the fix-job worker image and its heavier JVM/.NET variant |
@@ -254,6 +299,21 @@ files in both, checksummed in `schema_migrations`, never edited once applied. Ta
   sign-in, refused sign-in, console or API write, Slack approval, export and retention sweep;
   the actor copied in at the time so a removed account stays legible). Swept only by its own
   `audit_retention_days`, never by `data_retention_days`.
+
+### Code review tables
+
+- `github_deliveries` (the GitHub inbox: a sealed body until it is dispatched, then a
+  receipt kept a week for the dedup), `review_settings` (the settings tree — connection, group,
+  repository — each row holding only what is set at its own level), `review_types`,
+  `review_type_rules` and `review_type_versions` (an organisation's own review types and its copies
+  of the built-ins, with every saved version), `review_prs` (a pull request's current review state),
+  `review_runs` and `review_findings` (each review's work and what it found, a finding with the
+  lines of code it points at in `snippet`, which the summary shows under *Code* — a run's result is
+  checkpointed with its findings before anything is posted, so a run put back by GitHub's rate
+  limit posts from it rather than asking the model again — swept by `data_retention_days` except a
+  finding still standing on a pull request still open).
+- `org_model_keys.reviews` is the own model key's *Code reviews* switch, off until an admin turns
+  it on; `usage` rows a review spent are filed under its repository and pull request.
 
 ### Vectors and pgvector
 

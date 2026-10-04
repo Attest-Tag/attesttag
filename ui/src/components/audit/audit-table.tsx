@@ -74,6 +74,39 @@ const ACTION_LABELS: Record<string, string> = {
   "workspace.connected": "Workspace connected",
   "workspace.disconnected": "Workspace disconnected",
   "workspace.removed": "Workspace removed",
+  "github_install.permissions_accepted": "GitHub App permissions accepted",
+  "github_install.suspended": "GitHub App suspended at GitHub",
+  "github_install.unsuspended": "GitHub App unsuspended at GitHub",
+  "github_install.uninstalled": "GitHub App uninstalled at GitHub",
+  "review.posted": "Code review posted",
+  "review.skipped": "Code review skipped",
+  "review.command": "Code review command",
+  "review.replied": "Code review replied in a thread",
+  "review.finding_changed": "Code review finding changed",
+  "review.finding_kept": "Code review finding kept open",
+  "review.rule_proposed": "Code review rule proposed",
+  "review.thread_resolved": "Code review thread resolved on GitHub",
+  "review.paused": "Code review paused on a pull request",
+  "review.resumed": "Code review resumed on a pull request",
+  "review.started": "Code review started",
+  "review.connection_added": "Code review connection added",
+  "review.connection_stopped": "Code review connection stopped",
+  "review.connection_restored": "Code review connection restored",
+  "review.group_added": "Code review group added",
+  "review.settings_updated": "Code review settings changed",
+  "review.settings_moved": "Code review repository moved",
+  "review.settings_removed": "Code review settings removed",
+  "review.repo_removed": "Repository removed from code review",
+  "review.repo_restored": "Repository restored to code review",
+  "review.repos_added": "Repositories added to code review",
+  "review.notified": "Code review announced in a channel",
+  "review.notify_failed": "Code review announcement failed",
+  "review.type_created": "Review type created",
+  "review.type_saved": "Review type saved",
+  "review.type_reset": "Review type reset to built-in",
+  "review.type_reverted": "Review type reverted",
+  "review.type_enabled": "Review type turned on",
+  "review.type_disabled": "Review type turned off",
   "export.activity": "Activity exported",
   "export.audit": "Audit log exported",
   "plan.changed": "Plan changed",
@@ -123,6 +156,10 @@ function actorOf(e: AuditEvent): { primary: string; secondary: string } {
     case "operator":
       return { primary: "Operator", secondary: "the deployment's operator" };
     case "system":
+      // GitHub's own rows are not attest_tag acting alone: an @-command on a pull request names
+      // whoever wrote it (review_commands.go), and an installation's events name GitHub.
+      if (e.actor_name?.startsWith("github:")) return { primary: e.actor_name.slice(7), secondary: "on GitHub" };
+      if (e.actor_name === "GitHub") return { primary: "GitHub", secondary: "a delivery from GitHub" };
       return { primary: "attest_tag", secondary: "on its own schedule" };
   }
   if (e.actor_name && e.actor_email) return { primary: e.actor_name, secondary: e.actor_email };

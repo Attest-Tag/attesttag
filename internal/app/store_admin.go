@@ -786,19 +786,22 @@ func (s *Store) InsertConnection(ctx context.Context, orgID int64, c *Connection
 	return id, err
 }
 
+// UpdateConnection writes c over its row. The credential kind is written only when c names one:
+// a repository moves between a pasted token and the GitHub App through here (connectRepo), and
+// every other caller hands back the kind it loaded, so an empty one can only mean "unchanged".
 func (s *Store) UpdateConnection(ctx context.Context, orgID int64, c *Connection, secretEnc []byte) error {
 	hosts, _ := json.Marshal(c.AllowedHosts)
 	prefixes, _ := json.Marshal(c.PathPrefixes)
 	methods, _ := json.Marshal(c.Methods)
 	headers, _ := json.Marshal(c.Headers)
 	setSecret := ""
-	args := []any{c.Name, string(hosts), string(prefixes), string(methods), string(headers), c.Writes, c.Notes, c.Status, c.Repo, c.AllowGrants, c.TestCmd, jsonOrEmpty(c.Recipe), c.GitHubInstallationID, c.SecretFP, now()}
+	args := []any{c.Name, c.CredType, string(hosts), string(prefixes), string(methods), string(headers), c.Writes, c.Notes, c.Status, c.Repo, c.AllowGrants, c.TestCmd, jsonOrEmpty(c.Recipe), c.GitHubInstallationID, c.SecretFP, now()}
 	if secretEnc != nil {
 		setSecret = ", secret_enc=?"
 		args = append(args, secretEnc)
 	}
 	args = append(args, orgID, c.ID)
-	_, err := s.db.ExecContext(ctx, fmt.Sprintf(`update connections set name=?, allowed_hosts=?, path_prefixes=?, methods=?,
+	_, err := s.db.ExecContext(ctx, fmt.Sprintf(`update connections set name=?, cred_type=coalesce(nullif(?, ''), cred_type), allowed_hosts=?, path_prefixes=?, methods=?,
 		headers=?, writes=?, notes=?, status=?, repo=?, allow_grants=?, test_cmd=?, recipe=?, github_installation_id=?, secret_fp=?, updated_at=?%s
 		where org_id=? and id=?`, setSecret), args...)
 	return err
@@ -1467,11 +1470,17 @@ func (s *Store) OverviewStats(ctx context.Context, orgID int64) Overview {
 		o.TopChannels = []UsageRow{}
 	}
 	o.RecentErrors = []RecentError{}
-	rows, err := s.db.QueryContext(ctx, `select id, name, coalesce(args,''), created_at from tool_calls where org_id=? and ok=0 order by id desc limit 5`, orgID)
+	rows, err := s.db.QueryContext(ctx, `select id, name, coalesce(args,''), coalesce(channel,''), created_at from tool_calls where org_id=? and ok=0 order by id desc limit 5`, orgID)
 	if err == nil {
 		for rows.Next() {
 			var e RecentError
-			rows.Scan(&e.ID, &e.Name, &e.Args, &e.At)
+			var channel string
+			rows.Scan(&e.ID, &e.Name, &e.Args, &channel, &e.At)
+			if channel == assistantChannel {
+				// Every member reads the overview, and a console assistant call's arguments are shown only to
+				// whoever may read what they are about (unmarkPrivateFor) — on Activity, not in this line.
+				e.Args = privateMark
+			}
 			e.Args = truncate(e.Args, 80)
 			o.RecentErrors = append(o.RecentErrors, e)
 		}

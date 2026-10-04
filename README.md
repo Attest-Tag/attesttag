@@ -27,7 +27,7 @@ it may reach, per channel, from a console at `/admin/`.
 the edge by a proxy, so a tool call reaches the service it is for and the model sees the answer,
 never the secret.
 
-![How attest_tag works: Slack, Teams, the admin console and API or MCP clients connect to one Go binary, which reaches the model provider, outside services and an isolated fix worker. Keys stay sealed, and every write waits for a person to confirm it.](assets/diagrams/how-attest-tag-works.webp)
+![How attest_tag works: Slack, Teams, the admin console and API or MCP clients connect to one Go binary, which reaches the model provider, outside services and an isolated fix worker. Keys stay sealed, and every write waits for a person to confirm it, except a code review posted to a repository whose review settings are Live.](assets/diagrams/how-attest-tag-works.webp)
 
 ## Run it
 
@@ -115,14 +115,24 @@ where to get each.
   or per person, and cron routines it schedules when asked. → [Using it in Slack](guide/slack.md)
 - **Reaches outside services without holding a key.** Connections are credentials an admin
   pastes once, grouped into bundles and attached per channel. A proxy injects them at the
-  network edge, holds every write for a Confirm button in the thread, scrubs the response and
-  audits the call. Presets for thirty-odd services, remote MCP servers, and per-person OAuth for
-  mailboxes and calendars. → [Connections](guide/connections.md)
+  network edge, holds every write for a Confirm button in the thread (code review, on a
+  repository an admin set to Live, is the one write that does not pass through the Confirm
+  gate — see [Guardrails](guide/security.md#code-review-posts-without-a-confirm)), scrubs the
+  response and audits the call.
+  Presets for thirty-odd services, remote MCP servers, and per-person OAuth for mailboxes and
+  calendars. → [Connections](guide/connections.md)
 - **Fixes code and opens a pull request.** A separate container clones the repository, works out
   how to build and test it, makes the change, runs the gates again, and opens a draft PR with the
   evidence. It never merges and never pushes to the base branch. → [Fix jobs](guide/fix-jobs.md)
+- **Reviews pull requests.** Through the same GitHub App: inline findings — a model's, each one a
+  second model call tried and failed to refute — posted as one comment-only review, a summary
+  comment with a confidence score computed in Go, `@` commands, and verdicts on replies in a
+  finding's thread.
+  Review types and branch rules decide what each pull request gets. It never approves, never runs
+  the pull request's code, and starts every repository in shadow, writing nothing to GitHub until an
+  admin sets it live. → [Code review](guide/code-review.md)
 - **Is administered from a console.** Served by the same binary: scopes, bundles, documents,
-  memory, routines, jobs, artifacts, activity, an audit log, roles, budgets. Sign in with a
+  memory, routines, jobs, reviews, artifacts, activity, an audit log, roles, budgets. Sign in with a
   password, Slack, Microsoft or your own OpenID Connect provider, with two-factor on top.
   → [Admin console](guide/console.md)
 - **Has an API, and an MCP server.** `/v1` with keys that carry exactly their maker's access:
@@ -158,6 +168,7 @@ One tool call from end to end, and the check each hop has to pass.
 | [Configuration](guide/configuration.md) | Every environment variable and console setting |
 | [Using it in Slack](guide/slack.md) | Threads, tools, memory, routines, commands, budgets |
 | [Connections](guide/connections.md) | Reaching other services without the model ever seeing a credential |
+| [Code review](guide/code-review.md) | Reviewing pull requests on GitHub: setting it up, review types and branch rules, what it posts, and what it costs |
 | [Google](guide/google.md) | Mail and calendar on each person's own account, and a Drive folder mirrored into Documents |
 | [MCP server](guide/mcp.md) | Claude, Cursor and any MCP client reading and changing what the bot knows, connected with OAuth or a key |
 | [Architecture](guide/architecture.md) | The process, the files, the schema |
@@ -195,6 +206,9 @@ What a self-hoster should know is still rough:
 4. **Microsoft Teams is the newest part.** It uses the same turn path, tools and console as Slack,
    but it has had a small fraction of Slack's use, and a few things Slack does have no Teams
    equivalent yet — [the differences](guide/msteams.md) are listed.
+5. **Code review is newer still.** Every repository starts in shadow, where the whole review runs
+   and is recorded in the console without a word on GitHub: read what it would have said on a few
+   weeks of pull requests before setting a repository live.
 
 Wanted, roughly in value order: feedback buttons under replies; Sign in with Slack on the
 member Configure page; sources sync for a Confluence space or Notion database, the way a Drive

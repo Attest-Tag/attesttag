@@ -147,7 +147,22 @@ type Settings struct {
 	// The same for the audit log (audit.go), kept as its own number so that shortening what
 	// the bot did cannot quietly shorten the record of what the people did. 0 keeps everything.
 	AuditRetentionDays int
+
+	// Code review's own money (review_lane.go). A review starts because a pull request opened,
+	// not because anybody asked in a thread, so a busy repository is a standing bill nobody
+	// approves turn by turn — forty pull requests at a dollar each must not spend the money the
+	// bot's conversations run on. Each run reserves its max_usd against both before it starts.
+	// The monthly budget defaults to half of the account's effective budget, and is none when
+	// that is none; the daily cap defaults to ten dollars. 0 set explicitly is no cap of its own;
+	// the account's budgets and credit still apply either way.
+	ReviewMonthlyBudgetUSD float64
+	ReviewDailyUSD         float64
 }
+
+// defaultReviewDailyUSD is a day's review spend before anybody has chosen one: about ten
+// reviews at the default dollar cap, which no single team's pull requests reach on an ordinary
+// day, and which a review loop gone wrong reaches by lunchtime and stops at.
+const defaultReviewDailyUSD = 10
 
 // worker_pr_draft is not among them. It was a console switch, and it never did anything: the worker
 // opens every pull request as a draft (internal/worker/run.go), by the owner's decision. A row an
@@ -161,7 +176,8 @@ var settingKeys = []string{"model", "heavy_model", "embed_model", "monthly_budge
 	"web_provider", "web_fetch_provider", "web_account_id",
 	"worker_engine", "worker_model", "worker_job_budget_usd", "worker_timeout_minutes", "worker_max_jobs",
 	"worker_branch_prefix", "worker_branch_suffix", "worker_event_retention_days", "worker_allow_rules",
-	"data_retention_days", "audit_retention_days"}
+	"data_retention_days", "audit_retention_days",
+	"review_monthly_budget_usd", "review_daily_usd"}
 
 var workerEngines = []string{"qwen_code", "fake"}
 
@@ -332,6 +348,23 @@ func validateWorkerSetting(k, v string) error {
 	case "worker_model":
 		if len(v) > 200 {
 			return fmt.Errorf("worker_model is too long")
+		}
+	}
+	return nil
+}
+
+// validateReviewSetting checks code review's two money settings: a number of dollars, 0 for no
+// cap of its own. Written as the range it must be inside, for the reason validateWorkerSetting
+// gives: NaN fails every comparison, and a NaN cap would compare as room for anything.
+func validateReviewSetting(k, v string) error {
+	switch k {
+	case "review_monthly_budget_usd", "review_daily_usd":
+		if v == "" {
+			return nil // back to the default
+		}
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || !(f >= 0 && f <= 100000) {
+			return fmt.Errorf("%s must be a number of dollars from 0 (no cap of its own) to 100000", k)
 		}
 	}
 	return nil
@@ -629,6 +662,11 @@ func (c *settingsCache) load(ctx context.Context, orgID int64) Settings {
 		}
 	}
 	s.EffectiveBudgetUSD = s.EffectiveBudget()
+	// After the effective budget, which the review budget's default is half of: the number the
+	// account actually stops at, so a free plan's reviews get half of the free plan's money and
+	// not half of a setting it cannot reach.
+	s.ReviewMonthlyBudgetUSD = f("review_monthly_budget_usd", s.EffectiveBudgetUSD/2)
+	s.ReviewDailyUSD = f("review_daily_usd", defaultReviewDailyUSD)
 	return s
 }
 

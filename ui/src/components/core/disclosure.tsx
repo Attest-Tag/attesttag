@@ -15,6 +15,7 @@ export function Disclosure({
   label,
   summary,
   defaultOpen = false,
+  open: openProp,
   children,
   className,
   contentClassName,
@@ -24,13 +25,19 @@ export function Disclosure({
   /** Sits after the label, quieter: a count, a source list. */
   summary?: React.ReactNode;
   defaultOpen?: boolean;
+  /**
+   * Held by the caller instead — one remembered in this browser, which arrives after mount. Keying
+   * the component on it would remount the button under a keyboard user's focus as they press it.
+   */
+  open?: boolean;
   /** Told when it opens or closes, for detail that is only worth fetching once someone looks. */
   onOpenChange?: (open: boolean) => void;
   children: React.ReactNode;
   className?: string;
   contentClassName?: string;
 }) {
-  const [open, setOpen] = useState(defaultOpen);
+  const [openState, setOpen] = useState(defaultOpen);
+  const open = openProp ?? openState;
   const id = useId();
   return (
     <div className={cn("min-w-0", className)}>

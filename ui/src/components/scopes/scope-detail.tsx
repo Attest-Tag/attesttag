@@ -729,7 +729,7 @@ export function ScopeDetail({
               <br />
               <br />
               When on, the mail is answered as a turn nobody in the workspace started: it runs on
-              this {isWide ? "workspace's" : "channel's"} own connections and never on anyone's
+              this {isWide ? "workspace's" : "channel's"} own connections and never on anyone&apos;s
               personal account, it cannot create routines or save memories, and every write it
               proposes waits for a named approver rather than a Confirm button in the thread. Set
               up an approval role first, or there will be nobody to ask.

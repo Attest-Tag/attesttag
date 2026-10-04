@@ -196,8 +196,10 @@ proxy and report the HTTP status.
 
 The Workspaces page has a **Repositories** section on the organisation, on each workspace and on
 every channel. *Connect repo* reaches GitHub one of two ways: through a GitHub App installation,
-where the account's admin chose the repositories at GitHub and nothing is pasted, or with an
-access token, pasted or reused from a repository already saved. It lists what the installation or
+where the account's admin chose the repositories at GitHub and nothing is pasted (attaching an
+installation to an attest_tag organisation for the first time takes the account's owner — for a
+GitHub organisation, someone with admin on every repository the installation covers; a member who
+can only see it is refused), or with an access token, pasted or reused from a repository already saved. It lists what the installation or
 token can reach, you tick one or several (or type `owner/name` for one GitHub will not list), and
 the server checks each against GitHub before storing it as a `github` connection in the
 `Repositories` bundle (created on demand, GitHub tool pack on) — one connection per repository,
@@ -216,6 +218,29 @@ tests it (`recipe` on `PUT /api/connections/{id}`); leave it empty and every job
 from the clone, per package. What the first job found is kept on the row only to route later jobs
 to the right worker image — it never decides what a later job runs. The older single `test_cmd`
 still means what it always did.
+
+### Code review on the same repositories
+
+A GitHub App installation that connects repositories here can also have their pull requests
+reviewed, once it is added under Automation › Reviews › Settings with **Add connection**:
+installing the App, or connecting a repository through it, starts no review by itself. Code review
+reaches GitHub only through the installation — never through a pasted token, since without the App
+GitHub sends no pull-request events — and the repositories connected here through it are what the
+Reviews page lists under that connection, though every repository the installation can see is
+reviewed under the connection's settings. It needs *Contents: Read* and *Pull requests: Read and
+write*, and the webhook events in
+[configuration](configuration.md#the-apps-webhook-and-permissions-for-code-review). Its tokens are
+minted per call like the bot's, and narrower: read-only for what a review reads, pull requests
+alone for what it posts. Under Repositories each repository saved through the App says *review:
+live*, *shadow* or *off*, and **Code review settings…** in its menu opens its settings; *Connect
+repo* warns when the installation picked has not accepted what code review asks for.
+
+Its posts are the one write that never goes through the Confirm card in step 4 above — no allow
+rule or `auto` setting is involved. On a
+repository whose review is *Live*, Go posts the review with nobody pressing anything; on one in
+*Shadow*, where every connection starts, it writes nothing to GitHub at all
+([Guardrails](security.md#code-review-posts-without-a-confirm)). The settings, the review types
+and what a review looks like on a pull request are in [Code review](code-review.md).
 
 ## Setup links
 

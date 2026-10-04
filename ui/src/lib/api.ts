@@ -66,6 +66,29 @@ export type Me = {
    * key points is on GET /api/settings/model-key, for settings.manage only.
    */
   model_key?: { own: boolean; failing: boolean; blocked: boolean; refusal?: string } | null;
+  /**
+   * Whether pull requests can be reviewed as they open here: the GitHub App is set up and its
+   * deliveries can be verified. False is why nothing has been reviewed yet; a review started from
+   * the console still runs while the App alone is there.
+   */
+  github_review?: boolean;
+  /**
+   * Whether this organisation has code review at all, decided by the server from the deployment's
+   * CODE_REVIEW and the organisation's plan (review_plan.go). Absent from an older server, which
+   * reads as available. `reason` "off" is the deployment's: the Reviews page and its routes are gone.
+   * "plan" is the organisation's plan, and `needs` the one that has it; what was set and reviewed
+   * before stays readable, and nothing new starts.
+   */
+  code_review?: CodeReviewAccess | null;
+};
+
+export type CodeReviewAccess = {
+  available: boolean;
+  reason: "" | "off" | "plan";
+  /** The plan that would have it: "pro" or "enterprise". */
+  needs?: string;
+  /** The server's own sentence for why not, naming the plan the organisation is on. */
+  message?: string;
 };
 
 /** What the shell needs to know about money without asking a second endpoint. */
@@ -695,8 +718,26 @@ export type PlaygroundReply = {
  *  back with every question rather than living on the server. */
 export type AssistantMessage = { role: "you" | "assistant"; text: string };
 
-/** One field as the proposal card shows it, before and after. */
-export type ProposalChange = { key: string; label: string; from: string; to: string };
+/**
+ * One entry of a list the card shows row by row, marked with what happens to it: added, removed or
+ * switched off, changed, moved, or "=" — one row standing for every entry that stays as it is, so a
+ * forty-rule type does not draw thirty-nine rows to show one.
+ */
+export type ProposalItem = { mark: "+" | "-" | "~" | "↕" | "="; text: string };
+
+/**
+ * One field as the proposal card shows it, before and after — unless `format` says it is something
+ * else: "text" is prose shown whole rather than cut (a review type's purpose), and "list" is shown
+ * entry by entry from `items` (a type's rules, a level's branch rules), with `to` its summary.
+ */
+export type ProposalChange = {
+  key: string;
+  label: string;
+  from: string;
+  to: string;
+  format?: "" | "text" | "list";
+  items?: ProposalItem[];
+};
 
 /**
  * One call Confirm makes. The server builds these from ids it resolved inside the organisation
@@ -718,11 +759,63 @@ export type ProposalStep = {
  */
 export type Proposal = {
   id: string;
-  kind: "channel" | "approval";
+  /**
+   * The organisation the card was proposed in, by its public id. Every step's body names it too, and
+   * the endpoints refuse one that is not the session's; the card will not confirm while the console is
+   * signed in to another organisation, which a switch in another tab does without this one knowing.
+   */
+  org?: string;
+  kind: "channel" | "approval" | "review_type" | "review_settings";
   target: string;
-  changes: ProposalChange[];
+  changes: ProposalChange[] | null;
   steps: ProposalStep[];
+  /** What the change alone does not show: a level that stops inheriting, a built-in copied on its first save. */
+  note?: string;
+  /** What the change was read from ("Based on v3"), which is what Confirm is checked against. */
+  based?: string;
+  /** Another card of the same answer that has to be confirmed first: the type a branch rule names. */
+  requires?: string;
+  /** Where the change is seen on its own page. */
+  open?: { href: string; label: string };
+  /** The API paths whose readers load again once it is confirmed (CONSOLE_CHANGED_EVENT). */
+  refresh?: string[];
 };
+
+/**
+ * Said on the window when something the console shows was changed from outside the page showing it
+ * — a proposal card confirmed in the assistant panel. `refresh` is API path prefixes: every `useApi`
+ * reading one loads again, so the page behind the panel shows the change without a reload. `select`
+ * is what a page that can open a thing in place should open, as its own query parameters
+ * ({tab, type} on Reviews); a page that cannot ignores it.
+ */
+export const CONSOLE_CHANGED_EVENT = "attest-tag:console-changed";
+export type ConsoleChange = { refresh: string[]; select?: Record<string, string> };
+
+export function announceConsoleChange(change: ConsoleChange): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent<ConsoleChange>(CONSOLE_CHANGED_EVENT, { detail: change }));
+}
+
+/** Listens for CONSOLE_CHANGED_EVENT; returns the unsubscribe, so it is a whole useEffect body. */
+export function onConsoleChange(fn: (change: ConsoleChange) => void): () => void {
+  const on = (e: Event) => {
+    const change = (e as CustomEvent<ConsoleChange>).detail;
+    if (change) fn(change);
+  };
+  window.addEventListener(CONSOLE_CHANGED_EVENT, on);
+  return () => window.removeEventListener(CONSOLE_CHANGED_EVENT, on);
+}
+
+/**
+ * Whether a refresh prefix names this path: the path itself, or one below it as a path or a query.
+ * "/api/review-settings" reloads the tree and every node's detail, and nothing that only happens to
+ * start with the same letters.
+ */
+function refreshes(path: string, prefix: string): boolean {
+  if (!prefix || !path.startsWith(prefix)) return false;
+  const next = path.charAt(prefix.length);
+  return next === "" || next === "/" || next === "?" || prefix.endsWith("/");
+}
 
 /** GET /api/assistant/turns — one recorded console question and what came back. */
 export type AssistantTurnRow = {
@@ -781,8 +874,17 @@ export type CredType =
 export type GithubInstall = {
   installation_id: number;
   account_login: string;
+  /** "Organization" or "User": which of GitHub's two settings pages the installation lives on. */
+  account_type?: string;
   repo_selection: string;
   status: string;
+  /**
+   * Permissions code review asks for that this installation has not granted, as
+   * "pull_requests:write"; its owner accepts them at GitHub. Empty when it has them all — or when
+   * what it granted was never recorded, which `permissions_known` tells apart.
+   */
+  missing_permissions?: string[];
+  permissions_known?: boolean;
 };
 
 export type GithubInstalls = {
@@ -792,6 +894,13 @@ export type GithubInstalls = {
   setup_url?: string;
   /** What is missing when install_configured is false, so the disabled entry can name it. */
   install_missing?: string[];
+  /** What code review still needs on this deployment, as the settings that would fix it. */
+  review_missing?: string[];
+  /** False where CODE_REVIEW=off: nothing above or on an installation is about code review then. */
+  code_review?: boolean;
+  /** Where GitHub should send deliveries. Single-tenant deployments only. */
+  webhook_url?: string;
+  webhook_secret_set?: boolean;
 };
 
 export type Connection = {
@@ -1467,9 +1576,20 @@ export type ToolCallRow = {
    * and Result are not what it sent and got back but what the log kept of it, as JSON: whose it
    * was, the connection, method and endpoint, the status and the size. Both are empty on a row
    * logged before the log kept anything.
+   *
+   * A console assistant call (Channel "console:assistant") is private too: its Result is only the size
+   * of what came back, and its Args are the arguments themselves for a reader who may see them.
    */
   Private?: boolean;
+  /**
+   * A console assistant call whose arguments this reader may not see, as the permissions reading them
+   * needs — audit.view, which its question and reply need too, and what the tool was about. Args is empty.
+   */
+  Withheld?: string[] | null;
 };
+
+/** The conversation the console assistant's own calls are logged under (assistantChannel). */
+export const ASSISTANT_CHANNEL = "console:assistant";
 
 export type ProxyAudit = {
   id: number;
@@ -1592,6 +1712,13 @@ export type EffectiveSettings = {
   /** Days of audit log to keep, as its own policy; 0 keeps everything. */
   AuditRetentionDays: number;
   WorkerAllowRules: boolean;
+  /**
+   * Code review's own two caps, as resolved: the monthly one defaults to half the account's
+   * effective budget and the daily one to $10. 0 is no cap of its own. What is stored, which says
+   * whether either was chosen, is `stored.review_monthly_budget_usd` and `stored.review_daily_usd`.
+   */
+  ReviewMonthlyBudgetUSD: number;
+  ReviewDailyUSD: number;
 };
 
 /**
@@ -1847,6 +1974,608 @@ export type ModelsResponse = {
   complete?: boolean;
 };
 
+// ---- code review (internal/review/settings.go, rules.go; internal/app/review_api.go) ----
+
+export type ReviewMode = "off" | "shadow" | "live";
+export type ReviewTrigger = "command" | "open" | "push";
+export type ReviewForks = "command" | "off";
+export type ReviewStrictness = "low" | "medium" | "high";
+/** Where a value was set: a level of the tree, the built-in default under it, or a branch rule. */
+export type ReviewLevel = "default" | "connection" | "group" | "repo" | "rule";
+
+/**
+ * One branch rule. The list is ordered and the first match wins; the last rule is the fallback
+ * (no base, no head, no labels), which the server requires. Empty fields inherit.
+ */
+export type ReviewBranchRule = {
+  base?: string;
+  head?: string;
+  /**
+   * A rule with labels is a label rule: it chooses nothing, and adds its types to a pull request
+   * carrying any of them (compared ignoring case) on top of what its branch rule chose. It must name
+   * a type and may override nothing else; base and head, when set, narrow it to those branches.
+   */
+  labels?: string[];
+  /** Review type keys, run in this order. Empty runs the default type, "general". */
+  types?: string[];
+  trigger?: ReviewTrigger;
+  strictness?: ReviewStrictness;
+  /** Where a matching pull request's review goes; never "off", which is the level's mode. */
+  post?: "shadow" | "live";
+  model?: string;
+  /**
+   * The channel its pull requests are announced in instead of the settings' one: absent inherits
+   * that, an empty object keeps them quiet.
+   */
+  notify?: ReviewNotify;
+};
+
+/**
+ * A chat channel code review announces pull requests in: one channel of one connected workspace,
+ * by the workspace's team id and the channel's id. Empty is "no channel" — set at a level, it turns
+ * off one set further up. The team may be left out when only one workspace has the channel; the
+ * server names it on save.
+ */
+export type ReviewNotify = { team?: string; channel?: string };
+
+/**
+ * What a review's channel can be told: a review starting, finishing, failing (or not running for a
+ * budget, a pause or the plan), and the pull request being merged.
+ */
+export type ReviewNotifyEvent = "started" | "finished" | "failed" | "merged";
+
+/**
+ * What one level sets itself. Every key is optional and an absent one inherits; the four lists
+ * add up down the tree, and branch_rules is taken whole from the nearest level that has any.
+ */
+export type ReviewSettingsValues = {
+  mode?: ReviewMode;
+  trigger?: ReviewTrigger;
+  drafts?: boolean;
+  forks?: ReviewForks;
+  strictness?: ReviewStrictness;
+  max_comments?: number;
+  comment_header?: string;
+  model?: string;
+  max_usd?: number;
+  notify?: ReviewNotify;
+  /** Which events the channel hears of, a set taken whole from the nearest level; empty is none. */
+  notify_on?: ReviewNotifyEvent[];
+  instructions?: string[];
+  exclude_authors?: string[];
+  ignore_paths?: string[];
+  context_repos?: string[];
+  branch_rules?: ReviewBranchRule[];
+};
+
+/** What will actually run at a level: every field filled, and where each value came from. */
+export type ReviewEffective = {
+  mode: ReviewMode;
+  trigger: ReviewTrigger;
+  drafts: boolean;
+  forks: ReviewForks;
+  strictness: ReviewStrictness;
+  max_comments: number;
+  comment_header: string;
+  model: string;
+  max_usd: number;
+  /**
+   * The channel told about each review and the merge; absent when none is (the server leaves a zero
+   * one out, so the hash a cached review is found by stays what it was before there were channels).
+   */
+  notify?: ReviewNotify;
+  /** Which events that channel hears of; absent is every one, as for a level nothing resolved. */
+  notify_on?: ReviewNotifyEvent[];
+  instructions: string[];
+  exclude_authors: string[];
+  ignore_paths: string[];
+  context_repos: string[];
+  branch_rules: ReviewBranchRule[] | null;
+  source?: Partial<Record<keyof ReviewSettingsValues, ReviewLevel>>;
+};
+
+/** One node of Reviews › Settings. A repository nothing was set on has no id and `inherits`. */
+export type ReviewNode = {
+  id: string;
+  kind: "connection" | "group" | "repo";
+  parent_id?: string;
+  settings: ReviewSettingsValues | null;
+  updated_by?: string;
+  updated_at?: string;
+  inherits: boolean;
+  /** The mode this node resolves to, its own or inherited. */
+  mode?: ReviewMode;
+  installation_id?: number;
+  /**
+   * Set on a connection whose reviews were stopped, and on a repository removed from code review —
+   * which is listed under its connection's `removed`, not in the tree.
+   */
+  removed_at?: string;
+  name?: string;
+  /** owner/name, lower-cased. */
+  repo?: string;
+};
+
+export type ReviewGroupNode = ReviewNode & { kind: "group"; name: string; repos: ReviewNode[] };
+
+/** One GitHub App installation in the tree, with how it stands at GitHub. */
+export type ReviewConnectionNode = ReviewNode & {
+  kind: "connection";
+  installation_id: number;
+  removed_at: string;
+  /** "active", "suspended" or "uninstalled" — no longer held by this organisation. */
+  status: string;
+  missing_permissions: string[];
+  permissions_known: boolean;
+  installed_by: string;
+  installed_at: string;
+  suspended_at: string;
+  account_login?: string;
+  account_type?: string;
+  repo_selection?: string;
+  /** When GitHub last delivered an event for it; "" when it never has. */
+  last_delivery_at: string;
+  /**
+   * When GitHub last refused to resolve a finding's thread with this installation's token, for want
+   * of a permission; "" while it never has, or once one resolves again.
+   */
+  threads_refused_at?: string;
+  groups: ReviewGroupNode[];
+  /** Repositories directly under the connection, in no group. */
+  repos: ReviewNode[];
+  /**
+   * Repositories removed from code review: nothing on them is reviewed until they are restored.
+   * Each keeps its settings, and its parent_id is the group it goes back into.
+   */
+  removed: ReviewNode[];
+};
+
+/** An installation the organisation holds that is not reviewed yet: what Add connection offers. */
+export type ReviewAvailableInstall = {
+  installation_id: number;
+  account_login: string;
+  account_type: string;
+  status: string;
+  repo_selection: string;
+  repos: string[];
+  missing_permissions: string[];
+  permissions_known: boolean;
+};
+
+export type ReviewSettingsTree = {
+  connections: ReviewConnectionNode[];
+  available: ReviewAvailableInstall[];
+  /**
+   * The channels a notify may name: those of the organisation's active workspaces the bot is in, as
+   * the server checks a save. /api/scopes still lists a disconnected workspace's channels.
+   */
+  channels: ReviewNotify[];
+};
+
+/**
+ * GET /api/review-settings/{connection}/available: what the connection's installation reaches at
+ * GitHub, read live, that is not in its tree — never saved for it, or removed from code review.
+ */
+export type ReviewAvailableRepos = {
+  repos: {
+    repo: string;
+    private: boolean;
+    /** Removed from code review: adding it restores it, settings and group as they were. */
+    removed: boolean;
+    /** Saved already as one of the organisation's App connections. */
+    saved: boolean;
+    pushed_at?: string;
+  }[];
+  /** GitHub listed more than the pages read. */
+  truncated: boolean;
+};
+
+/** POST /api/review-settings/{connection}/repos. */
+export type ReviewAddReposResult = {
+  added: string[];
+  restored: string[];
+  already: string[];
+  failed: { repo: string; error: string }[];
+};
+
+/** GET /api/review-settings/{id}: one node as its panel reads it. */
+export type ReviewNodeDetail = {
+  node: ReviewNode;
+  own: ReviewSettingsValues | null;
+  effective: ReviewEffective;
+  /** What the node would have with nothing set on it: the "Inherit: …" value, and what Reset goes back to. */
+  inherited: ReviewEffective;
+  /** The levels the sources name, broadest first, the node last. A connection's name is "". */
+  chain: { id: string; kind: string; name: string }[];
+  /**
+   * What a field reads as now, for a save of it to send back as `expect`: the server refuses it
+   * with 409, writing nothing, when the field reads otherwise by then — somebody saved it since, at
+   * this level or above where it is inherited. Only the branch rules keep one. Absent from an
+   * older server, which takes a save without it as it always did.
+   */
+  digests?: { branch_rules?: string };
+  /**
+   * Asked with ?base=&head=: the branch rule a pull request between those branches falls under —
+   * its place in the list, "hotfix/* → main", the types it runs (never empty: none is General)
+   * and the settings with it applied. Absent when no rule matches.
+   */
+  rule?: {
+    index: number;
+    /** The branch rule's name, with "+label:perf" for each label that added a type when asked with ?labels=. */
+    label: string;
+    /** Everything it runs: the branch rule's types, then those its labels add. */
+    types: string[];
+    /** The types label rules added, and the labels that added them. */
+    added_types?: string[];
+    labels?: string[];
+    effective: ReviewEffective;
+  };
+};
+
+/** A review type as Reviews › Types lists it. Only what the settings tab reads is typed here. */
+export type ReviewTypeSummary = {
+  id: string;
+  key: string;
+  name: string;
+  purpose: string;
+  enabled: boolean;
+  builtin: boolean;
+  custom: boolean;
+  edited: boolean;
+  used_by: number;
+};
+
+/** One open pull request of a repository, with how its last review went. */
+export type ReviewPull = {
+  number: number;
+  title: string;
+  author: string;
+  base: string;
+  head: string;
+  head_sha: string;
+  draft: boolean;
+  updated_at: string;
+  url: string;
+  /** Its labels' names, which label rules add review types for. */
+  labels?: string[];
+  review: ({
+    score: number | null;
+    last_reviewed_sha: string;
+    /** The last review read the head the pull request is at now. */
+    reviewed_head: boolean;
+    skip_reason: string;
+    run?: string;
+    status?: string;
+  } & ReviewPaused) | null;
+};
+
+/**
+ * Where a pull request stands with its automatic reviews: paused or not, how many have run towards
+ * the pause, and the pause's ceiling. paused_by is "auto" (the ceiling) or "member" (`@… pause`),
+ * and "" while they run. Absent from an older server.
+ */
+export type ReviewPaused = {
+  paused?: boolean;
+  paused_by?: "" | "auto" | "member";
+  auto_reviews?: number;
+  auto_pause_after?: number;
+};
+
+/** POST /api/review-pulls/resume. */
+export type ReviewResumeResponse = { resumed: boolean; pr: ReviewPaused };
+
+export type ReviewPullsResponse = { pulls: ReviewPull[]; more: boolean };
+
+export type ReviewSeverity = "P0" | "P1" | "P2";
+
+/** One rule of a review type, in the order the finder is given them (R1, R2…). */
+export type ReviewTypeRule = {
+  /** Absent on a built-in nobody here has edited, and on a rule not saved yet. */
+  id?: string;
+  position?: number;
+  text: string;
+  /** The most severe a finding citing it may be; "" is no cap. */
+  severity_cap: ReviewSeverity | "";
+  path_globs: string[];
+  example_bad?: string;
+  example_good?: string;
+  enabled: boolean;
+  /** "builtin", "team" (written here) or "learned" (proposed from a reply on GitHub). */
+  source: string;
+  /** "active", "proposed" (learned, waiting for Approve) or "rejected"; "" reads as active. */
+  status: string;
+  from_comment_url?: string;
+  created_at?: string;
+  updated_at?: string;
+};
+
+/**
+ * A skill a review type follows: a folder (or one file) in a GitHub repository, a SKILL.md and the
+ * Markdown beside it. An empty repo is the repository under review, read at each pull request's
+ * base; ref is a branch, tag or commit, empty for the default branch. Findings cite it as S1, S2…
+ */
+export type ReviewSkillLink = { repo?: string; path: string; ref?: string };
+
+/** POST /api/review-types/skill-check: what a review would read for one link now. */
+export type ReviewSkillCheck = {
+  link: ReviewSkillLink;
+  repo?: string;
+  sha?: string;
+  name?: string;
+  description?: string;
+  files?: { path: string; chars: number }[];
+  omitted?: string[];
+  chars?: number;
+  private?: boolean;
+  /** Read without credentials: not one of the organisation's repositories. */
+  public?: boolean;
+  /** A link to the repository under review, checked in `against` at its default branch. */
+  here?: boolean;
+  against?: string;
+  warnings?: string[];
+  error?: string;
+};
+
+/** One skill a run read, or tried to: GET /api/reviews/{id}'s skills. */
+export type ReviewSkillRecord = {
+  types: string[];
+  repo: string;
+  path: string;
+  ref?: string;
+  /** In the repository under review, read at the pull request's base. */
+  here?: boolean;
+  sha?: string;
+  name: string;
+  files?: string[];
+  /** Of the files read, those the finder was given; the rest did not fit. */
+  given?: string[];
+  omitted?: string[];
+  chars?: number;
+  private?: boolean;
+  public?: boolean;
+  note?: string;
+  error?: string;
+};
+
+/** A review type in full: GET /api/review-types/{id or key}, and each entry of the list. */
+export type ReviewType = ReviewTypeSummary & {
+  /** The built-in this is the organisation's copy of. */
+  builtin_key?: string;
+  path_globs: string[];
+  /** "" inherits the settings' strictness. */
+  strictness: ReviewStrictness | "";
+  /** "" is the settings' model, "heavy" Advanced. */
+  model: string;
+  /** 0 is the settings' max $ per review. */
+  max_usd: number;
+  /** The least severe finding commented on inline; "" is every severity. */
+  inline_min_severity: ReviewSeverity | "";
+  /** 0 for a built-in nobody here has edited: its first save makes the copy v1 and the edit v2. */
+  version: number;
+  updated_by?: string;
+  created_at?: string;
+  updated_at?: string;
+  rules: ReviewTypeRule[];
+  /** Absent in a version saved before types had skills. */
+  skills?: ReviewSkillLink[] | null;
+  /** Rules the built-in ships now that this copy predates: they run, and can be switched off. */
+  new_builtin_rules?: ReviewTypeRule[];
+};
+
+export type ReviewTypeVersion = { version: number; created_by: string; created_at: string };
+
+/** A review type as an edit sends it: everything, the whole rule list in order. */
+export type ReviewTypeInput = {
+  key?: string;
+  copy_from?: string;
+  name?: string;
+  purpose?: string;
+  path_globs?: string[];
+  strictness?: string;
+  model?: string;
+  max_usd?: number;
+  inline_min_severity?: string;
+  enabled?: boolean;
+  version?: number;
+  rules?: {
+    id?: string;
+    text: string;
+    severity_cap: string;
+    path_globs: string[];
+    example_bad: string;
+    example_good: string;
+    enabled: boolean;
+    status?: string;
+  }[];
+  /** The whole list when sent; [] unlinks every skill. */
+  skills?: ReviewSkillLink[];
+};
+
+/** One review a run used, at the version it used; 0 is a try's unsaved text. */
+export type ReviewRunType = { key: string; version: number };
+
+/** One run as Reviews › History lists it (GET /api/reviews). */
+export type ReviewRunSummary = {
+  id: string;
+  repo: string;
+  pr: number;
+  /** "review", or "try" for Reviews › Types › Try on a PR. */
+  kind: string;
+  /** open | push | command | catchup | console | api */
+  trigger: string;
+  requested_by: string;
+  /** queued | running | posted | shadow | noop | skipped | superseded | failed | cancelled */
+  status: string;
+  /** 0 to 5; null until a review finished. */
+  score: number | null;
+  head_sha: string;
+  base_sha: string;
+  /** The branch rule that chose the types, "any → main"; "" when a person named them. */
+  rule: string;
+  types: ReviewRunType[];
+  /** Where the result went or goes: "live", "shadow", or "" before it was decided. */
+  post: string;
+  /** What it kept. */
+  findings: number;
+  /** Of those, how many are still open. */
+  open?: number;
+  candidates: number;
+  dropped: number;
+  files_reviewed: number;
+  cost_usd: number;
+  error: string;
+  created_at: string;
+  started_at: string;
+  finished_at: string;
+};
+
+export type ReviewRunsPage = { runs: ReviewRunSummary[]; next_cursor: string };
+
+/** One step of how a finding came to stand where it does. */
+export type ReviewFindingEvent = {
+  at: string;
+  /** "raised", "reply" (somebody answered in its thread) or "now" (where it stands, if no reply says why). */
+  what: string;
+  by: string;
+  status?: string;
+  reason?: string;
+  class?: string;
+  verdict?: string;
+  outcome?: string;
+  run?: string;
+};
+
+export type ReviewFindingStatus = "open" | "withdrawn" | "fixed" | "resolved_by_human" | "outdated" | "disputed";
+
+export type ReviewFinding = {
+  id: string;
+  path: string;
+  side: string;
+  start_line: number;
+  line: number;
+  severity: string;
+  category: string;
+  title: string;
+  body: string;
+  suggestion: { start_line?: number; line: number; code: string } | null;
+  evidence: { repo?: string; path: string; ref?: string; start_line: number; end_line?: number; quote: string }[];
+  rule_ids: string[];
+  /** Every type that raised it, the one it is filed under first. */
+  types: string[];
+  pre_existing: boolean;
+  /** "finding", or "note": said and never scored. */
+  kind: string;
+  /** "inline" on the diff, or "summary" only. */
+  placement: string;
+  /** Where the engine put it, which heading of the summary lists one off the diff. */
+  place: string;
+  possibly_outdated: boolean;
+  status: ReviewFindingStatus | string;
+  status_reason: string;
+  status_by: string;
+  claimed_fixed_sha: string;
+  claimed_by: string;
+  verifier_confidence: number;
+  /** The inline comment on GitHub; "" when it is not on the diff, or was never posted. */
+  comment_url: string;
+  created_at: string;
+  updated_at: string;
+  history: ReviewFindingEvent[];
+};
+
+/** A candidate the review did not keep, and why. */
+export type ReviewDrop = {
+  type?: string;
+  path?: string;
+  line?: number;
+  severity?: string;
+  title?: string;
+  reason: string;
+  detail?: string;
+  duplicate_of?: string;
+  confidence?: number;
+};
+
+/** GET /api/reviews/{id}: one run in full. */
+export type ReviewRunDetail = {
+  run: ReviewRunSummary;
+  request: {
+    trigger: string;
+    trigger_ref: string;
+    requested_by: string;
+    post: string;
+    allow_live: boolean;
+    scope: string;
+    types: string[];
+    full: boolean;
+    /** A try's type, as it was tried. */
+    inline?: ReviewType;
+  };
+  summary: string;
+  risk: string;
+  pr: {
+    repo: string;
+    number: number;
+    state: string;
+    author: string;
+    head_sha: string;
+    last_reviewed_sha: string;
+    score: number | null;
+    reviews: number;
+    skip_reason: string;
+    is_fork: boolean;
+    is_private: boolean;
+    url: string;
+  } & ReviewPaused;
+  /** The types it ran, each with its version and own summary; one not run says why under skipped. */
+  types: { key: string; version?: number; summary?: string; skipped?: string }[];
+  findings: ReviewFinding[];
+  dropped: ReviewDrop[];
+  not_reviewed: { path: string; reason: string }[];
+  context_repos: string[];
+  context_notes: string[];
+  /** Absent on a run from before types had skills. */
+  skills?: ReviewSkillRecord[];
+  full_coverage: boolean;
+  injection: boolean;
+  usage: {
+    model: string;
+    tokens_in: number;
+    tokens_out: number;
+    tokens_cached: number;
+    cost_usd: number;
+    reserved_usd: number;
+  };
+  timings: { created_at: string; started_at: string; finished_at: string; duration_ms: number | null };
+  links: { pull_request: string; review: string; summary: string };
+};
+
+/** POST /api/reviews, …/rerun and /api/review-types/try. */
+export type ReviewStartResponse = {
+  run: ReviewRunSummary;
+  /** The same head with the same types was reviewed already: this is that review, at no cost. */
+  answered_from_state: boolean;
+  /** Run again: the past run's types turned off since, which it ran without. */
+  left_out?: string[];
+};
+
+/** GET /api/reviews/estimate: a range, not a quote. */
+export type ReviewEstimate = {
+  files: number;
+  additions: number;
+  deletions: number;
+  types: string[];
+  rule: string;
+  model: string;
+  max_usd: number;
+  /** False when a model's list price is unknown, and usd is null. */
+  priced: boolean;
+  tokens: { low: { in: number; out: number }; high: { in: number; out: number } };
+  usd: { low: number; high: number } | null;
+  /** The high end would run into max $, where a run stops. */
+  capped: boolean;
+};
+
 // ---- the organisation's own model key ----
 
 /** An organisation's own model endpoint as the console is told it. Never the key itself. */
@@ -1861,6 +2590,8 @@ export type ModelKeyRef = {
   /** "" means document search is off while this key is in use. */
   embed_model: string;
   fix_jobs: boolean;
+  /** Code review may spend it. Off on a new key: a review is started by a pull request, not by anybody here. */
+  reviews: boolean;
   updated_by: string;
   created_at: string;
   updated_at: string;
@@ -2081,6 +2812,18 @@ export function useApi<T>(path: string | null) {
   }, [path, key]);
 
   const reload = useCallback(() => setVersion((v) => v + 1), []);
+
+  // A change confirmed somewhere else — the assistant's card — names the paths it touched, and every
+  // reader of one loads again, keeping what it shows until the new answer lands. What a page derives
+  // a draft from is its own to protect: an editor holding unsaved edits keeps them (see the type and
+  // branch-rule editors).
+  useEffect(() => {
+    if (!path) return;
+    return onConsoleChange(({ refresh }) => {
+      if (refresh.some((p) => refreshes(path, p))) reload();
+    });
+  }, [path, reload]);
+
   const mutate = useCallback(
     (update: T | ((current: T | undefined) => T | undefined)) =>
       setState((s) => ({

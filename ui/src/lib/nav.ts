@@ -5,6 +5,7 @@ import {
   FlaskConical,
   Brain,
   CalendarClock,
+  GitPullRequest,
   Hammer,
   Hash,
   KeyRound,
@@ -30,6 +31,12 @@ export type NavItem = {
    * least partly leaves this unset.
    */
   permission?: string;
+  /**
+   * A feature the deployment may not have at all, by the /api/me field that says so. The rail hides
+   * the entry when the server says the feature is off here — its routes answer 404 — and shows it
+   * until /api/me has answered, as it does for permissions.
+   */
+  feature?: "code_review";
 };
 
 export type NavGroup = { label: string; items: NavItem[] };
@@ -118,6 +125,17 @@ export const NAV_GROUPS: NavGroup[] = [
         title: "Jobs",
         description: "Fix jobs the bot handed to a worker: status, pull request, cost, log.",
         icon: Hammer,
+      },
+      {
+        // Beside Jobs because both work on pull requests unattended, and apart from it because
+        // one writes code and the other only reads it: a review never pushes anything.
+        href: "/reviews",
+        label: "Reviews",
+        title: "Reviews",
+        description: "Pull request reviews: what each found and cost, and the settings and types behind them.",
+        icon: GitPullRequest,
+        permission: "reviews.view",
+        feature: "code_review",
       },
     ],
   },

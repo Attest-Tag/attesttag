@@ -1,0 +1,21 @@
+<!-- attest_tag:review=0123456789abcdef0123456789abcdef.081c9d1c6d5ac86a -->
+### attest_tag review · Confidence 4/5 (advisory)
+
+<sub>Shadow review: recorded in the console, not posted to the pull request.</sub>
+
+No blocking issues found. The score is capped at 4 because not every changed line was reviewed.
+
+<details open><summary>Summary</summary>
+
+Renames the totals hook; no behaviour change.
+
+</details>
+
+<details><summary>Fixed (1)</summary>
+
+- **P1** · General · Older totals can overwrite newer ones · [`src/totals.ts:L50-52`](https://github.com/acme/web/blob/c03ddb1a2b3c4d5e6f708192a3b4c5d6e7f80912/src/totals.ts#L50-L52)
+
+</details>
+
+<sub>Reviews (1) · Last reviewed `c03ddb1`</sub>
+<!-- attest_tag:state sha=c03ddb1a2b3c4d5e6f708192a3b4c5d6e7f80912 score=4 open=0 -->

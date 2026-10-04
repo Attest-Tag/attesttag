@@ -54,7 +54,15 @@ import { formatDate, formatDateTime, formatNumber, formatUSD } from "@/lib/forma
  * payment: `?checkout=success` only starts the settling state, and the balance moves when the
  * server says it has.
  */
-export function BillingPanel({ onSaved }: { onSaved: () => void }) {
+export function BillingPanel({
+  onSaved,
+  afterCredit,
+}: {
+  onSaved: () => void;
+  /** Rendered under the credit and the monthly budget: limits that sit inside that budget, such as
+   * code review's own (review-budget-group.tsx), which the settings page owns. */
+  afterCredit?: React.ReactNode;
+}) {
   const { me, reload: reloadMe } = useAuth();
   const [settleParams, setSettleParams] = useState("");
   const { data, error, loading, reload } = useApi<BillingView>(`/api/billing${settleParams}`);
@@ -227,6 +235,7 @@ export function BillingPanel({ onSaved }: { onSaved: () => void }) {
         onSaved={onSaved}
         reload={reload}
       />
+      {afterCredit}
       <LedgerGroup entries={data.ledger} />
       <PaymentsGroup data={data} canManage={canManage} />
 
