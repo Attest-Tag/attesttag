@@ -49,6 +49,12 @@ const PAGES: Record<string, AssistantHint> = {
     title: "Ask about routines",
     body: "What runs on a schedule, where it posts, and when it last ran.",
   },
+  // Three asks rather than a description: the type or level on screen is the one it acts on, and
+  // these are the shapes it can turn into a card — a rule, a branch rule — and one it answers.
+  "/reviews": {
+    title: "Ask about code review",
+    body: "“Add a P1 rule for **/*.go to this type”, “Run General and Security on release/* into main”, or “Which rule would hotfix/x → main hit?”",
+  },
   "/jobs": {
     title: "Ask about fix jobs",
     body: "What the worker was handed, how it went, and what it cost.",

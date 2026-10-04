@@ -37,12 +37,19 @@ function WhenSomethingMatches({ children }: { children: React.ReactNode }) {
  * by workspace, with the option to type an id the list doesn't carry. The stored value is still
  * the channel id — that is what Slack takes and what the alert path looks up — so this only
  * changes how one is chosen. Renders like an `Input` so it drops into the same rows.
+ *
+ * A caller that stores the workspace too (code review's announcements, which post through it) gets
+ * it as onChange's second argument and passes it back as `team`: a Slack Connect channel shared into
+ * two of the organisation's workspaces has one id in both, and only the pair says which is meant.
  */
 export function ChannelCombobox({
   id,
   value,
+  team,
   onChange,
   emptyLabel,
+  options,
+  scopes: given,
   disabled,
   className,
   container,
@@ -50,9 +57,22 @@ export function ChannelCombobox({
 }: {
   id?: string;
   value: string;
-  onChange: (value: string) => void;
+  /** The workspace `value` is in, where the caller keeps it. */
+  team?: string;
+  /** The picked channel's id and, for a row of the list, its workspace; a typed id has none. */
+  onChange: (value: string, team?: string) => void;
   /** What an empty value means, e.g. "No alerts". Omit when a channel is required. */
   emptyLabel?: string;
+  /**
+   * Choices that are not a channel, listed first beside the empty one — "Inherit", say. Each value
+   * is the caller's own sentinel, handed to onChange as it is, and shown as its label when chosen.
+   */
+  options?: { value: string; label: string }[];
+  /**
+   * The channel list, when the page reads it itself: several pickers on one page then ask once.
+   * Null while the page's request is in flight; left out, the picker asks for it.
+   */
+  scopes?: Scope[] | null;
   disabled?: boolean;
   className?: string;
   /** Portal target; pass the dialog's content element when used inside a modal (see PopoverContent). */
@@ -62,17 +82,24 @@ export function ChannelCombobox({
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const listId = useId();
-  const scopes = useApi<Scope[]>("/api/scopes?sync=0");
+  const fetched = useApi<Scope[]>(given === undefined ? "/api/scopes?sync=0" : null);
+  const list = given === undefined ? fetched.data : given;
+  const loading = given === null || (given === undefined && fetched.loading);
 
-  const channels = (scopes.data ?? []).filter((s) => s.kind === "channel");
-  const chosen = channels.find((c) => c.slack_id === value);
+  const channels = (list ?? []).filter((s) => s.kind === "channel");
+  const chosen =
+    (team ? channels.find((c) => c.slack_id === value && c.team_id === team) : undefined) ??
+    channels.find((c) => c.slack_id === value);
+  const extra = options?.find((o) => o.value === value);
   // One heading per workspace, but only when there is more than one to tell apart.
   const teams = Array.from(new Set(channels.map((c) => c.team_id)));
+  // A channel in two workspaces is two rows with one id, which cmdk would take for one item.
+  const shared = new Set(channels.filter((c, i) => channels.findIndex((d) => d.slack_id === c.slack_id) !== i).map((c) => c.slack_id));
   const typed = query.trim();
   const exact = typed !== "" && channels.some((c) => c.slack_id === typed);
 
-  const pick = (next: string) => {
-    onChange(next);
+  const pick = (next: string, nextTeam?: string) => {
+    onChange(next, nextTeam);
     setOpen(false);
     setQuery("");
   };
@@ -89,12 +116,13 @@ export function ChannelCombobox({
     </CommandItem>
   );
 
+  const isChosen = (c: Scope) => value === c.slack_id && (!team || !shared.has(c.slack_id) || c.team_id === team);
   const row = (c: Scope) => (
     <CommandItem
       key={c.id}
-      value={c.slack_id}
+      value={shared.has(c.slack_id) ? `${c.slack_id} ${c.team_id}` : c.slack_id}
       keywords={[c.name, c.team_name].filter(Boolean)}
-      onSelect={() => pick(c.slack_id)}
+      onSelect={() => pick(c.slack_id, c.team_id)}
     >
       {c.is_private ? (
         <Lock className="size-3.5 text-muted-foreground" />
@@ -103,7 +131,7 @@ export function ChannelCombobox({
       )}
       <span className="min-w-0 flex-1 truncate">{c.name}</span>
       <span className="shrink-0 font-mono text-[11px] text-muted-foreground">{c.slack_id}</span>
-      {value === c.slack_id && <Check className="size-4" />}
+      {isChosen(c) && <Check className="size-4" />}
     </CommandItem>
   );
 
@@ -131,7 +159,9 @@ export function ChannelCombobox({
             className,
           )}
         >
-          {value === "" ? (
+          {extra ? (
+            <span className="truncate">{extra.label}</span>
+          ) : value === "" ? (
             <span className="truncate text-muted-foreground">{emptyLabel ?? "Choose a channel"}</span>
           ) : chosen ? (
             <span className="flex min-w-0 items-baseline gap-2">
@@ -145,7 +175,7 @@ export function ChannelCombobox({
               <span className="max-w-full shrink-0 truncate font-mono">{value}</span>
               {/* An id outside every connected workspace is a channel nothing can post to, which
                   is worth saying here rather than only in the server's log. */}
-              {!scopes.loading && scopes.data && (
+              {!loading && list && (
                 <span className="text-xs text-danger">not a channel the bot is in</span>
               )}
             </span>
@@ -167,19 +197,27 @@ export function ChannelCombobox({
           <CommandList id={listId} className="max-h-72">
             {asTyped && channels.length > 0 && <WhenNothingMatches>{asTyped}</WhenNothingMatches>}
 
-            {emptyLabel && (
-              <CommandGroup heading="Off">
-                <CommandItem value={EMPTY} keywords={[emptyLabel, "none", "off"]} onSelect={() => pick("")}>
-                  <span className="min-w-0 flex-1 truncate">{emptyLabel}</span>
-                  {value === "" && <Check className="size-4" />}
-                </CommandItem>
+            {(!!emptyLabel || !!options?.length) && (
+              <CommandGroup heading={options?.length ? undefined : "Off"}>
+                {options?.map((o) => (
+                  <CommandItem key={o.value} value={o.value} keywords={[o.label]} onSelect={() => pick(o.value)}>
+                    <span className="min-w-0 flex-1 truncate">{o.label}</span>
+                    {value === o.value && <Check className="size-4" />}
+                  </CommandItem>
+                ))}
+                {emptyLabel && (
+                  <CommandItem value={EMPTY} keywords={[emptyLabel, "none", "off"]} onSelect={() => pick("")}>
+                    <span className="min-w-0 flex-1 truncate">{emptyLabel}</span>
+                    {value === "" && <Check className="size-4" />}
+                  </CommandItem>
+                )}
               </CommandGroup>
             )}
 
             {channels.length === 0 ? (
               <>
                 {asTyped && <CommandGroup forceMount>{asTyped}</CommandGroup>}
-                {scopes.loading ? (
+                {loading ? (
                   <div className="flex items-center justify-center gap-2 py-6 text-sm text-muted-foreground">
                     <Loader2 className="size-4 animate-spin" />
                     Loading channels…

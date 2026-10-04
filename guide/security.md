@@ -17,6 +17,13 @@ what to do next. Everything here exists because one of those is eventually hosti
 - **SSRF guard.** Web fetches refuse non-HTTP schemes, ports other than 80 and 443, and private,
   loopback, and link-local hosts, and the address is checked again when the connection is
   dialled. The proxy only reaches allow-listed hosts, under the same rules.
+- **GitHub App tokens are minted narrow.** A repository connected through the GitHub App stores
+  no token: one is minted per call, scoped to that one repository and to what the call is for —
+  contents and pull requests, read and write, for the bot's GitHub tools and fix jobs; read-only
+  for what code review reads; pull requests alone for the review it posts. Code review knows its
+  own comments by signed hidden markers (`<!-- attest_tag:`), and because the bot's tools post as
+  the same App, the proxy removes those markers from every other request it sends to GitHub, so
+  nothing the model writes can pass for the review's.
 
 ## Confirming writes
 
@@ -40,6 +47,82 @@ what to do next. Everything here exists because one of those is eventually hosti
   writes without asking and stays quiet is exactly what a planted instruction would want. One made
   with *New routine* in the console starts on *Run without asking*, in front of the person
   making it.
+- **One write never goes through the Confirm gate: code review's.** No allow rule or `auto`
+  setting is involved: it posts only on a repository whose review settings somebody holding
+  `connections.manage` set to *Live* — below.
+
+### Code review posts without a Confirm
+
+A code review is posted to a pull request with nobody pressing anything: the one write attest_tag
+makes that never goes through the Confirm gate, and only where a repository's review settings say
+*Live*.
+Every connection starts in *Shadow*, which runs the whole review and writes not a word to GitHub —
+no review, no summary, no reaction, no answer — and moving a repository to *Live* is a console
+decision that needs `connections.manage` (below). What a person's Confirm would guard is held in
+code instead ([code review](code-review.md)):
+
+- **Go writes every word.** The model has read tools only. Go composes the review from findings it
+  has checked against the code and that a verifier failed to refute — all but the two Go raises
+  itself from the diff, a committed credential and text addressed to an AI reviewer, which need no
+  model to confirm — and every word a model wrote
+  passes a sanitiser that defuses `@` mentions, drops images and keeps links only into the pull
+  request's own repository and the context repositories the review was allowed to read.
+- **The review is a comment,** never an approval or a request for changes, so it gates nothing.
+- **The token is narrow.** The review posts with a token minted for that one repository that can
+  write pull requests and nothing else, and reads with a read-only one. Every URL is checked
+  against an allowlist of that repository, that pull request and the endpoints a review uses, so
+  nothing it reads can steer it into another repository, a merge or a delete. GitHub's one GraphQL
+  URL takes only two documents Go wrote: listing that pull request's review threads, and resolving
+  one of them once its finding is closed.
+- **The pull request does not instruct it.** Instruction files are read at the base commit, and a
+  pull request from a fork is reviewed only when one of the repository's people asks.
+
+On the same pull requests, and nowhere else, it answers `@` commands from the repository's own
+people ([who they are](code-review.md#commands)) — anybody else is ignored, or on a public
+repository told once a day that only they can ask — and replies in its own findings' threads.
+Where a pull request's review is recorded in *Shadow*, by its repository's mode or by the branch
+rule it falls under, nothing is said on it at all.
+
+### A reply cannot talk a finding away
+
+A reply can withdraw or downgrade a P0 or P1 finding only when it comes from one of the
+repository's own people or from the author of a pull request from the same repository, and only on
+a verdict reached by reading the code at the head. Resolving the finding's thread on GitHub is held
+to the same, so the author of a pull request from a fork who resolves it leaves it open and
+counted. Anybody else's reply changes a P2 only when a second look at the code, shown the finding
+and not the thread, refutes it as well, and a question is answered but never changes a finding. A
+bot is never answered, a thread gets at most three answers, a pull request twenty a day, one person
+twenty an hour (five for somebody who is not one of the repository's people), and a rule learned
+from a reply is only ever proposed: it does nothing until somebody turns it on in the console.
+
+### Who may turn code review up
+
+`reviews.view` reads reviews and `reviews.manage` tunes them — review types and their rules,
+strictness, instructions, which repositories are reviewed in *Shadow* — and starts one by hand. What
+posts, spends or reaches further needs `connections.manage` as well: *Live*, reviewing every push,
+forks, the context repositories a review may read, the model, what one review may spend, the chat
+channel reviews are announced in — which carries private repositories' findings to whoever reads it
+— a branch rule that posts live, reviews every push, names a model or a channel, adding repositories
+to code review, and code review's monthly and daily budgets. It is judged on what a change makes
+effective, branch by branch and at every repository under the level changed, so it cannot be reached
+by resetting a repository to inherit its connection's *Live*, by moving it out of a group, by
+restarting a live connection somebody stopped, by deleting a branch rule that held some branches in
+*Shadow*, or by switching on — or deleting — a level that was *Off* over a repository whose own
+settings post live. A connection is never added *Live*: a copy of a live connection comes in
+*Shadow* (a copy of one that is *Off* stays *Off*), and adding back a stopped connection restores
+its own settings, which needs `connections.manage` if they post live, review every push or announce
+in a channel. A review
+started in the console posts live only on a repository that already does, unless whoever starts it
+holds `connections.manage`; *Try on a PR* never posts at all.
+
+A level's *Channel* also announces its pull requests' reviews — as they start, finish or fail —
+and merges in one of the organisation's own chat channels, unattended — set only by somebody holding
+`connections.manage`, since the message carries a private repository's findings, and never one
+shared with another organisation (Slack Connect), whose members have no business reading them.
+Which of those events it hears (*Notify on*) is `reviews.manage`'s: it sends nothing anywhere new. Go
+writes it from stored state, with no model, never quoting a failed review's error, and holds every
+title, branch and finding in it to one line with mentions, broadcasts and links defused
+([announcements](code-review.md#announcements-in-a-chat-channel)).
 
 ## Forwarded email
 
@@ -110,7 +193,8 @@ what to do next. Everything here exists because one of those is eventually hosti
   than copied into each install, so a permission added in a later release actually reaches them.
   Custom roles are rows. Two rules do the real work: you may only grant a role whose access you
   hold yourself (checked against both the role being given *and* the one being taken away, or an
-  editor could demote an admin), and a change that would leave nobody able to manage users or
+  editor could demote an admin — and removing somebody counts as taking their role away), and a
+  change that would leave nobody able to manage users or
   credentials is refused — on the capability, not on counting people called "admin". Knowing
   which credentials exist is itself `connections.view`: without it a member still sees a scope's
   settings and the Drive syncs, but not the connections, repositories, and inherited instructions
@@ -258,8 +342,7 @@ what to do next. Everything here exists because one of those is eventually hosti
   and audit row; what it can read is what that person's own console routes would show. On the
   deployment's model key it answers only on the default model, the advanced one and the models
   the organisation offers its channels, so a member cannot point the shared key at the dearest
-  model in the catalogue. It takes 60 questions a person an hour, three at a time per
-  organisation.
+  model in the catalogue. A card lands only in the organisation it was proposed in.
 - **Documents stay inside their folder.** A document path that climbs out of the organisation's
   folder or names a hidden file is refused with a 400, from the console and the API alike. Text
   is taken from a PDF with a one-minute limit and a 32 MiB cap, and `pdftotext` is stopped the
@@ -318,10 +401,40 @@ What is recorded:
   (`write.confirmed`, with the requester and the approver, who are different people when a
   tier is involved), a cancel, pressed or typed, and an access request approved or denied — with
   whether it was self-approved.
-- **Workspaces** connected and disconnected, **exports** of the activity table and of the
-  audit log itself, the **operator** moving the account between plans, and every
-  **retention sweep**, so "rows were deleted on this date, by policy" sits in the record
-  beside the policy.
+- **Workspaces** connected and disconnected, **exports** of the activity table and of the audit
+  log itself, the **operator** moving the account between plans, and every **retention sweep**, so
+  "rows were deleted on this date, by policy" sits in the record beside the policy.
+
+### What code review records
+
+Code review writes to the audit log like any other actor, as the system wherever nobody in the
+console pressed anything, and naming the person on GitHub whose word it acted on:
+
+- **What it did**, with the system as the actor, each naming the pull request: posting a review
+  (`review.posted`, with the commit, the review and summary comment it left, and the score);
+  skipping one for the money, the daily throttles, or because nothing in the pull request was left
+  to review (`review.skipped`); every answer it posted in a finding's thread (`review.replied`,
+  naming whom it answered); every finding withdrawn, downgraded, disputed or resolved on somebody's
+  word (`review.finding_changed`, naming whose); a P0 or P1 kept open when its thread was resolved
+  by somebody without the authority to close it (`review.finding_kept`); every rule proposed
+  from a reply (`review.rule_proposed`, naming who asked); a closed finding's thread resolved on
+  GitHub (`review.thread_resolved`, saying whether it was fixed or withdrawn); a pull request's
+  automatic reviews pausing after five (`review.paused`); and every announcement in a chat channel
+  (`review.notified`), or one the platform refused (`review.notify_failed`, with its error).
+- **Every `@` command**, with the GitHub login of whoever wrote it as the actor (`review.command`,
+  with what it came to — queued, answered, paused, resumed, refused, throttled, and whether it was
+  in shadow, where nothing is said on GitHub — including the ones it ignored, a stranger's only
+  once a day per pull request).
+- **What people did in the console**: every change to the review settings
+  (`review.connection_added`, `review.group_added`, `review.settings_updated` with the fields it
+  changed, `review.settings_moved`, `review.settings_removed`, `review.connection_stopped`,
+  `review.connection_restored`, `review.repos_added`, `review.repo_removed` and
+  `review.repo_restored`), every change to a review type (`review.type_created`, `…_saved`,
+  `…_reset`, `…_reverted`, `…_enabled` and `…_disabled`), every review started by hand or tried
+  (`review.started`), and Resume on a paused pull request (`review.resumed`).
+- **The GitHub App's installations** suspended, unsuspended or uninstalled at GitHub, and new
+  permissions accepted there (`github_install.`), which the deployment hears through the same
+  webhook.
 
 ### Reading, exporting and retaining the audit log
 

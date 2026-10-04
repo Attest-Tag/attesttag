@@ -467,6 +467,10 @@ func (n *conversationNamer) name(ctx context.Context, teamID, channel string) st
 		return ""
 	case channel == assistantChannel:
 		return "Console assistant"
+	case strings.HasPrefix(channel, "github:"):
+		// Code review files its spend under the repository it reviewed (review_lane.go), which is
+		// no conversation anywhere: named for what it is, rather than asked of Slack.
+		return "Code review · " + strings.TrimPrefix(channel, "github:")
 	case isDirectConversation(channel):
 		// Ahead of the scopes, because a Slack DM can have a scope row of its own, named "#DM".
 		if n.people == nil {
@@ -508,6 +512,18 @@ func (b *Bot) channelPrivate(ctx context.Context, teamID, channel string) bool {
 		return false
 	}
 	return sl.IsPrivateConversation(ctx, channel)
+}
+
+// channelSharedExternally reports whether a channel reaches another Slack organisation (Slack
+// Connect or an Enterprise Grid share). The Configure link is withheld in such a channel: it is
+// read by everyone who can see the channel, and here that includes another company's members. A
+// workspace the bot cannot reach counts as shared, so the safe answer is the one a failure gives.
+func (b *Bot) channelSharedExternally(ctx context.Context, teamID, channel string) bool {
+	sl, err := b.slacks.For(ctx, teamID)
+	if err != nil || sl == nil {
+		return true
+	}
+	return sl.IsSharedExternally(ctx, channel)
 }
 
 // userName resolves a Slack user id to a display name, in the workspace the id belongs to.

@@ -508,6 +508,24 @@ func (b *Bot) mcpRoutes(mux *http.ServeMux) {
 			b.mcpRefuse(w, r, refusal)
 			return
 		}
+		// Refuse a JSON-RPC batch. The rate limit mcpPrincipal just applied counts one request per
+		// key and per grant, but a batch is many tools/call in one body — so a batch would run the
+		// heavy /v1 handlers as many times as it liked under a single counted request. Stateless
+		// JSON mode has no use for batches anyway. Peek the first non-space byte and put the body
+		// back for the stream to read.
+		if r.Method == http.MethodPost {
+			raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 20<<20))
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"jsonrpc": "2.0", "error": map[string]any{"code": -32700, "message": "could not read the request body"}})
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(raw))
+			r.ContentLength = int64(len(raw))
+			if t := bytes.TrimLeft(raw, " \t\r\n"); len(t) > 0 && t[0] == '[' {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"jsonrpc": "2.0", "error": map[string]any{"code": -32600, "message": "batched requests are not supported; send one JSON-RPC request per call"}})
+				return
+			}
+		}
 		if ok, _ := mcpSweeps.allow("mcp-sweep", 1, time.Hour); ok {
 			go b.store.SweepMCP(context.WithoutCancel(r.Context()))
 		}

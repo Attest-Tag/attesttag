@@ -47,6 +47,7 @@ export function SignInForm() {
   useEffect(() => {
     const token = new URLSearchParams(window.location.hash.slice(1)).get("challenge");
     if (token) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot URL read after mount
       setChallenge(token);
       window.history.replaceState(null, "", window.location.pathname);
     }

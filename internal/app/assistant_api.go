@@ -48,6 +48,10 @@ type assistantRequest struct {
 	Path    string `json:"path"`
 	Page    string `json:"page"`
 	ScopeID int64  `json:"scope_id"`
+	// Focus is what else the page had open, as a kind and a few ids — the review type on Reviews ›
+	// Types, say. A claim like the other three, resolved inside the organisation before it reaches
+	// the prompt or a tool (resolveFocus); the multipart shape carries it as a JSON string.
+	Focus *assistantFocus `json:"focus"`
 	// Conversation groups a panel's questions together in Activity. The browser mints it and
 	// nothing is looked up by it: every row carries its own org_id, so the worst a forged one
 	// can do is group somebody's own questions oddly in their own organisation's page.
@@ -213,6 +217,9 @@ func decodeAssistant(r *http.Request) (assistantRequest, []consoleAttachment, er
 	if h := strings.TrimSpace(r.FormValue("history")); h != "" {
 		json.Unmarshal([]byte(h), &req.History)
 	}
+	if f := strings.TrimSpace(r.FormValue("focus")); f != "" {
+		json.Unmarshal([]byte(f), &req.Focus)
+	}
 	var files []consoleAttachment
 	total := int64(0)
 	for _, fh := range r.MultipartForm.File["file"] {
@@ -299,7 +306,7 @@ func (b *Bot) handleAssistant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	c := &consoleCall{OrgID: orgID, Actor: u.PublicID, Perms: u.Permissions, model: model, llm: l, Files: files}
+	c := &consoleCall{OrgID: orgID, OrgPublic: u.OrgPublic, Actor: u.PublicID, Perms: u.Permissions, model: model, llm: l, Files: files}
 	c.Path, _ = cutRunes(strings.TrimSpace(req.Path), 120)
 	c.Page, _ = cutRunes(strings.TrimSpace(req.Page), 60)
 	// The page's channel, re-read inside this organisation. A scope id from another tenant is
@@ -311,6 +318,9 @@ func (b *Bot) handleAssistant(w http.ResponseWriter, r *http.Request) {
 			c.Scope = sc
 		}
 	}
+	// What else the page had open, by the same rule: re-read inside this organisation, and only
+	// where this caller may read about it.
+	c.Focus = b.resolveFocus(ctx, c, req.Focus)
 	// Spend is recorded on the way out of every path, including the ones that failed. A turn
 	// that dies on its fourth round has already been charged for three, and a log that only
 	// runs after a successful answer is a budget with a hole in exactly the expensive shape.
@@ -349,19 +359,31 @@ func (b *Bot) handleAssistant(w http.ResponseWriter, r *http.Request) {
 	// own row carrying the same proposal_id, so the pair reads as what it was: a model
 	// suggested this, and then a named person applied it.
 	for _, p := range c.proposals {
-		changed := map[string]any{}
-		for _, ch := range p.Changes {
-			if ch.Key == "instructions" {
-				changed["instructions_chars"] = len(ch.To)
-				continue
-			}
-			changed[ch.Key], _ = cutRunes(ch.To, 200)
-		}
 		b.audit(r, "assistant.proposed", AuditEvent{TeamID: p.auditTeam, TargetKind: p.auditKind,
-			TargetID: p.auditID, TargetName: p.Target,
-			Details: auditDetails(map[string]any{"proposal_id": p.ID, "kind": p.Kind, "changed": changed, "steps": len(p.Steps)})})
+			TargetID: p.auditID, TargetName: p.Target, Details: auditDetails(proposalAudit(p))})
 	}
 	writeJSON(w, 200, out)
+}
+
+// proposalAudit is what an assistant.proposed row records of a card: its id, which the save it is
+// confirmed into records too, and each change by its after-value. A list change records its summary
+// — "6 rules (1 added)" — since its entries are drawn for the card and the save's own row says what
+// was written. What the tool added for the log (auditDetail) rides along, under the keys above.
+func proposalAudit(p proposal) map[string]any {
+	changed := map[string]any{}
+	for _, ch := range p.Changes {
+		if ch.Key == "instructions" {
+			changed["instructions_chars"] = len(ch.To)
+			continue
+		}
+		changed[ch.Key], _ = cutRunes(ch.To, 200)
+	}
+	details := map[string]any{}
+	for k, v := range p.auditDetail {
+		details[k] = v
+	}
+	details["proposal_id"], details["kind"], details["changed"], details["steps"] = p.ID, p.Kind, changed, len(p.Steps)
+	return details
 }
 
 // conversationOf bounds what the browser may put in the column. It is a grouping key and

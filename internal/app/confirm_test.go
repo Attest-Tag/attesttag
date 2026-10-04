@@ -94,6 +94,49 @@ func TestNeedsConfirmReadsGoStraightThrough(t *testing.T) {
 	}
 }
 
+// AWS "query protocol" services run over GET with the operation in ?Action=, so a state change
+// arrives in the shape of a read and the HTTP verb cannot tell them apart. The gate holds one
+// unless the Action names a read, and an ordinary REST GET (no Action) still goes straight through.
+func TestAWSQueryProtocolGetWritesAreHeld(t *testing.T) {
+	aws := &Connection{Name: "AWS", Writes: "confirm", CredType: "aws_sigv4"}
+	ec2 := "https://ec2.us-east-1.amazonaws.com/"
+	cases := []struct {
+		method, url string
+		want        bool
+	}{
+		{"GET", ec2 + "?Action=TerminateInstances&InstanceId.1=i-0abc&Version=2016-11-15", true},
+		{"GET", ec2 + "?Action=StopInstances&InstanceId.1=i-0abc", true},
+		{"GET", ec2 + "?Action=RunInstances", true},
+		{"GET", ec2 + "?Action=AuthorizeSecurityGroupIngress", true},
+		{"GET", "https://iam.amazonaws.com/?Action=CreateUser&UserName=x", true},
+		{"GET", "https://iam.amazonaws.com/?Action=DeleteRole&RoleName=x", true},
+		// Reads still go straight through.
+		{"GET", ec2 + "?Action=DescribeInstances", false},
+		{"GET", "https://sts.amazonaws.com/?Action=GetCallerIdentity&Version=2011-06-15", false},
+		{"GET", "https://iam.amazonaws.com/?Action=ListUsers", false},
+		{"GET", "https://iam.amazonaws.com/?Action=SimulatePrincipalPolicy", false},
+		// A plain REST GET with no Action (S3, say) is an ordinary read.
+		{"GET", "https://s3.amazonaws.com/bucket/key", false},
+		// Writes over POST were already held; this is only about closing the GET gap.
+		{"POST", "https://dynamodb.us-east-1.amazonaws.com/", true},
+	}
+	for _, c := range cases {
+		u, err := url.Parse(c.url)
+		if err != nil {
+			t.Fatalf("parse %s: %v", c.url, err)
+		}
+		if got := needsConfirm(aws, c.method, u); got != c.want {
+			t.Errorf("needsConfirm(aws, %s, %s) = %v, want %v", c.method, c.url, got, c.want)
+		}
+	}
+	// A grant-capable AWS connection must send its GET-write to an approver, not the thread.
+	grant := &Connection{Name: "AWS", Writes: "confirm", CredType: "aws_sigv4", AllowGrants: true}
+	u, _ := url.Parse(ec2 + "?Action=RunInstances")
+	if !needsApproval(grant, "GET", u) {
+		t.Error("a grant-capable AWS connection let a GET-write skip its approver")
+	}
+}
+
 func TestMCPNeedsConfirm(t *testing.T) {
 	read := &mcp.Tool{Name: "fetch_customer", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}}
 	write := &mcp.Tool{Name: "create_invoice"}

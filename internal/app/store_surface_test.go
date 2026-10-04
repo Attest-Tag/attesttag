@@ -74,6 +74,13 @@ var perOrgTables = []string{
 	// An MCP client somebody connected: it acts as that person in that organisation, exactly as a
 	// developer key does, so it is per-organisation for the same reason api_keys is.
 	"mcp_grants",
+	// Code review. github_deliveries holds the sealed body of a tenant's pull-request events;
+	// review_settings and the review types are one organisation's configuration, which decides
+	// what is posted on its pull requests and on which model; the pull requests, runs and
+	// findings are its code, quoted. A statement that forgot whose rows it read would review
+	// one customer's pull request with another's rules, or show one the other's findings.
+	"github_deliveries", "review_settings", "review_types", "review_type_rules", "review_type_versions",
+	"review_prs", "review_runs", "review_findings",
 }
 
 // Predicates that narrow a statement to one organisation. team_id counts because a Slack
@@ -179,6 +186,22 @@ var globalQueries = map[string]string{
 	"update slack_deliveries set":                         "one delivery, keyed by a key that embeds its workspace",
 	"delete from slack_deliveries where done_at":          "the GC for finished deliveries",
 	"delete from slack_deliveries where dead_at":          "the GC for dead-lettered deliveries",
+	// The GitHub inbox is the same one queue for the whole deployment (store_github_deliveries.go).
+	// Only deliveries whose signature checked out against this deployment's own webhook secret,
+	// for an installation an organisation reviews, ever enter it, and the row carries the org_id
+	// everything downstream of a claim is scoped by.
+	"from github_deliveries where delivery_id=?":           "the dedup check: the id is GitHub's GUID for one delivery to this deployment's own webhook, and the answer is only whether it was seen",
+	"from github_deliveries where done_at=0 and dead_at=0": "the admission check: how deep the whole inbox is, and how much of it is this organisation's. Counts, and nothing of any row",
+	"update github_deliveries set":                         "the dispatcher's own row, keyed by the id its claim returned and fenced on the lease it took; and the housekeeping that retires rows whose attempts ran out",
+	"delete from github_deliveries where":                  "the receipt GC: an age sweep over finished and dead-lettered deliveries",
+	// The review lane is one queue for the whole deployment too (store_review_runs.go). Its claim
+	// already names org_id, in the soft cap's subquery, and is listed here anyway so the reason it
+	// reads every tenant's runs is written down rather than passed by accident; the sweep names none.
+	"update review_runs set status='running'":                       "the lane's claim: it picks the oldest claimable run of any organisation, returns the org_id every later statement about that run is scoped by, and takes it under a lease every later write is fenced on",
+	"update review_runs set status=case when cancel=1 then 'cancel": "the lane's housekeeping: retires runs whose lease lapsed with their attempts used up or a cancel asked for. A status change on dead rows, keyed by nothing a tenant chose, returning the runs it retired with the org_id every later statement about each is scoped by, as the claim does",
+	// The catch-up walks every reviewed connection (review_catchup.go). Its join names org_id on both
+	// sides, and it is listed so the reason it reads every tenant's tree is written down too.
+	"select r.org_id, r.installation_id from review_settings r": "the catch-up's enumeration, deliberately deployment-wide like the billing roll-up's: which organisations review which installations, read behind the leader lease and never on a request. Each pair it returns is worked on through statements scoped by that org_id",
 	// A sign-in that was started and never finished, swept by age. The row is found by its
 	// single-use state token everywhere else.
 	"delete from connect_states where expires_at": "the expiry sweep for unfinished personal sign-ins",

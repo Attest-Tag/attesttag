@@ -104,6 +104,14 @@ API has no such scope — it is all of it or none. On a machine that is yours an
 else that is a reasonable trade, and on a host shared with anything you would not hand over it is
 not.
 
+If you want the fix worker on a host you cannot give the daemon away on, two things narrow it.
+Run **rootless Docker**, so the socket the bot is handed is a daemon that is your user rather than
+root — a container escape is then that user, not the host. Or put a **socket proxy** in front of
+the daemon (for example `tecnativa/docker-socket-proxy`) that allows only the calls a fix job
+makes — create, start, wait, logs, remove — and mount that proxy's socket into the bot instead of
+the real one, so the container-, image- and exec-level calls that turn socket access into host
+root are refused. Anyone taking over the bot process still reaches only what the proxy allows.
+
 It is an overlay you add deliberately rather than a profile you might switch on by accident, and
 the bot logs the trade on every boot in that mode.
 

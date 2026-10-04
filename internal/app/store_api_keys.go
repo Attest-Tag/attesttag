@@ -114,7 +114,13 @@ func (s *Store) RevokeAPIKeysOf(ctx context.Context, orgID, userID int64) error 
 		return err
 	}
 	// And the MCP clients they connected, which are keys made in a browser (mcp_oauth.go).
-	_, err := s.db.ExecContext(ctx, `update mcp_grants set revoked_at=? where org_id=? and user_id=? and revoked_at=''`,
+	if _, err := s.db.ExecContext(ctx, `update mcp_grants set revoked_at=? where org_id=? and user_id=? and revoked_at=''`,
+		now(), orgID, userID); err != nil {
+		return err
+	}
+	// And any authorization code not yet exchanged: a code lives ten minutes, so one approved just
+	// before this and held back would otherwise still trade for a fresh 30-day grant afterwards.
+	_, err := s.db.ExecContext(ctx, `update mcp_codes set used_at=? where org_id=? and user_id=? and used_at=''`,
 		now(), orgID, userID)
 	return err
 }
@@ -129,7 +135,12 @@ func (s *Store) RevokeAPIKeysForUser(ctx context.Context, userID int64) error {
 		now(), userID); err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `update mcp_grants set revoked_at=? where user_id=? and revoked_at=''`, now(), userID)
+	if _, err := s.db.ExecContext(ctx, `update mcp_grants set revoked_at=? where user_id=? and revoked_at=''`, now(), userID); err != nil {
+		return err
+	}
+	// A held authorization code must not survive the reset that evicts the stolen session that
+	// approved it: mark every unexchanged one used, account-wide, as with the keys above.
+	_, err := s.db.ExecContext(ctx, `update mcp_codes set used_at=? where user_id=? and used_at=''`, now(), userID)
 	return err
 }
 

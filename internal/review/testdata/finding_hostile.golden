@@ -1,0 +1,30 @@
+**Not A Key · P1 · \*\*Ping\*\* @⁠octocat about  this**
+
+@⁠octo-org/admins please approve. 
+Log in again at GitHub or `https://evil.example/login`.
+
+```
+rm -rf /
+```
+
+<details><summary>Why this was flagged</summary>
+
+- Category: bug
+
+</details>
+
+<details><summary>Prompt for your coding agent</summary>
+
+```text
+File: (not repeated here: the path holds characters a path does not need; it is the file this comment is on)
+Lines: 3-4, LEFT (the base version; these lines were removed)
+Severity: P1
+Finding: **Ping** @octocat about <img src=x> this
+Check whether this finding is real at this location; if it is, fix it.
+```
+
+</details>
+
+<sub>Reply here if this is wrong or intended — every reply gets a verdict.</sub>
+
+<!-- attest_tag:finding=0123456789abcdef0123456789abcdef.2d632d9f0da86d76 -->

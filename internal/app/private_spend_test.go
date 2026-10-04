@@ -87,10 +87,12 @@ func TestARefusedRepeatOfAScriptIsPrivateWhereItCouldReadSomebodysAccount(t *tes
 	script := `{"code":"fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events?q=interview-at-acme').status"}`
 
 	a.refuseTool(ctx, c, "run_js", script)
-	elsewhere := *c
-	elsewhere.Access = &Access{}
-	elsewhere.tools = nil
-	a.refuseTool(ctx, &elsewhere, "run_js", script)
+	// A second call with the same identity but reaching no connection. Built field by field rather
+	// than copied from c, because Call now holds an atomic latch and must be passed by pointer.
+	elsewhere := &Call{OrgID: c.OrgID, TeamID: c.TeamID, SL: c.SL, Channel: c.Channel, ThreadTS: c.ThreadTS,
+		UserID: c.UserID, Kind: c.Kind, HumanTurn: c.HumanTurn, Session: c.Session, Streamer: c.Streamer,
+		Access: &Access{}}
+	a.refuseTool(ctx, elsewhere, "run_js", script)
 
 	rows := st.ToolCallsAfter(ctx, orgID, "1", 0)
 	if len(rows) != 2 {

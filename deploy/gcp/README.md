@@ -33,12 +33,12 @@ maintainer's file for the hosted service — else `.env`. Passing `ENV_FILE=.env
 `HOSTED=1`, in the shell or in the env file, is what turns on the hosted service's public policy,
 and it is the maintainer's switch: a self-host never sets it. With it, the script fills in open
 signup, `SUPPORT_EMAIL=support@attesttag.com`, `SITE_URL=https://attesttag.com`, a $5 free-plan
-cap and `ORG_MODEL_KEYS=enterprise` wherever the env file does not set them itself, and prints
-`HOSTED policy ON`. Without it the deployment is one organisation: the script passes
-`SIGNUP_MODE=first-run` and says so — the first account creates the organisation, and everyone
-after that joins by invitation — sets no support address, leaves the console talking only to
-its own origin, and keeps the free budget and the model-key policy at the self-host defaults. A
-value set in the env file wins either way.
+cap, `ORG_MODEL_KEYS=enterprise` and `CODE_REVIEW=pro` wherever the env file does not set them
+itself, and prints `HOSTED policy ON`. Without it the deployment is one organisation: the script
+passes `SIGNUP_MODE=first-run` and says so — the first account creates the organisation, and
+everyone after that joins by invitation — sets no support address, leaves the console talking only
+to its own origin, and keeps the free budget, the model-key policy and code review at the
+self-host defaults. A value set in the env file wins either way.
 
 ## What reaches the service
 
@@ -46,12 +46,14 @@ Only what the script names. These go to Secret Manager: `SLACK_SIGNING_SECRET`,
 `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET`, `OPENROUTER_API_KEY`, `MASTER_KEY`,
 `MASTER_KEY_PREVIOUS`, `RESEND_API_KEY`, `OPENROUTER_PROVISIONING_KEY`, `WORKER_LLM_API_KEY`,
 `WORKER_ENGINE_API_KEY`, `HEALTH_SECRET`, `OPERATOR_SECRET`, the two Stripe keys, the GitHub
-App's private key and client secret, `DATABASE_URL` and `MSTEAMS_APP_PASSWORD`. These travel as
+App's private key, client secret and webhook secret (and `GITHUB_APP_WEBHOOK_SECRET_PREVIOUS`
+during a rotation), `DATABASE_URL` and `MSTEAMS_APP_PASSWORD`. These travel as
 plain variables: `MAIL_FROM`, `ALLOWED_EMAIL_DOMAINS`, `ADMIN_BASE_URL`, `TZ_NAME`, the GitHub
 App's id, slug and client id, the other four `MSTEAMS_*` settings, `SIGNUP_MODE`,
-`SUPPORT_EMAIL`, `SITE_URL`, `ORG_MODEL_KEYS`, `FREE_PLAN_BUDGET_USD`, the two `PLATFORM_*`
-ceilings, `STRIPE_SIZES`, the four `BILLING_*` settings, `WORKER_MODE`, `WORKER_JOB_NAMES`, and
-with the worker on `WORKER_SA_EMAIL`, `WORKER_CACHE_BUCKET` and `WORKER_CACHE`.
+`SUPPORT_EMAIL`, `SITE_URL`, `ORG_MODEL_KEYS`, `CODE_REVIEW`, `FREE_PLAN_BUDGET_USD`, the two
+`PLATFORM_*` ceilings, `STRIPE_SIZES`, the four `BILLING_*` settings, `WORKER_MODE`,
+`WORKER_JOB_NAMES`, and with the worker on `WORKER_SA_EMAIL`, `WORKER_CACHE_BUCKET` and
+`WORKER_CACHE`.
 
 Nothing else in the file reaches the service — not `LLM_BASE_URL`, `LLM_MODEL`, `HEAVY_MODEL`,
 `EMBED_MODEL`, `LLM_API_KEY`, `PUBLIC_ORIGIN_HOSTS`, `LOG_LEVEL` or the `LIMIT_*` overrides. So

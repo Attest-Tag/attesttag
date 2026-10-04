@@ -244,6 +244,32 @@ func TestSavedTokenReuse(t *testing.T) {
 // A repository connected without a scope is saved under Repositories and attached nowhere; a
 // scope then adds it by connection id, which needs no token. Ids that are not saved GitHub
 // repositories are reported, and nothing landing is an error.
+// A repository saved with a token and then connected through the GitHub App keeps its one
+// connection and becomes app-backed, and back again — it used to be refused with "token is
+// required", because the existing row's bearer kind was checked against the App's secret.
+func TestConnectRepoSwitchesBetweenTokenAndApp(t *testing.T) {
+	b := repoTestBot(t, func(*http.Request) (int, string) { return 200, `{"default_branch":"main"}` })
+	ctx := context.Background()
+	c, err := b.connectRepo(ctx, orgID, nil, "acme/app", repoAuth{token: "tok"}, "", "me")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := b.connectRepo(ctx, orgID, nil, "acme/app", repoAuth{installationID: 42, verified: true}, "", "me")
+	if err != nil {
+		t.Fatalf("token → App: %v", err)
+	}
+	if app.ID != c.ID || app.CredType != "github_app" || app.GitHubInstallationID != 42 || app.SecretFP != "" {
+		t.Fatalf("token → App: %+v, want connection %d as github_app on installation 42 with no token digest", app, c.ID)
+	}
+	back, err := b.connectRepo(ctx, orgID, nil, "acme/app", repoAuth{token: "tok-2"}, "", "me")
+	if err != nil {
+		t.Fatalf("App → token: %v", err)
+	}
+	if back.ID != c.ID || back.CredType != "bearer" || back.GitHubInstallationID != 0 || back.SecretFP == "" {
+		t.Fatalf("App → token: %+v, want connection %d as bearer with a token digest", back, c.ID)
+	}
+}
+
 func TestConnectRepoWithoutScopeThenAttach(t *testing.T) {
 	b := repoTestBot(t, func(*http.Request) (int, string) { return 200, `{"default_branch":"main"}` })
 	ctx := context.Background()

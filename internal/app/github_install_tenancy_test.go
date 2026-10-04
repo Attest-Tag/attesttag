@@ -188,13 +188,14 @@ func TestInstallationTokenRefusesAnotherOrgsInstallationBeforeTheCache(t *testin
 	sec := &Secret{InstallationID: id}
 
 	// The rightful tenant's token, already minted and cached.
-	p.remember(installTokenKey(id, conn.Repo), "ghs_victimtoken", time.Hour)
-	if tok, err := p.installationToken(ctx, victim.ID, conn, sec); err != nil || tok != "ghs_victimtoken" {
+	perms, _ := githubTokenPermissions(githubPurposeDefault)
+	p.remember(installTokenKey(id, conn.Repo, perms), "ghs_victimtoken", time.Hour)
+	if tok, err := p.installationToken(ctx, victim.ID, conn, sec, githubPurposeDefault); err != nil || tok != "ghs_victimtoken" {
 		t.Fatalf("the installing organisation could not spend its own installation: %q %v", tok, err)
 	}
 
 	// Another organisation naming the same id gets nothing — not the cached token, and no mint.
-	tok, err := p.installationToken(ctx, victim.ID+1, conn, sec)
+	tok, err := p.installationToken(ctx, victim.ID+1, conn, sec, githubPurposeDefault)
 	if err == nil {
 		t.Fatal("another organisation minted a token against an installation it does not hold")
 	}

@@ -54,12 +54,13 @@ The script sets `DOCS_S3_URL` and the key itself, pointing at its own bucket, an
 not read. From the env file, these go into Secrets Manager: `SLACK_SIGNING_SECRET`,
 `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET`, `OPENROUTER_API_KEY`, `LLM_API_KEY`, `MASTER_KEY`,
 `MASTER_KEY_PREVIOUS`, `RESEND_API_KEY`, `OPENROUTER_PROVISIONING_KEY`, `WORKER_LLM_API_KEY`,
-`WORKER_ENGINE_API_KEY`, `HEALTH_SECRET`, `OPERATOR_SECRET`, the GitHub App's private key and
-client secret, `DATABASE_URL` and `MSTEAMS_APP_PASSWORD`. And these travel as plain variables:
+`WORKER_ENGINE_API_KEY`, `HEALTH_SECRET`, `OPERATOR_SECRET`, the GitHub App's private key,
+client secret and webhook secret (and `GITHUB_APP_WEBHOOK_SECRET_PREVIOUS` during a rotation),
+`DATABASE_URL` and `MSTEAMS_APP_PASSWORD`. And these travel as plain variables:
 `TZ_NAME`, `ALLOWED_EMAIL_DOMAINS`, `MAIL_FROM`, `SIGNUP_MODE`, `LLM_BASE_URL`, `LLM_MODEL`,
-`HEAVY_MODEL`, `EMBED_MODEL`, `ORG_MODEL_KEYS`, `LOG_LEVEL`, the GitHub App's id, slug and client
-id, the other four `MSTEAMS_*` settings and, with the worker on, the `WORKER_*` settings — the
-same list [`../azure/`](../azure/README.md) passes.
+`HEAVY_MODEL`, `EMBED_MODEL`, `ORG_MODEL_KEYS`, `CODE_REVIEW`, `LOG_LEVEL`, the GitHub App's id,
+slug and client id, the other four `MSTEAMS_*` settings and, with the worker on, the `WORKER_*`
+settings — the same list [`../azure/`](../azure/README.md) passes.
 
 Nothing else in the file reaches the task — not `PUBLIC_ORIGIN_HOSTS` or the `LIMIT_*`
 overrides; any other setting needs a line in the script's environment block.

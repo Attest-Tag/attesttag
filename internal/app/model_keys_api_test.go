@@ -268,3 +268,52 @@ func TestRemovingAKeyNeedsProofToo(t *testing.T) {
 		t.Errorf("still stored: %+v", ref)
 	}
 }
+
+// Code review's switch on the key is saved and shown like fix jobs': a new key starts with it off,
+// a save that leaves it out keeps it, and turning it on — which lets a pull request anybody opens
+// spend the key — asks for the same proof a new key does, while turning it off does not.
+func TestTheReviewsSwitchIsSavedLikeFixJobs(t *testing.T) {
+	_, mux, st, own, org, token, _ := modelKeyAPI(t)
+	ctx := context.Background()
+	if code, body := authReq(t, mux, "PUT", "/api/settings/model-key", saveBody(own.URL, apiTestKey), token); code != 200 {
+		t.Fatalf("save = %d %v", code, body)
+	}
+	if ref, _ := st.ModelKeyRef(ctx, org); ref == nil || ref.Reviews {
+		t.Fatalf("a new key started with reviews on: %+v", ref)
+	}
+	members, _ := st.MembersOf(ctx, org)
+	hash, _ := hashPassword(signupPassword)
+	if err := st.SetPassword(ctx, members[0].UserID, hash); err != nil {
+		t.Fatal(err)
+	}
+	logins.reset(proofKey(members[0].UserID))
+	defer logins.reset(proofKey(members[0].UserID))
+	on := saveBody(own.URL, "")
+	on["reviews"] = true
+	if code, body := authReq(t, mux, "PUT", "/api/settings/model-key", on, token); code != 403 || body["proof"] != "password" {
+		t.Errorf("turning reviews on with no proof = %d %v", code, body)
+	}
+	on["password"] = signupPassword
+	code, body := authReq(t, mux, "PUT", "/api/settings/model-key", on, token)
+	if key, _ := body["key"].(map[string]any); code != 200 || key["reviews"] != true {
+		t.Fatalf("turning reviews on = %d %v", code, body)
+	}
+	if code, body := authReq(t, mux, "PUT", "/api/settings/model-key", saveBody(own.URL, ""), token); code != 200 {
+		t.Errorf("a save that leaves the switch out = %d %v", code, body)
+	}
+	if ref, _ := st.ModelKeyRef(ctx, org); ref == nil || !ref.Reviews {
+		t.Errorf("a save that left the switch out turned it off: %+v", ref)
+	}
+	off := saveBody(own.URL, "")
+	off["reviews"] = false
+	if code, body := authReq(t, mux, "PUT", "/api/settings/model-key", off, token); code != 200 {
+		t.Errorf("turning reviews off = %d %v", code, body)
+	}
+	if ref, _ := st.ModelKeyRef(ctx, org); ref == nil || ref.Reviews {
+		t.Errorf("reviews switch = %+v", ref)
+	}
+	events, _ := st.AuditEvents(ctx, org, AuditFilter{Action: "model_key.saved"})
+	if len(events) == 0 || !strings.Contains(string(events[0].Details), `"reviews"`) {
+		t.Errorf("the audit row does not say where the switch stands: %+v", events)
+	}
+}

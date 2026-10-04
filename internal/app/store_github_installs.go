@@ -119,6 +119,53 @@ func (s *Store) MarkGitHubInstallError(ctx context.Context, orgID, id int64, sta
 	return err
 }
 
+// SetGitHubInstallPermissions records what an installation has been granted, as GitHub's
+// installation webhook reports it (github_webhook.go): on install, and again whenever an owner
+// accepts permissions the App asked for later. The install flow writes the same column once, at
+// binding; without this it would go on describing the grant as it was that day, and code review
+// reads it to tell "accept the new permissions at GitHub" apart from "this installation can post".
+func (s *Store) SetGitHubInstallPermissions(ctx context.Context, orgID, id int64, permissions string) error {
+	_, err := s.db.ExecContext(ctx, `update github_installs set permissions=?
+		where org_id=? and installation_id=?`, permissions, orgID, id)
+	return err
+}
+
+// SetGitHubInstallSelection records whether the installation reaches every repository in its
+// account or the ones its admin chose, as GitHub's installation webhooks report it: the console
+// labels the installation with it, and an owner can switch it at GitHub at any time. Anything but
+// GitHub's two values — an event that did not carry the field — leaves it as it was.
+func (s *Store) SetGitHubInstallSelection(ctx context.Context, orgID, id int64, selection string) error {
+	if selection != "all" && selection != "selected" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `update github_installs set repo_selection=?
+		where org_id=? and installation_id=?`, selection, orgID, id)
+	return err
+}
+
+// SuspendGitHubInstall records that an owner suspended the installation at GitHub, which the
+// webhook says as it happens rather than the next token mint finding out (installFailure).
+//
+// Not MarkGitHubInstallError, because of the one status it must not overwrite: an uninstall —
+// the installation webhook's "deleted", or a 404 when a token is minted — can be recorded as
+// 'revoked' between a "suspend" delivery's receipt and its dispatch, and a suspension written over
+// 'revoked' would hand an uninstalled installation back — reviewInstallLinked and
+// installBelongsTo both read anything but 'revoked' as still this organisation's.
+func (s *Store) SuspendGitHubInstall(ctx context.Context, orgID, id int64, at string) error {
+	_, err := s.db.ExecContext(ctx, `update github_installs set status='suspended', last_error='suspended at GitHub',
+			suspended_at=coalesce(suspended_at, ?)
+		where org_id=? and installation_id=? and coalesce(status,'active')<>'revoked'`, at, orgID, id)
+	return err
+}
+
+// UnsuspendGitHubInstall clears a suspension, and only a suspension: an installation recorded as
+// uninstalled meanwhile stays exactly as it is.
+func (s *Store) UnsuspendGitHubInstall(ctx context.Context, orgID, id int64) error {
+	_, err := s.db.ExecContext(ctx, `update github_installs set status='active', last_error='', suspended_at=null
+		where org_id=? and installation_id=? and status='suspended'`, orgID, id)
+	return err
+}
+
 func nullIfEmpty(s string) any {
 	if s == "" {
 		return nil

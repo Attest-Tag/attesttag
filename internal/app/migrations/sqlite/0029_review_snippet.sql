@@ -1,0 +1,11 @@
+-- The code a code-review finding points at, as the review read it.
+--
+--   review_findings.snippet
+--                     JSON {sha, start, lines}: the finding's lines and two either side, from the
+--                     file at the commit it was found on, already masked the way the model saw them.
+--                     The summary comment shows them under each finding the way GitHub shows code
+--                     above an inline comment — and a resync re-renders that summary from stored
+--                     state with no file read at all, so the lines have to be kept with the finding.
+--                     Empty for findings stored before this column, which then show only their
+--                     linked location.
+alter table review_findings add column snippet text not null default '';

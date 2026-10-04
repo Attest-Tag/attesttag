@@ -207,11 +207,33 @@ connected with a token as before.
 | `GITHUB_APP_ID`, `GITHUB_APP_SLUG` | unset | the app's id, and the name in its install URL (`github.com/apps/<slug>`). Both public |
 | `GITHUB_APP_PRIVATE_KEY_B64` or `GITHUB_APP_PRIVATE_KEY` | unset | the `.pem`, base64-encoded (preferred — a PEM is 28 lines, this file is read one line at a time, and base64 has no commas for `--set-env-vars` to split on) or raw with its newlines escaped |
 | `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET` | unset | the OAuth client, needed only to offer the Install button |
+| `GITHUB_APP_WEBHOOK_SECRET` | unset | the App's webhook secret: GitHub signs every delivery to `https://<host>/github/webhook` with it, and code review hears nothing from GitHub without it — no pull request is reviewed as it opens, no `@` command or reply is answered, and nothing missed is caught up. Unset, that route answers 503; a review started in the console still runs |
+| `GITHUB_APP_WEBHOOK_SECRET_PREVIOUS` | unset | the old webhook secret while you rotate it; deliveries signed with either are accepted. Set the new secret and this, deploy, change the secret at GitHub, then unset this and deploy again |
+| `CODE_REVIEW` | `all` | which organisations have [code review](code-review.md#who-has-code-review): `all`; `pro`, accounts on the pro or enterprise plan (what the hosted service runs); `enterprise`; or `off`, which takes it off the deployment — no Reviews page, no pull-request delivery kept, no review run. A typo reads as `pro` and is logged |
 
 A **half**-configured app is a startup error on purpose: the alternative is a console showing an
 Install button that leads to a 500. Set the id, the slug and a key together, or none of them.
 The OAuth client is the exception — without it, existing installations keep working and only the
-button is hidden.
+button is hidden. The webhook secret is the other: an App without one works for everything but
+code review's automatic side, and a secret with no `GITHUB_APP_ID` still verifies deliveries, it
+just cannot check that each one was sent for this App.
+
+#### The App's webhook and permissions for code review
+
+For [code review](code-review.md) the App's webhook has to be on at GitHub, under the App's
+settings: **Active**, the URL `https://<host>/github/webhook`, content type `application/json`, and
+the secret above. Under *Permissions & events*, tick these events: **Pull request**, **Issue
+comment**, **Pull request review**, **Pull request review comment** and **Pull request review
+thread**. GitHub sends the installation's own events whatever is ticked. An App subscribed to Pull
+request alone gets its reviews and nothing else: `@` commands and replies in a finding's thread are
+never delivered, and nothing reports that they are missing.
+
+The permissions code review's tokens ask for are *Contents: Read* and *Pull requests: Read and
+write*, which an App set up for fix jobs already has (with Contents read and write). An App given a
+new permission at GitHub asks every account that installed it to accept the change, and until one
+does, the console's Reviews page warns on that installation's connection. On a deployment that does
+not take open sign-ups, `GET /api/github/installations` returns the exact `webhook_url` to paste and
+whether `webhook_secret_set`.
 
 ### Microsoft Teams (optional)
 
@@ -267,6 +289,7 @@ a bot that hears every message and cannot answer one.
 | `require_two_factor` | `0` | `1` holds every member who has not set up two-factor at an enrolment screen until they do, whichever way they signed in; an enrolled account is asked for its code at every sign-in either way. Refused unless the person turning it on has enrolled |
 | `allowed_email_domains` | `ALLOWED_EMAIL_DOMAINS` | who the bot answers, by email domain. A new organisation starts with its founder's domain unless that is a public mail provider; empty falls back to `ALLOWED_EMAIL_DOMAINS` |
 | `allow_external_users` | `0` | `1` lets guests, Slack Connect members and people from other Microsoft 365 organisations use the bot; the domain list still applies |
+| `restrict_web_egress` | `RESTRICT_WEB_EGRESS` | `1` withholds `fetch_url` and `web_search` from every turn (they are always gone from a forwarded-mail turn). Turn it on where the bot connects sensitive services and reads untrusted content, so an instruction hidden in a web page, a GitHub issue or a document has no open channel to send a connection's result out over. `run_js`'s `fetch()` is unaffected — it is already confined to connection hosts |
 | `allow_rules` | `[]` | JSON array of plain-sentence auto mode allow rules that pre-approve writes; up to 50, 1,024 characters each. They never apply to access grants, and on a turn a forwarded email started they apply only where the channel has switched `email_auto_writes` on |
 | `access_allow_self_approve` | `0` | Testing switch: the requester may answer their own request. Marked on the record and said out loud in the thread |
 
@@ -293,11 +316,28 @@ There is no setting for draft pull requests: the worker opens every one as a dra
 `worker_pr_draft` switch the console used to show never changed that, and is gone — `PUT
 /api/settings` refuses the key, and a value an organisation saved before is ignored.
 
+### Code review settings
+
+| key | default | purpose |
+|---|---|---|
+| `review_monthly_budget_usd`, `review_daily_usd` | half the account's effective budget, `10` | what code review may spend in a month and in a day, apart from what the bot's conversations spend. Each review holds its `max_usd` against both, and against the account's own budget and credit, before it starts, counting what reviews already running hold; one that does not fit is skipped as `budget`, the alert channel hears about it, and a pull request on a live repository gets one short note a day saying so. `0` is no cap of its own; the account's budget still applies. Changing either needs `connections.manage` as well as `settings.manage` |
+
+These two are the only review settings on this page. Whether a repository is reviewed, posted live
+or recorded in shadow, on which model, for how much, and with which review types are the review
+settings tree under Automation › Reviews, set per GitHub connection, group and repository
+([code review](code-review.md#the-settings-tree)).
+
+A review is also held to eight runs a day on one pull request and forty on one repository,
+whoever asked for them. One person may write ten `@` commands an hour; the bot answers twenty
+replies a day on one pull request, three in one finding's thread, and twenty an hour from one
+person — five from somebody who is not a member of the repository — each answer holding $0.15
+against the same budgets while it runs.
+
 ### Retention settings
 
 | key | default | purpose |
 |---|---|---|
-| `data_retention_days` | `0` | days of turns, usage, tool calls, proxied requests and artifacts to keep; `0` keeps everything, otherwise 7 to 3650. Swept once a day per organisation, and the sweep is itself written to the audit log |
+| `data_retention_days` | `0` | days of turns, usage, tool calls, proxied requests, artifacts, and code review's runs and findings to keep; `0` keeps everything, otherwise 7 to 3650. A finding still open or disputed on a pull request that is still open is kept however old it is, since its comment is still on GitHub. Swept once a day per organisation, and the sweep is itself written to the audit log |
 | `audit_retention_days` | `0` | days of audit log to keep — its own policy, so shortening the activity history never shortens the record of who changed it; `0` keeps everything, otherwise 30 to 3650 |
 
 ### Per-channel settings

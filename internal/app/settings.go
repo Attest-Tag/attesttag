@@ -88,6 +88,13 @@ type Settings struct {
 	// when Slack returns no email for them. The list narrows members; this admits non-members.
 	AllowExternalUsers bool
 
+	// RestrictWebEgress removes fetch_url and web_search from every channel turn (they are always
+	// gone from a forwarded-mail turn already). Off by default: open web access is what lets the bot
+	// look something up. An organisation that connects sensitive services and reads untrusted
+	// content — web pages, GitHub issues, shared documents — can turn it on so that an instruction
+	// hidden in that content cannot carry what a connection returned out to a host of its choosing.
+	RestrictWebEgress bool
+
 	// The digging lane (investigations.go). Enabled by default: it is the seam that keeps a
 	// long question out of the reply path, and switching it off only sends those questions
 	// back into the path they were taken out of.
@@ -140,13 +147,28 @@ type Settings struct {
 	// The same for the audit log (audit.go), kept as its own number so that shortening what
 	// the bot did cannot quietly shorten the record of what the people did. 0 keeps everything.
 	AuditRetentionDays int
+
+	// Code review's own money (review_lane.go). A review starts because a pull request opened,
+	// not because anybody asked in a thread, so a busy repository is a standing bill nobody
+	// approves turn by turn — forty pull requests at a dollar each must not spend the money the
+	// bot's conversations run on. Each run reserves its max_usd against both before it starts.
+	// The monthly budget defaults to half of the account's effective budget, and is none when
+	// that is none; the daily cap defaults to ten dollars. 0 set explicitly is no cap of its own;
+	// the account's budgets and credit still apply either way.
+	ReviewMonthlyBudgetUSD float64
+	ReviewDailyUSD         float64
 }
+
+// defaultReviewDailyUSD is a day's review spend before anybody has chosen one: about ten
+// reviews at the default dollar cap, which no single team's pull requests reach on an ordinary
+// day, and which a review loop gone wrong reaches by lunchtime and stops at.
+const defaultReviewDailyUSD = 10
 
 // worker_pr_draft is not among them. It was a console switch, and it never did anything: the worker
 // opens every pull request as a draft (internal/worker/run.go), by the owner's decision. A row an
 // organisation saved while the switch existed is simply never read.
 var settingKeys = []string{"model", "heavy_model", "embed_model", "monthly_budget_usd", "timezone",
-	"auth_policy", "require_two_factor", "allowed_email_domains", "allow_external_users",
+	"auth_policy", "require_two_factor", "allowed_email_domains", "allow_external_users", "restrict_web_egress",
 	"history_limit", "max_tool_rounds", "bot_name", "user_rate_limit", "alert_channel",
 	"long_answer_chars", "channel_models", "show_cost", "allow_rules", "access_allow_self_approve", "config_version",
 	"investigations", "investigation_rounds", "investigation_minutes", "investigation_max_open",
@@ -154,7 +176,8 @@ var settingKeys = []string{"model", "heavy_model", "embed_model", "monthly_budge
 	"web_provider", "web_fetch_provider", "web_account_id",
 	"worker_engine", "worker_model", "worker_job_budget_usd", "worker_timeout_minutes", "worker_max_jobs",
 	"worker_branch_prefix", "worker_branch_suffix", "worker_event_retention_days", "worker_allow_rules",
-	"data_retention_days", "audit_retention_days"}
+	"data_retention_days", "audit_retention_days",
+	"review_monthly_budget_usd", "review_daily_usd"}
 
 var workerEngines = []string{"qwen_code", "fake"}
 
@@ -251,7 +274,7 @@ func validateSecuritySetting(k, v string) error {
 		if !slices.Contains(authPolicies, v) {
 			return fmt.Errorf("auth_policy must be one of %s", strings.Join(authPolicies, ", "))
 		}
-	case "require_two_factor", "allow_external_users":
+	case "require_two_factor", "allow_external_users", "restrict_web_egress":
 		if v != "0" && v != "1" {
 			return fmt.Errorf("%s must be 0 or 1", k)
 		}
@@ -325,6 +348,23 @@ func validateWorkerSetting(k, v string) error {
 	case "worker_model":
 		if len(v) > 200 {
 			return fmt.Errorf("worker_model is too long")
+		}
+	}
+	return nil
+}
+
+// validateReviewSetting checks code review's two money settings: a number of dollars, 0 for no
+// cap of its own. Written as the range it must be inside, for the reason validateWorkerSetting
+// gives: NaN fails every comparison, and a NaN cap would compare as room for anything.
+func validateReviewSetting(k, v string) error {
+	switch k {
+	case "review_monthly_budget_usd", "review_daily_usd":
+		if v == "" {
+			return nil // back to the default
+		}
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || !(f >= 0 && f <= 100000) {
+			return fmt.Errorf("%s must be a number of dollars from 0 (no cap of its own) to 100000", k)
 		}
 	}
 	return nil
@@ -570,6 +610,7 @@ func (c *settingsCache) load(ctx context.Context, orgID int64) Settings {
 		RequireTwoFactor:    get("require_two_factor", "0") == "1",
 		AllowedEmailDomains: domains,
 		AllowExternalUsers:  get("allow_external_users", "0") == "1",
+		RestrictWebEgress:   get("restrict_web_egress", os.Getenv("RESTRICT_WEB_EGRESS")) == "1",
 		ChannelModels:       channelModels,
 
 		WebProvider:      get("web_provider", webProviderBuiltin),
@@ -621,6 +662,11 @@ func (c *settingsCache) load(ctx context.Context, orgID int64) Settings {
 		}
 	}
 	s.EffectiveBudgetUSD = s.EffectiveBudget()
+	// After the effective budget, which the review budget's default is half of: the number the
+	// account actually stops at, so a free plan's reviews get half of the free plan's money and
+	// not half of a setting it cannot reach.
+	s.ReviewMonthlyBudgetUSD = f("review_monthly_budget_usd", s.EffectiveBudgetUSD/2)
+	s.ReviewDailyUSD = f("review_daily_usd", defaultReviewDailyUSD)
 	return s
 }
 

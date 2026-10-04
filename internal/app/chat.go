@@ -284,7 +284,12 @@ const (
 
 type convInfo struct {
 	IsPrivate, IsIM, IsMPIM bool
-	at                      time.Time
+	// Shared with another Slack organisation: a Slack Connect channel (IsExtShared), one still
+	// being set up (IsPendingExtShared), or one shared across an Enterprise Grid org (IsOrgShared).
+	// A channel like this holds people the bot does not answer — guests and members of another
+	// company — so the Configure link, which anyone in the channel can read, is withheld there.
+	IsExtShared, IsShared bool
+	at                    time.Time
 }
 
 type memberSet struct {
@@ -317,6 +322,24 @@ func (s *Chat) IsPrivateConversation(ctx context.Context, id string) bool {
 		return true
 	}
 	return ci.IsPrivate || ci.IsIM || ci.IsMPIM
+}
+
+// IsSharedExternally reports whether a conversation reaches another Slack organisation — a Slack
+// Connect channel or one shared across an Enterprise Grid org. A lookup that fails counts as
+// shared: "we could not tell" must not read as "safe to expose a channel-wide edit link in".
+func (s *Chat) IsSharedExternally(ctx context.Context, id string) bool {
+	// No Slack transport to ask — a Chat stood up without one, in a test or a non-Slack surface —
+	// means there is no cross-org Slack channel to withhold a link from. Say not-shared, which is
+	// what the caller (sharedConfigureURL) turns into "show the link", the pre-existing behaviour.
+	if s == nil || s.t == nil {
+		return false
+	}
+	ci, err := s.conv(ctx, id)
+	if err != nil {
+		slog.Debug("conversations.info", "channel", id, "err", err)
+		return true
+	}
+	return ci.IsExtShared || ci.IsShared
 }
 
 // IsMember reports whether a user belongs to a conversation. The roster is cached for a

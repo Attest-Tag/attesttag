@@ -23,22 +23,34 @@ export function parseAllowRules(raw: string | null | undefined): string[] {
 // Plain-sentence rules that pre-approve writes: one row per rule, "Add rule"
 // at the bottom and the count against the limits. Rows read as text rather
 // than inputs: a rule is written once and read many times.
+//
+// Code review's instructions are the same shape — sentences, one per entry, written once — so
+// they borrow it with their own noun and limits rather than a second copy of the editor.
 export function AllowRulesEditor({
   id,
   value,
   onChange,
   disabled,
+  noun = "rule",
+  placeholder = 'e.g. "Creating tasks in ClickUp is expected and approved."',
+  max = ALLOW_RULES_MAX,
+  maxLen = ALLOW_RULE_MAX_LEN,
 }: {
   id?: string;
   value: string[];
   onChange: (next: string[]) => void;
   disabled?: boolean;
+  /** What one entry is called, in the buttons and the count: "rule", "instruction". */
+  noun?: string;
+  placeholder?: string;
+  max?: number;
+  maxLen?: number;
 }) {
   const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState("");
   const draftRef = useRef<HTMLTextAreaElement>(null);
-  const full = value.length >= ALLOW_RULES_MAX;
-  const tooLong = draft.length > ALLOW_RULE_MAX_LEN;
+  const full = value.length >= max;
+  const tooLong = draft.length > maxLen;
 
   const startAdding = () => {
     setAdding(true);
@@ -58,7 +70,7 @@ export function AllowRulesEditor({
   return (
     <div className={cn("overflow-hidden rounded-lg border", disabled && "opacity-50")}>
       {value.length === 0 ? (
-        <p className="px-4 py-3 text-sm text-muted-foreground">No rules yet.</p>
+        <p className="px-4 py-3 text-sm text-muted-foreground">No {noun}s yet.</p>
       ) : (
         <ul className="divide-y">
           {value.map((rule, i) => (
@@ -66,7 +78,7 @@ export function AllowRulesEditor({
               <span className="min-w-0 flex-1 whitespace-pre-wrap break-words">{rule}</span>
               <button
                 type="button"
-                aria-label={`Remove rule ${i + 1}`}
+                aria-label={`Remove ${noun} ${i + 1}`}
                 disabled={disabled}
                 onClick={() => onChange(value.filter((_, j) => j !== i))}
                 className="flex size-6 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-foreground/10 hover:text-foreground"
@@ -86,7 +98,7 @@ export function AllowRulesEditor({
               rows={2}
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
-              placeholder='e.g. "Creating tasks in ClickUp is expected and approved."'
+              placeholder={placeholder}
               aria-invalid={tooLong}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
@@ -99,14 +111,14 @@ export function AllowRulesEditor({
             />
             <div className="flex items-center justify-between gap-3">
               <span className={cn("text-xs tabular-nums text-muted-foreground", tooLong && "text-destructive")}>
-                {draft.length.toLocaleString()} / {ALLOW_RULE_MAX_LEN.toLocaleString()}
+                {draft.length.toLocaleString()} / {maxLen.toLocaleString()}
               </span>
               <div className="flex gap-2">
                 <Button size="sm" variant="ghost" onClick={cancel}>
                   Cancel
                 </Button>
                 <Button size="sm" onClick={add} disabled={!draft.trim() || tooLong}>
-                  Add rule
+                  Add {noun}
                 </Button>
               </div>
             </div>
@@ -115,10 +127,10 @@ export function AllowRulesEditor({
           <div className="flex items-center justify-between gap-3 px-2 py-1.5">
             <Button size="sm" variant="ghost" disabled={disabled || full} onClick={startAdding}>
               <Plus className="size-4" />
-              Add rule
+              Add {noun}
             </Button>
             <span className="pr-2 text-xs tabular-nums text-muted-foreground">
-              {value.length} of {ALLOW_RULES_MAX} rules · up to {ALLOW_RULE_MAX_LEN.toLocaleString()} characters each
+              {value.length} of {max} {noun}s · up to {maxLen.toLocaleString()} characters each
             </span>
           </div>
         )}

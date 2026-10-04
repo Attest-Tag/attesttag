@@ -313,6 +313,20 @@ func (b *Bot) connectRepo(ctx context.Context, orgID int64, sc *Scope, repo stri
 	}
 	if cur != nil {
 		name = cur.Name
+		// A repository saved with a pasted token and connected again through the GitHub App (or
+		// the other way round) changes credential kind. buildConnection keeps an existing row's
+		// kind, so without this the App's secret — an installation id and no token — was checked
+		// as a bearer token and refused with "token is required": a repository first saved with a
+		// token could never move to the App, and so never be reviewed or reached by its tokens.
+		want := "bearer"
+		if auth.installationID > 0 {
+			want = "github_app"
+		}
+		if cur.CredType != want {
+			switched := *cur
+			switched.CredType = want
+			cur = &switched
+		}
 	}
 	// The preset stays "github" for both kinds. Tool packs are keyed on it (tools_http.go) and
 	// the Repositories bundle enables "github", so a separate preset for app-backed repositories

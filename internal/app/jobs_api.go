@@ -176,7 +176,7 @@ func (b *Bot) repoJobToken(ctx context.Context, orgID int64, conn *Connection, r
 	if scoped.Repo == "" {
 		scoped.Repo = repo
 	}
-	tok, err := b.proxy.installationToken(ctx, orgID, &scoped, sec)
+	tok, err := b.proxy.installationToken(ctx, orgID, &scoped, sec, githubPurposeDefault)
 	if err != nil {
 		return "", fmt.Errorf("could not mint a GitHub App token for %s: %w", scoped.Repo, err)
 	}

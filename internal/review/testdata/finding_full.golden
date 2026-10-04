@@ -1,0 +1,37 @@
+Reviewed for the platform team. Questions: #platform
+
+**Security · P1 · Tenant check missing on list query**
+
+A member of org A calls `GET /api/items?org=B`: `listItems` builds its query from the request's org parameter, so B's items come back. See [the handler](https://github.com/acme/web/blob/main/api/items.go).
+
+Evidence: [`api/items.go:L44-47`](https://github.com/acme/web/blob/c03ddb1a2b3c4d5e6f708192a3b4c5d6e7f80912/api/items.go#L44-L47) · [`acme/api store/items.go:L12`](https://github.com/acme/api/blob/abcdef0123456789abcdef0123456789abcdef01/store/items.go#L12) · `acme/api store/items.go:L30` · `octo-org/elsewhere x.go:L1`
+
+```suggestion
+q := db.Where("org = ?", session.OrgID)
+```
+
+<details><summary>Why this was flagged</summary>
+
+- Category: security
+- About: `listItems`
+- Rule `R2`: Tenant isolation: a query, cache key, file path, search or queue over data that belongs to many tenants (organisations, accounts, workspaces) that is not filtered by the caller's tenant, or that takes the tenant from the request instead of the session.
+- Rule `R99`
+- Verifier confidence: 86/100
+
+</details>
+
+<details><summary>Prompt for your coding agent</summary>
+
+```text
+File: "src/totals.ts"
+Lines: 50-52, RIGHT (the pull request's version of the file)
+Severity: P1
+Finding: Tenant check missing on list query
+Check whether this finding is real at this location; if it is, fix it.
+```
+
+</details>
+
+<sub>Reply here if this is wrong or intended — every reply gets a verdict.</sub>
+
+<!-- attest_tag:finding=0123456789abcdef0123456789abcdef.2d632d9f0da86d76 -->

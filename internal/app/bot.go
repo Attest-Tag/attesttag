@@ -40,7 +40,10 @@ type Bot struct {
 	// ghApp is the GitHub App this deployment installs as (github_app.go). Nil when none is
 	// configured, which is what installConfigured-style checks test before offering the flow.
 	ghApp *githubApp
-	mail  Mailer
+	// ghHook is what GitHub's webhook deliveries are verified against (github_webhook.go). Never
+	// nil in a running process; unconfigured when no webhook secret is set.
+	ghHook *githubWebhook
+	mail   Mailer
 	// pay is the payment provider (billing_stripe.go). Always non-nil: offPayments when this
 	// deployment sells nothing, which is most of them.
 	pay      Payments
@@ -49,6 +52,15 @@ type Bot struct {
 	proxy    *Proxy
 	docs     DocStore
 	jobs     *JobRunner
+	// review is code review's engine (review_engine.go), which the review lane runs pull requests
+	// through (review_lane.go). Nil in a Bot built without one — most tests — and then pull-request
+	// deliveries are finished with nothing done, as they were before the lane existed.
+	review *reviewEngine
+	// reviewPendingReplies says whether a submitted review is read for replies to findings written in
+	// it (reviewSubmittedEvent). Off, and set by nothing outside the tests, until a real App has shown
+	// whether GitHub also delivers each of those replies as a review comment of its own; on the
+	// Bot rather than a package variable so a test turns it on for its own rig and no other.
+	reviewPendingReplies bool
 
 	scopeSyncMu sync.Mutex
 	scopeSynced map[string]time.Time // per team: one workspace's sync must not throttle another's
@@ -225,6 +237,15 @@ func Run() {
 				"the console until GITHUB_APP_CLIENT_ID and GITHUB_APP_CLIENT_SECRET are set")
 		}
 	}
+	// The webhook is neither half of a startup error (github_webhook.go): an App without one keeps
+	// working and simply cannot be reviewed yet, which is what this says.
+	ghHook := newGitHubWebhook()
+	switch {
+	case ghHook.configured():
+		slog.Info("github webhook", "path", "/github/webhook", "previous_secret", len(ghHook.secrets) > 1, "checks_app_id", ghHook.appID != "")
+	case ghApp.configured():
+		slog.Info("github webhook: GITHUB_APP_WEBHOOK_SECRET is unset, so /github/webhook answers 503 and code review hears nothing from GitHub")
+	}
 	// Bot tokens come from installs, not the environment. The registry is built from the
 	// database and never calls Slack at boot, so one revoked workspace cannot stop the process.
 	slacks := NewChatRegistry(store, sealer)
@@ -263,7 +284,7 @@ func Run() {
 		}
 		docs = gd
 	}
-	b := &Bot{cfg: cfg, slacks: slacks, store: store, ix: ix, sealer: sealer, ghApp: ghApp, mail: mail, pay: pay, settings: settings, resolver: resolver, proxy: proxy, docs: docs,
+	b := &Bot{cfg: cfg, slacks: slacks, store: store, ix: ix, sealer: sealer, ghApp: ghApp, ghHook: ghHook, mail: mail, pay: pay, settings: settings, resolver: resolver, proxy: proxy, docs: docs,
 		scopeSynced: map[string]time.Time{}}
 	proxy.ghApp = ghApp // installation tokens are minted from it (github_token.go)
 	ix.SetDocs(b.docs)  // the !ingest command reaches the indexer through the agent, which has no store
@@ -273,9 +294,13 @@ func Run() {
 	b.agent.mcp.token = b.freshMCPToken
 	b.agent.sweepAccess = b.sweepAccessRequests
 	b.agent.cancelled = b.accessWithdrawn
+	if !cfg.codeReviewOff() {
+		b.agent.startReview = b.reviewFromChat
+	}
 	b.jobs = NewJobRunner(cfg, store, slacks, proxy, settings)
 	b.jobs.agent = b.agent
 	b.agent.jobs = b.jobs
+	b.review = newReviewEngine(b.agent)
 	ix.scopes = func(ctx context.Context, orgID int64) map[string]string {
 		m, _ := store.DocumentScopes(ctx, orgID)
 		return m
@@ -349,7 +374,42 @@ func Run() {
 		// it claims each routine on the row.
 		go func() {
 			defer close(deliveriesDone)
+			// The GitHub inbox drains under the same wait as Slack's, for the same reason: its
+			// dispatchers write to the store, which shutdown closes next. Started only with a
+			// webhook secret, since nothing else ever fills it; a delivery left pending when the
+			// secret was removed waits for it to come back.
+			var github sync.WaitGroup
+			if b.ghHook.configured() {
+				github.Add(1)
+				go func() {
+					defer github.Done()
+					b.runGitHubDeliveries(ctx)
+				}()
+			}
+			// The review lane beside it, under the same wait, since it writes to the same store. It
+			// needs the App, not the webhook: a review a person starts in the console reaches GitHub
+			// with the App's tokens and arrives through no delivery. A run still working when the
+			// instance stops is put back for another to pick up (review_lane.go).
+			if b.reviewLaneOn() {
+				github.Add(1)
+				go func() {
+					defer github.Done()
+					b.runReviewLane(ctx)
+				}()
+			}
+			// The catch-up asks GitHub for the pull requests whose deliveries never arrived
+			// (review_catchup.go). Once across the deployment, so behind a lease; and under this
+			// wait, since what it queues it writes to the store. Only beside the webhook: without
+			// one nothing is reviewed automatically, and a pass every ten minutes would make it so.
+			if b.reviewCatchupOn() {
+				github.Add(1)
+				go func() {
+					defer github.Done()
+					b.leaderLoop(ctx, "review-catchup", b.reviewCatchupLoop)
+				}()
+			}
 			b.runSlackDeliveries(ctx)
+			github.Wait()
 		}()
 		go b.agent.RunScheduler(ctx)
 		go b.agent.RunInvestigations(ctx)
@@ -442,7 +502,7 @@ func shutdown(a shutdownArgs) {
 	select {
 	case <-a.deliveries: // finish inbox DB operations before closing the store
 	case <-time.After(left(work, 2*time.Second)):
-		slog.Warn("the Slack inbox did not finish draining")
+		slog.Warn("the Slack and GitHub inboxes did not finish draining")
 	}
 
 	// Turns already running get what remains of the working budget. One that finishes closes its

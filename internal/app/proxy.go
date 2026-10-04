@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -23,6 +24,8 @@ import (
 	"sync"
 	"time"
 	"unicode"
+
+	"attesttag/internal/review"
 )
 
 // ---- resolver: what a channel may reach ----
@@ -51,7 +54,7 @@ type Access struct {
 	// rules it governs — a rule and the permission to use it going stale apart is the one way
 	// this could be wrong in the direction that matters.
 	EmailAutoWrites bool
-	fetched      time.Time
+	fetched         time.Time
 }
 
 // Repos lists the repository connections reachable here, narrowest grant first, one per repo.
@@ -315,6 +318,28 @@ type ProxyRequest struct {
 	// invalid UTF-8 as U+FFFD — a PNG that went into a pending row would come back corrupted.
 	// The bytes are fetched from Slack at the moment of the upload instead.
 	AttachFiles []string `json:"attach_files,omitempty"`
+	// Purpose chooses what a GitHub App token minted for this request may do: "" is the set the
+	// fix jobs and the Slack tools have always had, and code review asks for narrower ones
+	// (github_token.go). It is honoured only for a github_app connection — any other credential
+	// is whatever was pasted, and cannot be narrowed — and like the fields below it has no JSON
+	// name, so a model's arguments, and a held write stored as JSON, can never carry one.
+	Purpose string `json:"-"`
+	// Raw hands a Go caller the response body without the final redact, which is otherwise run on
+	// every body. redact is written for text going into a prompt and is free to change its shape:
+	// its private-key pattern replaces a whole multi-line PEM block with one line, which moves
+	// every line after it, and on a JSON page it can match from a BEGIN in one string to an END in
+	// another and take the document between them with it. Code review anchors comments on exact
+	// line numbers and parses what it reads, so it reads raw — and masks, line for line, whatever
+	// of it is then shown to a model. scrubSecrets still runs: the connection's own credential is
+	// never something a caller needs back. Never set for a model's request.
+	Raw bool `json:"-"`
+	// ReviewPoster lets an attest_tag marker ("<!-- attest_tag:") through to GitHub in the body.
+	// Code review finds its own comments by those markers, and the github_comment tool and
+	// http_request post as the same bot, so without this the model could write one — or copy a
+	// real one off the pull request — and have its comment taken for the review's. Every other
+	// body sent to api.github.com has them removed (stripOutboundMarkers); only the review poster,
+	// which signs the markers it writes, sets this.
+	ReviewPoster bool `json:"-"`
 }
 
 type ProxyResponse struct {
@@ -535,7 +560,7 @@ func needsConfirm(conn *Connection, method string, u *url.URL) bool {
 	case "all":
 		return true
 	}
-	return changesData(method, u)
+	return changesData(method, u) || awsGetActionWrites(conn, method, u)
 }
 
 // changesData is whether a request is a write, whatever any connection's policy says about
@@ -543,6 +568,37 @@ func needsConfirm(conn *Connection, method string, u *url.URL) bool {
 // change whatever the path says, so no amount of "…/search" in it earns the exemption.
 func changesData(method string, u *url.URL) bool {
 	return isWrite(method) && !(strings.ToUpper(method) == "POST" && readShapedPOST(u))
+}
+
+// awsGetActionWrites catches the writes the HTTP verb cannot see. AWS "query protocol" services —
+// EC2, RDS, ELB, CloudWatch, Auto Scaling, the older IAM and STS APIs — run over GET with the
+// operation in ?Action=, so TerminateInstances arrives in exactly the shape of DescribeInstances
+// and changesData waves it through as a read. For an aws_sigv4 connection a GET carrying an Action
+// is therefore held unless the Action names a read; the default is write, the stance
+// mcpLooksReadOnly already takes for a tool whose verb it does not know. A GET with no Action is an
+// ordinary REST read (S3 GetObject travels as a path, not an Action) and is left alone.
+func awsGetActionWrites(conn *Connection, method string, u *url.URL) bool {
+	if conn == nil || conn.CredType != "aws_sigv4" || u == nil || strings.ToUpper(method) != "GET" {
+		return false
+	}
+	action := u.Query().Get("Action")
+	if action == "" {
+		return false
+	}
+	for _, read := range awsReadActionPrefixes {
+		if strings.HasPrefix(action, read) {
+			return false
+		}
+	}
+	return true
+}
+
+// The verbs an AWS query-protocol read begins with. Everything else — Create, Delete, Terminate,
+// Stop, Start, Reboot, Modify, Put, Run, Attach, Authorize, Revoke, … — is held. Kept short on
+// purpose: a read wrongly held costs a Confirm card, a write wrongly waved through is the finding
+// this exists to close.
+var awsReadActionPrefixes = []string{
+	"Describe", "List", "Get", "Lookup", "Search", "BatchGet", "Simulate", "Estimate", "Check", "View",
 }
 
 // The three headers and two field names by which a caller asks a server to treat one verb as
@@ -624,8 +680,8 @@ var ErrNeedsUserAuth = errors.New("needs the requester to connect their account"
 // readShapedPOSTs is not consulted here on purpose. It buys a nicer thread on a calendar lookup,
 // which is worth nothing on a connection that hands out access, and the cost of getting the table
 // wrong is an unapproved grant rather than an unapproved read.
-func needsApproval(conn *Connection, method string) bool {
-	return conn != nil && conn.AllowGrants && isWrite(method)
+func needsApproval(conn *Connection, method string, u *url.URL) bool {
+	return conn != nil && conn.AllowGrants && (isWrite(method) || awsGetActionWrites(conn, method, u))
 }
 
 // hasDotSegment reports a path carrying a "." or ".." segment, in either its plain or its
@@ -905,8 +961,37 @@ func (p *Proxy) Do(ctx context.Context, orgID int64, acc *Access, req ProxyReque
 	if err := checkURL(u); err != nil {
 		return nil, err
 	}
+	if _, err := githubTokenPermissions(req.Purpose); err != nil {
+		return nil, err
+	}
+	// Before the confirmation gate, so a held write is judged on the body that would be sent and a
+	// refusal reaches the model in the same round rather than after somebody pressed Confirm. The
+	// strip runs again when the held write is replayed, and finds nothing the second time.
+	sendBody := req.Body
+	if strings.EqualFold(strings.TrimRight(u.Hostname(), "."), "api.github.com") && !req.ReviewPoster {
+		stripped, err := stripOutboundMarkers(req.Body)
+		if err != nil {
+			audit.Blocked = err.Error()
+			p.store.LogProxy(ctx, orgID, audit)
+			return nil, err
+		}
+		if stripped != req.Body {
+			slog.Warn("proxy removed an attest_tag marker from a GitHub request body", "org", orgID,
+				"method", method, "path", u.Path, "requester", audit.Requester)
+		}
+		sendBody = stripped
+	}
 	conn, why := p.MatchNamed(acc, method, u, req.Connection)
 	if why != "" {
+		audit.Blocked = why
+		p.store.LogProxy(ctx, orgID, audit)
+		return nil, errors.New(why)
+	}
+	// A purpose is a promise about what the credential can do, and only a token minted for the
+	// request can keep one. A pasted token does whatever it was created to do, so a caller that
+	// asked for read-only is refused rather than quietly handed it.
+	if req.Purpose != githubPurposeDefault && (conn == nil || conn.CredType != "github_app") {
+		why := fmt.Sprintf("blocked by the proxy: a %s request has to go through a GitHub App connection, whose token can be narrowed to it", req.Purpose)
 		audit.Blocked = why
 		p.store.LogProxy(ctx, orgID, audit)
 		return nil, errors.New(why)
@@ -957,16 +1042,16 @@ func (p *Proxy) Do(ctx context.Context, orgID int64, acc *Access, req ProxyReque
 		return nil, errors.New(why)
 	}
 	if !confirmed {
-		if needsApproval(conn, method) {
+		if needsApproval(conn, method, u) {
 			return nil, ErrNeedsApproval
 		}
-		if needsConfirm(conn, method, u) || req.HoldWrites && changesData(method, u) {
+		if needsConfirm(conn, method, u) || req.HoldWrites && (changesData(method, u) || awsGetActionWrites(conn, method, u)) {
 			return nil, ErrNeedsConfirmation
 		}
 	}
 	var body io.Reader
-	if req.Body != "" {
-		body = strings.NewReader(req.Body)
+	if sendBody != "" {
+		body = strings.NewReader(sendBody)
 	}
 	hr, err := http.NewRequestWithContext(ctx, method, u.String(), body)
 	if err != nil {
@@ -974,7 +1059,7 @@ func (p *Proxy) Do(ctx context.Context, orgID int64, acc *Access, req ProxyReque
 	}
 	hr.Header.Set("User-Agent", "attesttag/0.2 (+proxy)")
 	hr.Header.Set("Accept", "application/json, text/plain;q=0.9, */*;q=0.5")
-	if req.Body != "" && req.Headers["Content-Type"] == "" {
+	if sendBody != "" && req.Headers["Content-Type"] == "" {
 		hr.Header.Set("Content-Type", "application/json")
 	}
 	for k, v := range req.Headers {
@@ -984,7 +1069,7 @@ func (p *Proxy) Do(ctx context.Context, orgID int64, acc *Access, req ProxyReque
 		hr.Header.Set(k, v)
 	}
 	if conn != nil {
-		if err := p.inject(ctx, orgID, conn, hr, audit); err != nil {
+		if err := p.inject(ctx, orgID, conn, hr, audit, req.Purpose); err != nil {
 			// Nobody has signed in yet: that is not a credential fault, it is a person who has
 			// not been asked. Let it up untouched so the caller can send them a link.
 			if errors.Is(err, ErrNeedsUserAuth) {
@@ -1025,17 +1110,116 @@ func (p *Proxy) Do(ctx context.Context, orgID int64, acc *Access, req ProxyReque
 		p.store.TouchConnection(ctx, orgID, conn.ID)
 	}
 	text := string(raw)
-	if ct := resp.Header.Get("Content-Type"); strings.Contains(ct, "html") {
+	// A raw read is the bytes as served, for a caller that parses them: neither the tidying a
+	// model's HTML gets nor a sentence appended to the end, which a raw caller reads off
+	// Truncated instead.
+	if ct := resp.Header.Get("Content-Type"); strings.Contains(ct, "html") && !req.Raw {
 		text = cleanHTML(text)
 	}
 	if conn != nil {
 		text = p.scrubSecrets(conn, text)
 	}
-	if truncated {
+	if truncated && !req.Raw {
 		text += fmt.Sprintf("\n\n[truncated: the response is larger than %d bytes; narrow it with the API's own paging or filters]", limit)
 	}
-	return &ProxyResponse{Status: resp.StatusCode, Body: redact(text), Conn: conn, Truncated: truncated,
+	if !req.Raw {
+		text = redact(text)
+	}
+	return &ProxyResponse{Status: resp.StatusCode, Body: text, Conn: conn, Truncated: truncated,
 		RetryAfter: retryAfterHint(resp.Header, time.Now()), Account: account, Others: others, Skipped: skipped}, nil
+}
+
+// stripOutboundMarkers removes attest_tag markers from a request body bound for GitHub, for the
+// reason ProxyRequest.ReviewPoster gives. It has to read the body the way GitHub will: Go's own
+// json.Marshal writes "<" as \u003c, so the github_comment tool's body never contains the marker's
+// bytes at all, and a model writing its own JSON can escape any character it likes. So a JSON body
+// that may hide a marker is decoded, every string in it stripped, and what goes on the wire is the
+// document re-encoded from what was inspected — never the bytes it came as: Go keeps the last of a
+// key written twice and drops the rest unseen, and a parser at GitHub that kept the first would
+// read a marker nobody stripped. An ordinary body, with no "attest_tag" and no escape in it, goes
+// byte for byte as it came. A body that is not JSON is stripped as text.
+//
+// What it cannot rewrite safely it refuses. A GraphQL query is a string inside the JSON whose own
+// escapes GitHub decodes a second time, and a marker spelled in those escapes survives the strip;
+// nobody writes one for any reason but to get past it, so a body that still hides one once its
+// escapes are read is blocked rather than guessed at.
+func stripOutboundMarkers(body string) (string, error) {
+	if body == "" || !mayHideMarker(body) {
+		return body, nil
+	}
+	refused := errors.New("blocked by the proxy: this request to GitHub carries an attest_tag marker written in escapes. " +
+		"Those markers are how attest_tag's own code review recognises its comments, and only it may post one; leave it out")
+	dec := json.NewDecoder(strings.NewReader(body))
+	dec.UseNumber() // a number goes back exactly as it came, not through a float
+	var doc any
+	if json.Valid([]byte(body)) && dec.Decode(&doc) == nil {
+		hidden := false
+		doc = mapJSONStrings(doc, func(s string) string {
+			out := review.StripMarkers(s)
+			hidden = hidden || escapedMarker(out)
+			return out
+		})
+		if hidden {
+			return "", refused
+		}
+		b, err := json.Marshal(doc)
+		if err != nil {
+			return "", err
+		}
+		return string(b), nil
+	}
+	out := review.StripMarkers(body)
+	if escapedMarker(out) {
+		return "", refused
+	}
+	return out, nil
+}
+
+// mayHideMarker is the cheap test that lets almost every body through untouched: a marker in any
+// spelling GitHub would read back as one needs the word, and a word spelled entirely in escapes
+// still needs its 't' and '_' written somewhere as an escape.
+func mayHideMarker(body string) bool {
+	low := strings.ToLower(body)
+	return strings.Contains(low, "attest_tag") || strings.Contains(low, `\u`)
+}
+
+// mapJSONStrings returns v with every string value in it — not the keys, which GitHub does not
+// render — passed through f.
+func mapJSONStrings(v any, f func(string) string) any {
+	switch t := v.(type) {
+	case string:
+		return f(t)
+	case []any:
+		for i := range t {
+			t[i] = mapJSONStrings(t[i], f)
+		}
+	case map[string]any:
+		for k := range t {
+			t[k] = mapJSONStrings(t[k], f)
+		}
+	}
+	return v
+}
+
+// unicodeEscape is the \uXXXX and \u{X…} escapes of JSON and GraphQL string literals.
+var unicodeEscape = regexp.MustCompile(`\\u(?:\{([0-9A-Fa-f]{1,6})\}|([0-9A-Fa-f]{4}))`)
+
+// escapedMarker reports whether s still holds a marker once its \u escapes are read: one more
+// decoding than JSON's, which is what GitHub gives a string inside a GraphQL query.
+func escapedMarker(s string) bool {
+	if !strings.Contains(s, `\u`) {
+		return false
+	}
+	plain := unicodeEscape.ReplaceAllStringFunc(s, func(m string) string {
+		sub := unicodeEscape.FindStringSubmatch(m)
+		hex := sub[1] + sub[2]
+		n, err := strconv.ParseUint(hex, 16, 32)
+		if err != nil || n > unicode.MaxRune {
+			return m
+		}
+		return string(rune(n))
+	})
+	return review.StripMarkers(plain) != plain
 }
 
 // userConnection is the asker's own sign-in on a personal connection, or nil when they have not
@@ -1082,7 +1266,9 @@ func (p *Proxy) secret(conn *Connection) (*Secret, error) {
 	return &s, json.Unmarshal(plain, &s)
 }
 
-func (p *Proxy) inject(ctx context.Context, orgID int64, conn *Connection, hr *http.Request, audit ProxyAudit) error {
+// inject sets the connection's credential on hr. purpose is ProxyRequest.Purpose, which only a
+// github_app connection's minted token can honour; Do refuses it for anything else before here.
+func (p *Proxy) inject(ctx context.Context, orgID int64, conn *Connection, hr *http.Request, audit ProxyAudit, purpose string) error {
 	s, err := p.secret(conn)
 	if err != nil {
 		return err
@@ -1156,7 +1342,7 @@ func (p *Proxy) inject(ctx context.Context, orgID int64, conn *Connection, hr *h
 	case "github_app":
 		// No stored token: one is minted from the app key, scoped to this repository, and
 		// cached against the installation rather than this connection.
-		tok, err := p.installationToken(ctx, orgID, conn, s)
+		tok, err := p.installationToken(ctx, orgID, conn, s, purpose)
 		if err != nil {
 			return err
 		}

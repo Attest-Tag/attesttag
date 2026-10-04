@@ -55,7 +55,12 @@ func (b *Bot) operatorRoutes(mux *http.ServeMux) {
 	// The page behind the link in a support email. GET only shows: mail clients prefetch links,
 	// so nothing may change until the button is pressed.
 	mux.HandleFunc("GET /operator/plan", b.handleOperatorPlanPage)
-	mux.HandleFunc("POST /operator/plan", b.handleOperatorPlanSubmit)
+	// The form POSTs are wrapped in sameSiteOnly. The operator's 12-hour cookie is SameSite=Lax,
+	// which a cross-site POST does not carry, but Lax does send it on a same-site POST — a page on
+	// a sibling host under the same registrable domain could move a plan or grant credit while the
+	// cookie is live. sameSiteOnly refuses a browser request that says it began anywhere but this
+	// exact origin, and leaves a non-browser caller (a Bearer script, the tests) alone.
+	mux.HandleFunc("POST /operator/plan", sameSiteOnly(b.handleOperatorPlanSubmit))
 	// The dashboard the link's page grew into: the list of accounts, and the money actions on
 	// one of them. Everything here is behind the same secret and never behind a console session
 	// — a member must not be able to move their own plan or grant themselves credit, and the
@@ -64,14 +69,14 @@ func (b *Bot) operatorRoutes(mux *http.ServeMux) {
 	// The index's own unlock. It posts here rather than at /operator/plan, which expects a plan
 	// to move and answers 400 without one — so the first thing a new operator saw was an error
 	// message under a form that had in fact just worked.
-	mux.HandleFunc("POST /operator", b.handleOperatorUnlock)
-	mux.HandleFunc("POST /operator/credit", b.handleOperatorCreditForm)
-	mux.HandleFunc("POST /operator/size", b.handleOperatorSizeForm)
-	mux.HandleFunc("POST /operator/cancel", b.handleOperatorCancelForm)
+	mux.HandleFunc("POST /operator", sameSiteOnly(b.handleOperatorUnlock))
+	mux.HandleFunc("POST /operator/credit", sameSiteOnly(b.handleOperatorCreditForm))
+	mux.HandleFunc("POST /operator/size", sameSiteOnly(b.handleOperatorSizeForm))
+	mux.HandleFunc("POST /operator/cancel", sameSiteOnly(b.handleOperatorCancelForm))
 	// The enterprise deal (enterprise.go). Not behind billing like the three above: a deal's plan,
 	// budget and figures mean something on a deployment with no Stripe keys too, and only paying
 	// by subscription needs them — setEnterprise says so when it is asked for that.
-	mux.HandleFunc("POST /operator/enterprise", b.handleOperatorEnterpriseForm)
+	mux.HandleFunc("POST /operator/enterprise", sameSiteOnly(b.handleOperatorEnterpriseForm))
 	mux.HandleFunc("POST /api/operator/orgs/{id}/credit", b.requireOperator(b.handleOperatorCredit))
 	mux.HandleFunc("POST /api/operator/orgs/{id}/size", b.requireOperator(b.handleOperatorSize))
 }

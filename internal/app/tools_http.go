@@ -636,7 +636,7 @@ func (a *Agent) packs(preset, host string) []Tool {
 		// an explicit repo used to go out under whichever repository connection ranked first
 		// for api.github.com, which is the right answer only when every repository shares a
 		// token.
-		return []Tool{
+		tools := []Tool{
 			packToolFor(a, "github_find_code", "Search the code itself across the repositories this channel can reach, e.g. 'parseTimeout' or 'func handleLogin'. Use this to find which repository something lives in. Only the default branch is searched, and only files under 384 KB.",
 				map[string]any{"query": str("Words or an identifier to find in the code"), "repo": str("owner/name to search just one (optional; omit to search all of them)"), "limit": num("Max results (default 10)")}, []string{"query"},
 				func(ctx context.Context, c *Call, m map[string]any) (string, error) {
@@ -692,6 +692,28 @@ func (a *Agent) packs(preset, host string) []Tool {
 						Body: jsonBody(map[string]string{"body": argS(m, "body")})}, nil
 				}),
 		}
+		// Code review, where the deployment has it (review_chat.go): only a repository this channel is
+		// granted, and the review's own gate after that.
+		if a.startReview != nil {
+			tools = append(tools, packToolFor(a, "github_start_review", "Start an attest_tag code review of a pull request when somebody in the channel asks for one, e.g. 'review acme/web#12' or 'run a security review on PR 12'. Only a repository this channel is granted can be reviewed; the review runs in the background and its result is posted on the pull request (or recorded in the console where the repository is in shadow). Say what this returns: queued, already reviewed, or why it did not start.",
+				map[string]any{"repo": str("owner/name (optional when the channel has one repository)"), "number": num("Pull request number"),
+					"types":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Review types to run instead of the branch rule's, e.g. [\"security\"] (optional)"},
+					"shadow": map[string]any{"type": "boolean", "description": "Record the review in the console without posting it on GitHub (optional)"}},
+				[]string{"number"},
+				func(ctx context.Context, c *Call, m map[string]any) (string, error) {
+					var types []string
+					if list, ok := m["types"].([]any); ok {
+						for _, v := range list {
+							if s, ok := v.(string); ok {
+								types = append(types, s)
+							}
+						}
+					}
+					shadow, _ := m["shadow"].(bool)
+					return a.startReview(ctx, c, argS(m, "repo"), argI(m, "number", 0), types, shadow)
+				}))
+		}
+		return tools
 	case "gcp_logs":
 		return []Tool{
 			packTool(a, "gcp_query_logs", "Query Google Cloud Logging entries with a Logging filter, newest first.",
@@ -843,6 +865,15 @@ func (a *Agent) toolsFor(ctx context.Context, c *Call) map[string]Tool {
 		delete(out, "request_access")
 		delete(out, "connect_account")
 		delete(out, "send_dm")
+		delete(out, "fetch_url")
+		delete(out, "web_search")
+	}
+	// An organisation that turned on restrict_web_egress loses open web reach on every turn, not
+	// just the mail lane. The reasoning is the mail lane's, widened: a turn also reads web pages,
+	// GitHub issues and shared documents, all of which can carry an injected instruction, and
+	// fetch_url would let that instruction post what a connection returned out to a host of its
+	// own choosing. run_js's fetch() is not a way out — it is confined to connection hosts.
+	if a.settings != nil && a.settings.Get(ctx, c.OrgID).RestrictWebEgress {
 		delete(out, "fetch_url")
 		delete(out, "web_search")
 	}

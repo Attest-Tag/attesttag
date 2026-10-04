@@ -7,22 +7,59 @@ in the Attest design system, embedded into the Go binary at build time.
 |---|---|
 | Overview | spend this month against budget, turns, tool calls, documents, memories, routines |
 | Workspaces | the organisation (the *all workspaces* row), each connected workspace and its channels: instructions, attached bundles and one-off connections, repositories and the default one, default model, read every message, email intake, member edits, allow rules, monthly budget; add, disconnect or remove a Slack workspace or Microsoft Teams tenant. Without `connections.view`, a scope shows its own settings but not the connections, repositories and inherited instructions and rules behind it |
-| Access bundles | bundles, connections (Connect dialog with presets, test, curl preview, rotate secret, copy to another bundle), domains, skills, MCP sign-in |
+| Access bundles | bundles, connections (Connect dialog with presets, test, curl preview, rotate secret, copy to another bundle), domains, skills, MCP sign-in; each repository saved through the GitHub App says *review: live*, *shadow* or *off*, and **Code review settings…** in its menu, or **Set review** for a selection, opens it under Reviews › Settings |
 | Approvers | approval tiers: a name, a rank, the people who hold it, and what it may grant from — whole bundles or single connections. Changing them needs `approvers.manage` ([security](security.md)) |
 | Access requests | who asked for what, who approved it and what ran; close one out with a reason (`access_requests.close`). Approving happens in Slack |
 | Documents | folders (make, upload a whole one, move documents and folders between them), upload, edit plain-text documents in place, scope a document to a channel, reindex; **Google Drive** folders followed and kept in step ([setup](google.md#drive-sync)), the connection behind each shown only to holders of `connections.view`. A PDF whose text passes 32 MiB, or takes more than a minute to extract, is left out of the index |
 | Memory | **Shared**: list, add, edit, delete the organisation's memories. **Yours**: your own private notes, which only you can see — no permission unlocks somebody else's |
+
+## Pages: automation, activity and audit
+
+| page | what you do there |
+|---|---|
 | Routines | list, edit (channel, schedule, prompt — full screen when it is long — which model answers, whether it replies always or only when it matters, and whether its writes ask first), run history for each, run now, enable or disable, delete. *New routine* starts on *Run without asking*; one created through the bot starts on *Ask first* ([security](security.md)) |
 | Jobs | fix jobs handed to the worker: status, pull request, cost, brief, events, diff and log; cancel a running one |
+| Reviews | code review of pull requests on GitHub, in three tabs: **History** (every review and try, *Start review*, and each review's findings, what it dropped and what it did not read, with *Run again*), **Settings** (the GitHub connections, their groups and repositories, with where every value is inherited from, and *Add connection*) and **Types** (review types and their rules, versions, *Try on a PR*). Needs `reviews.view`; changing anything or starting a review needs `reviews.manage`, and what posts live or spends needs `connections.manage` as well ([code review](code-review.md)) |
 | Artifacts | files the bot made in threads: open in Slack, download, delete |
 | Activity | tabs for **Turns**, **Tool calls**, **Proxy** (proxied requests), **Assistant** (questions put to the console assistant) and **People**; the CSV export holds the turns |
 | Audit log | who did what: sign-ins and refused sign-ins (with the address), every change made in the console or through the API, approvals pressed in Slack, exports, retention sweeps. Filter by window, action, outcome and person; CSV export; `GET /v1/audit` for a collector. Needs `audit.view`, which admin holds ([security](security.md#the-audit-log)) |
+
+## Pages: developers, playground and settings
+
+| page | what you do there |
+|---|---|
 | API keys | developer keys for the `/v1` API: create (shown once, with an optional expiry date), see when each was last used, revoke ([api](api.md)) |
 | API reference | every `/v1` endpoint, with the curl to copy and the response to expect |
 | MCP | the address for MCP clients such as Claude and Cursor, how to connect one with OAuth or a key, the apps people have connected (disconnect them here), and each tool with the permission it needs ([mcp](mcp.md)) |
 | Get started | recorded walkthroughs of the product, chapter by chapter |
 | Playground | ask a channel something from the console and see what its settings do: a real turn with the channel's own access, model and budget, reporting the tools it called, the rounds it used and what it cost. Nothing that changes data is sent — not even a write an allow rule covers or one through a connection whose writes are `auto`, which the channel would run without asking — and the reply shows what would have been sent and what the channel would do with it. It remembers nothing, makes no routine and posts nothing in the channel. Needs `scopes.manage` |
-| Settings | nine tabs: **General** (your name, address, account), **Security** (your password, two-factor, connected Slack and, where offered, Microsoft; and for holders of `settings.manage`, which sign-in methods the organisation accepts, single sign-on, whether two-factor is required, the email domains the bot answers, and whether guests and Slack Connect members may use it), **Workspace** (organisation name, behaviour, allow rules, self-approval for testing, alerts, how long activity and the audit log are kept, and deleting the account), **Models** (*Your model key*, where the deployment offers one: folded until opened, or a locked *Enterprise plan* line where the plan does not allow it; models and limits), **Web** (web search), **Workers** (fix worker), **Billing** (plan and size, credit against the month's spend, top-ups, the card in Stripe's portal, and the workspace's own monthly budget — only on a deployment that sells plans), **Users**, **Roles** |
+| Settings | nine tabs: **General** (your name, address, account), **Security** (your password, two-factor, connected Slack and, where offered, Microsoft; and for holders of `settings.manage`, which sign-in methods the organisation accepts, single sign-on, whether two-factor is required, the email domains the bot answers, and whether guests and Slack Connect members may use it), **Workspace** (organisation name, behaviour, allow rules, self-approval for testing, alerts, how long activity and the audit log are kept, and deleting the account), **Models** (*Your model key*, where the deployment offers one: folded until opened, or a locked *Enterprise plan* line where the plan does not allow it, with its *Fix jobs* and *Code reviews* switches; models and limits, and code review's budget where there is no Billing tab), **Web** (web search), **Workers** (fix worker), **Billing** (plan and size, credit against the month's spend, top-ups, the card in Stripe's portal, the workspace's own monthly budget, and code review's monthly budget and daily cap — only on a deployment that sells plans), **Users**, **Roles** |
+
+## Reviews: History, Settings and Types
+
+**Reviews** (Automation › Reviews) is where [code review](code-review.md) is set up and read.
+
+- **History** lists every review and try, newest first: the pull request, the score, the findings,
+  the cost, and whether it was posted, recorded in shadow, skipped or failed. A review opens to its
+  findings and how each stands now, the candidates it dropped and why, the files it did not read,
+  and the branch rule and types it ran under. **Run again** and **Run with other types…** review the
+  pull request's head as it is now. **Start review** picks a repository, one of its open pull
+  requests, the review types, *Live* or *Shadow*, the whole pull request or only the changes since
+  the last review, and shows the estimated cost before it starts.
+- **Settings** is laid out like Workspaces: the GitHub connections in a tree — each connection,
+  then its groups, then its repositories — with **Add connection** at the bottom, and the selected
+  level's settings beside it. A connection's panel opens with its installation's status: who
+  installed it, whether it is active, when GitHub last delivered, and whether new permissions wait
+  to be accepted. Every field below the connection says where its value is inherited from, or that
+  it is set here, with **Reset**; a repository's panel ends with the **Effective** line, **Review a
+  PR…**, and its open pull requests that have not been reviewed yet.
+- **Types** lists the built-in, edited and custom review types and edits one: its purpose, the
+  files it looks at, its strictness, the [skills](code-review.md#skills) it follows — folders in
+  GitHub repositories, each checked as it is linked — and its rules with their severity caps and
+  switches, including rules proposed from replies in a thread, which do nothing until somebody
+  accepts them. **Try on a
+  PR** runs the type as edited before it is saved; every save is a version, which **History** lists
+  and can revert to, and an edited built-in has **Reset to built-in**.
 
 ## Model and timezone dropdowns
 
@@ -42,12 +79,29 @@ browser's IANA zone list, showing each zone's current UTC offset.
 
 **Console assistant.** A panel in the console answers questions about the console, the
 organisation's own data and this guide, and stages changes the person confirms by hand; it
-writes nothing itself ([security](security.md)). Any member may use it, and each thing it can
-read or propose is gated by the permission the console's own route for it needs. It takes 60
+writes nothing itself ([security](security.md)). Anyone who can change channels, approvers or code
+review (`scopes.manage`, `approvers.manage`, or `reviews.manage` with `reviews.view`) may use it,
+and each thing it can read or propose is gated by the permission the console's own route for it
+needs. It takes 60
 questions a person an hour and three at a time per organisation, with six rounds of tool calls
 each. On the deployment's model key, the model it answers on can only be the default, the
 advanced one or one the organisation offers its channels; on the organisation's own key, anything
-that key's endpoint serves. Its turns are on Activity's **Assistant** tab.
+that key's endpoint serves. Its turns are on Activity's **Assistant** tab, and its tool calls on
+**Tool calls**, where anyone with `activity.view` sees what ran and how it went. A call's
+arguments, like the question and the answer, are shown only to somebody who also holds
+`audit.view` and the permission the call was about; its results, to nobody. A card is confirmed
+only in the organisation it was proposed in: after a switch to another, from any tab, Confirm says
+so and saves nothing.
+
+**On Reviews.** The chip above the question names what the page has open — a review type on
+**Types**, a connection, group or repository on **Settings** — and that is the one the assistant
+takes "this" to mean. There, and only there, it reads the review types rule by rule and the
+settings tree level by level, and for somebody holding `reviews.view` and `reviews.manage` it
+proposes changes to a type's rules, a new type, or changes to one level's branch rules
+([how](code-review.md#changing-types-and-rules-from-the-assistant)). Each card is checked against
+what it was read from: the type's version, or the level's branch rules, inherited ones included.
+If somebody saved either before Confirm, nothing is written and the card says *Changed since this
+was proposed — ask again*.
 
 ## Signing in to the console
 
@@ -105,12 +159,16 @@ curl -s -H "Authorization: Bearer $SESSION" http://127.0.0.1:8080/api/overview
 
 ## Configure page for channel members
 
-**Member Configure page.** Every channel reply's footer links to `/configure/<workspace>/<channel>`,
-where channel members (not just admins) can toggle read-every-message, turn email intake off,
-choose a model, set how many rounds of tool calls a reply may spend, write channel instructions,
-edit or delete the channel's memories, enable or disable its routines, and view the tools,
-connections and pre-approved actions available. The link carries a token signed for that
-workspace and channel under a key derived from `MASTER_KEY`, so only people who can see the
-footer have it; it expires a day after the reply that printed it, and
-`POST /api/scopes/{id}/configure-links/revoke` (`scopes.manage`) voids every link printed so far
-— the console has no button for that. Admins can lock the page per scope with `member_edits`.
+**Member Configure page.** Every channel reply's footer links to `/configure/<workspace>/<channel>`.
+That footer link is **shared** — everyone who can read the reply holds it, which in a Slack Connect
+channel includes another company's members — so it only **shows** the settings (model, channel
+instructions, tools, memory, routines) and never reveals which services the channel can reach. To
+**change** anything a member sends `!configure` in the channel and the bot DMs them a **personal**
+link, signed for that one person; that link can toggle read-every-message, turn email intake off,
+choose a model, set the tool-round budget, write channel instructions, edit or delete the channel's
+memories, and enable or disable routines. Both links carry a token signed for the workspace and
+channel under a key derived from `MASTER_KEY`; the personal one also names its holder inside the MAC.
+The footer link is withheld entirely in an externally shared (Slack Connect) channel. Links expire a
+day after the reply that printed them, and `POST /api/scopes/{id}/configure-links/revoke`
+(`scopes.manage`) voids every link printed so far — the console has no button for that. Admins can
+lock even the personal link per scope with `member_edits = block`, leaving edits to the console.

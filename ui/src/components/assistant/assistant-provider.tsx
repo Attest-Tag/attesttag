@@ -13,6 +13,7 @@ import { OVERLAY, TYPING } from "@/hooks/use-search-shortcut";
 
 type AssistantCtx = { open: boolean; setOpen: (on: boolean) => void; allowed: boolean };
 
+
 const Ctx = createContext<AssistantCtx>({ open: false, setOpen: () => {}, allowed: false });
 
 export function useAssistant() {
@@ -22,13 +23,18 @@ export function useAssistant() {
 export function AssistantProvider({ children }: { children: React.ReactNode }) {
   const { me } = useAuth();
   const flags = useStickyFlags("assistant");
-  // Every tool the assistant has is about a channel's settings, and its one staging tool
-  // proposes a scopes.manage write, so the endpoint is gated on that — the same gate the
-  // playground carries. /api/me sends only the keys the role holds, so the check is for a
-  // present true; until it has answered there is nothing to check against and the assistant
-  // stays available rather than flickering out from under a keystroke.
+  // The assistant is offered to whoever can confirm something it proposes: a channel's settings
+  // (scopes.manage), an approval tier (approvers.manage), or code review's types and branch rules on
+  // the Reviews page — which takes reviews.view as well as reviews.manage, since the server offers
+  // its review tools only to a caller who can read what they change (manage does not imply view),
+  // and only where code review is on at all. Somebody holding none of those would get a reader with
+  // nothing to act on, and the pages already read for them. /api/me sends only the keys the role
+  // holds, so the check is for a present true; until it has answered there is nothing to check
+  // against and the assistant stays available rather than flickering out from under a keystroke.
   const perms = me?.user?.permissions;
-  const allowed = !perms || perms["scopes.manage"] === true;
+  const reviews =
+    perms?.["reviews.manage"] === true && perms["reviews.view"] === true && me?.code_review?.reason !== "off";
+  const allowed = !perms || perms["scopes.manage"] === true || perms["approvers.manage"] === true || reviews;
   const open = allowed && flags.get("open", false);
   const setOpen = (on: boolean) => flags.set("open", on);
 

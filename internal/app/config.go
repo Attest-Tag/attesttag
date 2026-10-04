@@ -99,6 +99,10 @@ type Config struct {
 	// Defaults to all, so a deployment running its own can rotate the key from the console; the
 	// hosted service names enterprise in deploy/gcp/cloudrun.sh.
 	OrgModelKeys string
+	// Which organisations have code review (review_plan.go): all, pro (accounts on pro or
+	// enterprise), enterprise or off. Defaults to all, since a self-host is one organisation and
+	// has no plan to gate it on; the hosted service names pro in deploy/gcp/cloudrun.sh.
+	CodeReview string
 	// The bearer secret behind /api/operator/ (operator.go). Empty means those routes do not
 	// exist on this deployment.
 	OperatorSecret string
@@ -589,6 +593,7 @@ func LoadConfig() Config {
 		Maintenance:                    os.Getenv("MAINTENANCE") == "1",
 		SignupMode:                     signupModeOf(os.Getenv("SIGNUP_MODE")),
 		OrgModelKeys:                   orgModelKeysOf(os.Getenv("ORG_MODEL_KEYS")),
+		CodeReview:                     codeReviewOf(os.Getenv("CODE_REVIEW")),
 		SiteURL:                        env("SITE_URL", ""),
 		OperatorSecret:                 os.Getenv("OPERATOR_SECRET"),
 		StripeSecretKey:                os.Getenv("STRIPE_SECRET_KEY"),
@@ -641,6 +646,11 @@ func LoadConfig() Config {
 	// organisation outside that whose key is stored then has its model calls refused.
 	if v := os.Getenv("ORG_MODEL_KEYS"); v != "" && !strings.EqualFold(strings.TrimSpace(v), c.OrgModelKeys) {
 		slog.Warn("ORG_MODEL_KEYS must be all, enterprise or off; treating as enterprise", "value", v)
+	}
+	// And for CODE_REVIEW, whose typo reads as pro (codeReviewOf): on a deployment with open signup
+	// the plan is the only thing keeping free accounts' reviews off the operator's model key.
+	if v := strings.TrimSpace(os.Getenv("CODE_REVIEW")); v != "" && !strings.EqualFold(v, c.CodeReview) {
+		slog.Warn("CODE_REVIEW must be all, pro, enterprise or off; treating as pro", "value", v)
 	}
 	// The per-organisation caps and signup throttles, after the dotenv file has been read —
 	// package-level initialisation would run before it and see none of them (limits.go).

@@ -412,12 +412,27 @@ func (b *Bot) apiV1Routes(mux *http.ServeMux) {
 			return
 		}
 		ctx, org, id := r.Context(), orgOf(r), pathID(r, "id")
-		if b.routineByID(ctx, org, id) == nil {
+		before := b.routineByID(ctx, org, id)
+		if before == nil {
 			v1Missing(w, "routine")
 			return
 		}
+		// A rewrite over the API or MCP drops the routine to confirm-required. auto_confirm is a
+		// decision made in the console looking at the routine (errV1AutoConfirm), and it must not
+		// stay on while an API caller — or an injected MCP client holding this key — changes what
+		// the routine does and then lets its new writes run unconfirmed. Housekeeping alone (the
+		// schedule, the model, a pause) leaves it as it was.
+		autoConfirm := in.AutoConfirm
+		clearedAutoConfirm := false
+		behavioral := in.Prompt != nil || in.Steps != nil || in.Finish != nil || in.Channel != nil ||
+			in.TeamID != nil || in.Notify != nil || in.NotifyWhen != nil
+		if behavioral {
+			no := false
+			autoConfirm = &no
+			clearedAutoConfirm = before.AutoConfirm
+		}
 		e := routineEdit{Enabled: in.Enabled, Cron: in.Cron, TZ: in.Timezone, Prompt: in.Prompt, Notify: in.Notify,
-			NotifyWhen: in.NotifyWhen, Model: in.Model, Steps: in.Steps, Finish: in.Finish, AutoConfirm: in.AutoConfirm}
+			NotifyWhen: in.NotifyWhen, Model: in.Model, Steps: in.Steps, Finish: in.Finish, AutoConfirm: autoConfirm}
 		if in.Channel != nil {
 			teamID := ""
 			if in.TeamID != nil {
@@ -441,6 +456,10 @@ func (b *Bot) apiV1Routes(mux *http.ServeMux) {
 		}
 		if wasRunningAs != "" {
 			out["was_running_as"] = wasRunningAs
+		}
+		if clearedAutoConfirm {
+			out["auto_confirm_cleared"] = true
+			out["note"] = "auto-confirm was turned off because the routine's behaviour changed; re-enable it in the console after reviewing it"
 		}
 		writeJSON(w, 200, out)
 	}))

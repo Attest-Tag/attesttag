@@ -1,0 +1,12 @@
+-- The skills a code-review type follows besides its rules.
+--
+--   review_types.skills_json
+--                     JSON [{repo, path, ref}]: folders (or files) in GitHub repositories, each a
+--                     SKILL.md and the Markdown beside it, read for every review the type runs and
+--                     given to its finder as criteria (review.SkillLink). An empty repo is the
+--                     repository under review, read at the pull request's base commit; ref is a
+--                     branch, tag or commit, empty for the default branch. Only where they are is
+--                     stored: what they say is read at review time, so editing a skill changes the
+--                     next review without a new version of the type, and each run records the
+--                     commit it read.
+alter table review_types add column skills_json text not null default '[]';

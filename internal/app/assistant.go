@@ -1,6 +1,7 @@
 package app
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -10,6 +11,7 @@ import (
 	"log/slog"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -101,6 +103,10 @@ type consoleAttachment struct {
 // consoleCall is one console question: who asked, from where, with what, and what it spent.
 type consoleCall struct {
 	OrgID int64
+	// OrgPublic is OrgID by its public id, which every card staged here carries (stage): the session a
+	// card is confirmed under is whichever organisation it last switched to, in any tab, and a card
+	// must only ever land in the one it was proposed in.
+	OrgPublic string
 	// Actor is the console account asking, by its opaque public id. Never a Slack id: these
 	// rows sit in the same usage table as Slack turns, and a console account borrowing a Slack
 	// id would spend that person's allowance and confuse every reader of the table since.
@@ -117,6 +123,10 @@ type consoleCall struct {
 	// browser sent. The browser's id is a claim and this is the row — which is the whole reason
 	// the id is re-resolved rather than passed through.
 	Scope *Scope
+	// Focus is what else the page had open — a review type, a level of the review settings —
+	// resolved inside OrgID the same way (resolveFocus). Nil when the page had nothing, or nothing
+	// this caller may read about.
+	Focus *consoleFocus
 	Files []consoleAttachment
 
 	model     string
@@ -125,6 +135,12 @@ type consoleCall struct {
 	usage     Usage
 	calls     []assistantTool
 	proposals []proposal
+	// resultCap and resultMore are what the reader read_console just ran allows its result and says
+	// to ask for once it is cut (consoleReader.cap and .more), spent by runConsoleTool on that one
+	// result. A field rather than a return value because the cut happens a level up, after the
+	// redaction; it is race-free because a round's tool calls run one after another.
+	resultCap  int
+	resultMore string
 }
 
 // consoleLLM is the endpoint a console turn runs on: the organisation's, like every other model
@@ -151,6 +167,10 @@ type consoleTool struct {
 	Perm       string
 	Params     map[string]any
 	Run        func(ctx context.Context, c *consoleCall, args json.RawMessage) (string, error)
+	// needs is every permission a call's arguments are about, for args: read_console's the resource it
+	// names, a propose_ tool's those its Confirm needs. Nil is Perm alone. Activity shows the arguments
+	// to a reader holding these as well as what the turn's own words need (consoleArgNeeds).
+	needs func(args json.RawMessage) []string
 }
 
 func (t consoleTool) def() openai.ChatCompletionToolUnionParam {
@@ -161,12 +181,27 @@ func (t consoleTool) def() openai.ChatCompletionToolUnionParam {
 
 // ---- proposals ----
 
-// proposalChange is one field as a person reads it on the card.
+// proposalChange is one field as a person reads it on the card: a value before and after, unless
+// Format says it is something else.
 type proposalChange struct {
 	Key   string `json:"key"`
 	Label string `json:"label"`
 	From  string `json:"from"`
 	To    string `json:"to"`
+	// Format is "" for a value, "text" for prose the card shows whole rather than cut (a review
+	// type's purpose), and "list" for a list shown entry by entry in Items (a review type's rules, a
+	// level's branch rules). A list's To is its summary — "6 rules (1 added)" — which is what the
+	// audit row keeps; the entries are the card's.
+	Format string         `json:"format,omitempty"`
+	Items  []proposalItem `json:"items,omitempty"`
+}
+
+// proposalItem is one entry of a list change, marked with what happens to it: "+" added, "-"
+// removed or switched off, "~" changed, "↕" moved, "=" unchanged — one entry standing for every
+// one that is, so a forty-rule type does not draw thirty-nine rows to show one.
+type proposalItem struct {
+	Mark string `json:"mark"`
+	Text string `json:"text"`
 }
 
 // proposalStep is one call Confirm makes, in the order they are listed. Method and Path are
@@ -184,13 +219,48 @@ type proposal struct {
 	// handlers read the keys they know by name, so an unknown one writes nothing — but their
 	// audit loops record what they were sent, which is what ties the proposal's audit row to
 	// the save's without touching either endpoint.
-	ID      string           `json:"id"`
-	Kind    string           `json:"kind"`   // "channel" | "approval"
+	ID string `json:"id"`
+	// Org is the organisation the card was proposed in, by its public id, which stage also puts in the
+	// body of every step it carries. The panel will not confirm a card while the console is signed in to
+	// another organisation, and the endpoints refuse a body naming one that is not the session's
+	// (refuseOtherOrg) — a type's key, "general", names a type in every organisation, and a create names
+	// nothing at all, so the path alone would land in whichever one the session switched to since.
+	Org     string           `json:"org,omitempty"`
+	Kind    string           `json:"kind"`   // "channel" | "approval" | "review_type" | "review_settings"
 	Target  string           `json:"target"` // what it is about, in words: "#ops", "Senior approvers"
 	Changes []proposalChange `json:"changes"`
 	Steps   []proposalStep   `json:"steps"`
+	// Note is what the card says beside the change because the change alone does not show it: a
+	// level that stops inheriting its parent's list, a built-in that is copied on its first save.
+	// Based is what the change was read from ("Based on v3"), which is what Confirm is checked
+	// against: a card is refused, writing nothing, once that has changed.
+	Note  string `json:"note,omitempty"`
+	Based string `json:"based,omitempty"`
+	// Requires is the id of another card in the same answer that has to be confirmed first — a
+	// branch rule naming a type only that card creates — so the panel holds this one back until it is.
+	Requires string `json:"requires,omitempty"`
+	// Open is where the change is seen on its own page. Refresh is the API paths whose readers load
+	// again once it is confirmed, so the page behind the panel shows the change without a reload.
+	Open    *proposalLink `json:"open,omitempty"`
+	Refresh []string      `json:"refresh,omitempty"`
 
 	auditTeam, auditKind, auditID string
+	// auditDetail is added to the assistant.proposed row (proposalAudit): what the card's own
+	// summary leaves out and a reader of the audit log needs, such as a list before and after where
+	// nothing else keeps the before.
+	auditDetail map[string]any
+	// key is the one thing this card changes, set on a card that cannot stand beside another on the
+	// same thing (see stage); empty on one that can.
+	key string
+}
+
+// stepOrgKey is the body key a staged step names its card's organisation by (proposal.Org).
+const stepOrgKey = "org"
+
+// proposalLink is a link the card offers to the page its change is on.
+type proposalLink struct {
+	Href  string `json:"href"`
+	Label string `json:"label"`
 }
 
 // The paths the assistant may stage, and nothing else. Every one is an endpoint the console
@@ -214,6 +284,17 @@ var assistantSteps = []struct {
 	{"DELETE", regexp.MustCompile(`^/api/approval-roles/\d+/members\?ref=[^&]*$`)},
 	{"POST", regexp.MustCompile(`^/api/approval-roles/\d+/(bundles|connections)/\d+$`)},
 	{"DELETE", regexp.MustCompile(`^/api/approval-roles/\d+/(bundles|connections)/\d+$`)},
+	// A review type is saved by its key and made new by the list's POST — the Types tab's own Save and
+	// New type. Its Reset, Revert, Try and the switches are not here: a reset or a revert throws a
+	// version's work away, and on and off ride in the PUT, where the version it was read at guards them.
+	{"PUT", regexp.MustCompile(`^/api/review-types/[a-z][a-z0-9-]*$`)},
+	{"POST", regexp.MustCompile(`^/api/review-types$`)},
+	// A level's branch rules are saved by the Settings tab's own PUT: a connection, a group or a
+	// repository with settings of its own by its id, and a repository with none yet through its
+	// connection, by owner/name escaped as the one parameter — so nothing else can ride along in the
+	// query. A level's Move, Remove, Restore and Delete are not here: each changes what is reviewed at
+	// all, which is decided on the page.
+	{"PUT", regexp.MustCompile(`^/api/review-settings/[0-9a-f]{32}(\?repo=[A-Za-z0-9-]+%2F[A-Za-z0-9_.-]+)?$`)},
 }
 
 func stepAllowed(method, path string) bool {
@@ -228,14 +309,60 @@ func stepAllowed(method, path string) bool {
 // stage records a proposal after checking every step it carries. A step that is not on the list
 // is a mistake in this file rather than something a person did, so it fails the turn loudly
 // instead of quietly dropping the step and drawing a card that does less than it says.
+//
+// A card with a key replaces the one already staged on the same kind and key, in its place, rather
+// than standing beside it. Those are the cards that freeze what they were read from — a review
+// type's version, a level's branch rules — and the second of two such cards on one thing could
+// never be confirmed: the first one's Confirm changes exactly what the second was checked against,
+// so it would be refused as stale every time. The replacement keeps the first card's id
+// (proposalIDFor), so a card that Requires it still names it. Cards without a key — a channel's
+// fields, a tier's members — each write only what they show, and stand side by side as before.
+//
+// Every card is bound to the organisation it was proposed in: it carries its public id, and so does
+// the body of each of its steps, which the endpoints check against the session's (refuseOtherOrg). A
+// step with no body is a DELETE or an attach by ids the endpoint resolves inside the session's
+// organisation, which another one's ids name nothing in.
 func (c *consoleCall) stage(p proposal) error {
 	for _, s := range p.Steps {
 		if !stepAllowed(s.Method, s.Path) {
 			return fmt.Errorf("internal: %s %s is not a step the assistant may stage", s.Method, s.Path)
 		}
 	}
+	if c.OrgPublic != "" {
+		p.Org = c.OrgPublic
+		for _, s := range p.Steps {
+			if s.Body != nil {
+				s.Body[stepOrgKey] = c.OrgPublic
+			}
+		}
+	}
+	if p.key != "" {
+		for i := range c.proposals {
+			if c.proposals[i].Kind != p.Kind || c.proposals[i].key != p.key {
+				continue
+			}
+			if c.proposals[i].ID != p.ID {
+				return fmt.Errorf("internal: a %s card on %s replaces %s and must keep its id", p.Kind, p.key, c.proposals[i].ID)
+			}
+			c.proposals[i] = p
+			return nil
+		}
+	}
 	c.proposals = append(c.proposals, p)
 	return nil
+}
+
+// proposalIDFor is the id a card on kind and key is staged under: the id of the card already staged
+// on them in this answer, which the new one replaces (stage), or a new one. replaces says which, so
+// the tool can tell the model that the earlier card is gone and this one carries only what it was
+// just asked for.
+func (c *consoleCall) proposalIDFor(kind, key string) (id string, replaces bool) {
+	for _, p := range c.proposals {
+		if key != "" && p.Kind == kind && p.key == key {
+			return p.ID, true
+		}
+	}
+	return newProposalID(), false
 }
 
 func newProposalID() string {
@@ -260,11 +387,21 @@ var proposableScopeFields = map[string]bool{
 type consoleReader struct {
 	name, perm, desc string
 	run              func(ctx context.Context, b *Bot, c *consoleCall, id string, limit int) (string, error)
+	// cap is how much of its result reaches the model, in bytes, when that is not assistantResultC:
+	// a reader whose whole answer is one long list, cut short of its end, answers a different
+	// question than the one asked. more is what to ask for once it is cut anyway.
+	cap  int
+	more string
+	// on and kinds keep a reader to where it means something: a feature that is on here, and the
+	// pages whose focus is one of kinds (none: every page). A reader that is not offered costs
+	// nothing; one that is costs its catalogue line and enum entry on every round of every question.
+	on    func(*Bot) bool
+	kinds []string
 }
 
 func (b *Bot) consoleReaders() []consoleReader {
-	return []consoleReader{
-		{"channels", "", "every channel this organisation has configured", func(ctx context.Context, b *Bot, c *consoleCall, id string, limit int) (string, error) {
+	return append([]consoleReader{
+		{name: "channels", desc: "every channel this organisation has configured", run: func(ctx context.Context, b *Bot, c *consoleCall, id string, limit int) (string, error) {
 			scopes, err := b.store.Scopes(ctx, c.OrgID)
 			if err != nil {
 				return "", err
@@ -285,7 +422,7 @@ func (b *Bot) consoleReaders() []consoleReader {
 			}
 			return listOr(out, "no channels match"), nil
 		}},
-		{"channel", "", "one channel in full: its settings, what each field inherits, and what it can reach (id = the channel id)", func(ctx context.Context, b *Bot, c *consoleCall, id string, limit int) (string, error) {
+		{name: "channel", desc: "one channel in full: its settings, what each field inherits, and what it can reach (id = the channel id)", run: func(ctx context.Context, b *Bot, c *consoleCall, id string, limit int) (string, error) {
 			sc, err := b.consoleScope(ctx, c, id)
 			if err != nil {
 				return "", err
@@ -302,7 +439,7 @@ func (b *Bot) consoleReaders() []consoleReader {
 			}
 			return jsonResult(out), nil
 		}},
-		{"approval_tiers", "", "the tiers that can approve access: rank, members, and what each may grant", func(ctx context.Context, b *Bot, c *consoleCall, id string, limit int) (string, error) {
+		{name: "approval_tiers", desc: "the tiers that can approve access: rank, members, and what each may grant", run: func(ctx context.Context, b *Bot, c *consoleCall, id string, limit int) (string, error) {
 			roles, err := b.store.ApprovalRoles(ctx, c.OrgID)
 			if err != nil {
 				return "", err
@@ -318,7 +455,7 @@ func (b *Bot) consoleReaders() []consoleReader {
 			}
 			return jsonResult(out), nil
 		}},
-		{"bundles", PermConnView, "the named groups of connections a channel or a tier can be given", func(ctx context.Context, b *Bot, c *consoleCall, id string, limit int) (string, error) {
+		{name: "bundles", perm: PermConnView, desc: "the named groups of connections a channel or a tier can be given", run: func(ctx context.Context, b *Bot, c *consoleCall, id string, limit int) (string, error) {
 			bs, err := b.store.Bundles(ctx, c.OrgID)
 			if err != nil {
 				return "", err
@@ -329,7 +466,7 @@ func (b *Bot) consoleReaders() []consoleReader {
 			}
 			return listOr(out, "this organisation has no bundles yet"), nil
 		}},
-		{"models", "", "the models this provider offers, and which one the organisation uses", func(ctx context.Context, b *Bot, c *consoleCall, id string, limit int) (string, error) {
+		{name: "models", desc: "the models this provider offers, and which one the organisation uses", run: func(ctx context.Context, b *Bot, c *consoleCall, id string, limit int) (string, error) {
 			st := b.settings.Get(ctx, c.OrgID)
 			l, err := b.consoleLLM(ctx, c)
 			if err != nil {
@@ -347,7 +484,7 @@ func (b *Bot) consoleReaders() []consoleReader {
 			}
 			return listOr(out, "the catalogue is empty"), nil
 		}},
-		{"access_requests", PermAccessView, "who asked for what, who answered, and what ran", func(ctx context.Context, b *Bot, c *consoleCall, id string, limit int) (string, error) {
+		{name: "access_requests", perm: PermAccessView, desc: "who asked for what, who answered, and what ran", run: func(ctx context.Context, b *Bot, c *consoleCall, id string, limit int) (string, error) {
 			rs, err := b.store.AccessRequests(ctx, c.OrgID, id, limit)
 			if err != nil {
 				return "", err
@@ -360,7 +497,7 @@ func (b *Bot) consoleReaders() []consoleReader {
 			}
 			return listOr(out, "no access requests match"), nil
 		}},
-		{"activity", PermActivityView, "recent turns the bot has taken", func(ctx context.Context, b *Bot, c *consoleCall, id string, limit int) (string, error) {
+		{name: "activity", perm: PermActivityView, desc: "recent turns the bot has taken", run: func(ctx context.Context, b *Bot, c *consoleCall, id string, limit int) (string, error) {
 			rows, err := b.store.RecentTurns(ctx, c.OrgID, id, limit, "")
 			if err != nil {
 				return "", err
@@ -371,19 +508,26 @@ func (b *Bot) consoleReaders() []consoleReader {
 			}
 			return listOr(out, "no turns match"), nil
 		}},
-		{"audit", PermAuditView, "who signed in, what they changed, and what they approved", func(ctx context.Context, b *Bot, c *consoleCall, id string, limit int) (string, error) {
+		{name: "audit", perm: PermAuditView, desc: "who signed in, what they changed, and what they approved", run: func(ctx context.Context, b *Bot, c *consoleCall, id string, limit int) (string, error) {
 			evs, err := b.store.AuditEvents(ctx, c.OrgID, AuditFilter{Action: id, Limit: limit})
 			if err != nil {
 				return "", err
 			}
+			// The target's name quoted, and the actor's on one line: both are whatever somebody typed — a
+			// group's name, a channel's, their own — and a line break in one would start a line of its own
+			// in what the model reads.
 			var out []string
 			for _, e := range evs {
+				target := orDash(e.TargetName)
+				if strings.TrimSpace(e.TargetName) != "" {
+					target = strconv.Quote(e.TargetName)
+				}
 				out = append(out, fmt.Sprintf("- %s %s by %s (%s) on %s %s", e.At, e.Action,
-					orDash(e.ActorName), orDash(e.Via), orDash(e.TargetKind), orDash(e.TargetName)))
+					orDash(oneLine(e.ActorName)), orDash(e.Via), orDash(e.TargetKind), target))
 			}
 			return listOr(out, "no audit events match"), nil
 		}},
-		{"documents", "", "the files the bot can search when it answers", func(ctx context.Context, b *Bot, c *consoleCall, id string, limit int) (string, error) {
+		{name: "documents", desc: "the files the bot can search when it answers", run: func(ctx context.Context, b *Bot, c *consoleCall, id string, limit int) (string, error) {
 			docs, err := b.store.Documents(ctx, c.OrgID)
 			if err != nil {
 				return "", err
@@ -394,7 +538,7 @@ func (b *Bot) consoleReaders() []consoleReader {
 			}
 			return listOr(out, "no documents yet"), nil
 		}},
-		{"routines", PermRoutinesManage, "prompts that run on a schedule and post to a channel", func(ctx context.Context, b *Bot, c *consoleCall, id string, limit int) (string, error) {
+		{name: "routines", perm: PermRoutinesManage, desc: "prompts that run on a schedule and post to a channel", run: func(ctx context.Context, b *Bot, c *consoleCall, id string, limit int) (string, error) {
 			rs, err := b.store.Routines(ctx, c.OrgID, id)
 			if err != nil {
 				return "", err
@@ -409,7 +553,7 @@ func (b *Bot) consoleReaders() []consoleReader {
 			}
 			return listOr(out, "no routines yet"), nil
 		}},
-		{"jobs", PermJobsView, "fix jobs the bot handed to a worker", func(ctx context.Context, b *Bot, c *consoleCall, id string, limit int) (string, error) {
+		{name: "jobs", perm: PermJobsView, desc: "fix jobs the bot handed to a worker", run: func(ctx context.Context, b *Bot, c *consoleCall, id string, limit int) (string, error) {
 			js, err := b.store.Jobs(ctx, c.OrgID, JobFilter{Limit: limit})
 			if err != nil {
 				return "", err
@@ -420,7 +564,7 @@ func (b *Bot) consoleReaders() []consoleReader {
 			}
 			return listOr(out, "no jobs yet"), nil
 		}},
-		{"artifacts", PermArtifactsView, "files the bot made and posted in Slack", func(ctx context.Context, b *Bot, c *consoleCall, id string, limit int) (string, error) {
+		{name: "artifacts", perm: PermArtifactsView, desc: "files the bot made and posted in Slack", run: func(ctx context.Context, b *Bot, c *consoleCall, id string, limit int) (string, error) {
 			as, err := b.store.Artifacts(ctx, c.OrgID, limit)
 			if err != nil {
 				return "", err
@@ -431,7 +575,7 @@ func (b *Bot) consoleReaders() []consoleReader {
 			}
 			return listOr(out, "no artifacts yet"), nil
 		}},
-		{"settings", PermSettingsManage, "the organisation's models, budget and limits", func(ctx context.Context, b *Bot, c *consoleCall, id string, limit int) (string, error) {
+		{name: "settings", perm: PermSettingsManage, desc: "the organisation's models, budget and limits", run: func(ctx context.Context, b *Bot, c *consoleCall, id string, limit int) (string, error) {
 			// Named fields only. Settings also holds the shape of a stored web key, and a
 			// reader that rendered the struct would put it in a tool result that Activity shows
 			// to anybody holding activity.view.
@@ -443,10 +587,10 @@ func (b *Bot) consoleReaders() []consoleReader {
 				"allow_self_approve": st.AllowSelfApprove,
 			}), nil
 		}},
-		{"overview", "", "spend, usage and what the bot has to work with", func(ctx context.Context, b *Bot, c *consoleCall, id string, limit int) (string, error) {
+		{name: "overview", desc: "spend, usage and what the bot has to work with", run: func(ctx context.Context, b *Bot, c *consoleCall, id string, limit int) (string, error) {
 			return jsonResult(b.store.OverviewStats(ctx, c.OrgID)), nil
 		}},
-		{"spend", "", "this month's cost, broken down by workspace and channel", func(ctx context.Context, b *Bot, c *consoleCall, id string, limit int) (string, error) {
+		{name: "spend", desc: "this month's cost, broken down by workspace and channel", run: func(ctx context.Context, b *Bot, c *consoleCall, id string, limit int) (string, error) {
 			rows, err := b.store.UsageByChannel(ctx, c.OrgID)
 			if err != nil {
 				return "", err
@@ -467,7 +611,7 @@ func (b *Bot) consoleReaders() []consoleReader {
 			}
 			return listOr(out, "nothing spent this month"), nil
 		}},
-		{"tool_calls", PermActivityView, "every call the bot has made, with arguments and results — the log to run an analysis over", func(ctx context.Context, b *Bot, c *consoleCall, id string, limit int) (string, error) {
+		{name: "tool_calls", perm: PermActivityView, desc: "every call the bot has made, with arguments and results — the log to run an analysis over", run: func(ctx context.Context, b *Bot, c *consoleCall, id string, limit int) (string, error) {
 			rows, err := b.store.RecentToolCalls(ctx, c.OrgID, id, limit, false, "")
 			if err != nil {
 				return "", err
@@ -478,13 +622,27 @@ func (b *Bot) consoleReaders() []consoleReader {
 				if !t.OK {
 					state = "FAILED"
 				}
+				// This assistant's own earlier calls, read as Activity reads them for this caller: their
+				// arguments are somebody's question, and only shown to whoever may read it. The result is
+				// the one Activity shows too, since a call logged before they were kept private kept
+				// what it read whole, and that goes with its arguments.
+				args, result := t.Args, t.Result
+				if t.Channel == assistantChannel {
+					row := t
+					if row.unmarkPrivateFor(c.Perms); len(row.Withheld) > 0 {
+						args = privateMark + " withheld: reading them needs " + strings.Join(row.Withheld, ", ")
+					} else {
+						args = privateMark + " " + row.Args
+					}
+					result = strings.TrimSpace(privateMark + " " + row.Result)
+				}
 				out = append(out, fmt.Sprintf("- %s %s in %s (%s, %dms) args=%s result=%s",
 					t.At, t.Name, orDash(t.Channel), state, t.MS,
-					truncate(oneLine(t.Args), 200), truncate(oneLine(t.Result), 300)))
+					truncate(oneLine(args), 200), truncate(oneLine(result), 300)))
 			}
 			return listOr(out, "no tool calls match"), nil
 		}},
-	}
+	}, b.reviewReaders()...)
 }
 
 func decidedBy(r *AccessRequest) string {
@@ -516,6 +674,9 @@ func (b *Bot) consoleTools(c *consoleCall) []consoleTool {
 		if rd.perm != "" && !c.Perms[rd.perm] {
 			continue
 		}
+		if !c.onPage(b, rd.on, rd.kinds) {
+			continue
+		}
 		readers = append(readers, rd)
 		names = append(names, rd.name)
 		fmt.Fprintf(&catalogue, "\n- %s: %s", rd.name, rd.desc)
@@ -543,12 +704,25 @@ func (b *Bot) consoleTools(c *consoleCall) []consoleTool {
 			}
 			for _, rd := range readers {
 				if rd.name == p.Resource {
+					c.resultCap, c.resultMore = rd.cap, rd.more
 					return rd.run(ctx, b, c, strings.TrimSpace(p.ID), p.Limit)
 				}
 			}
 			// Naming what IS available beats "unknown resource": the model asked for a page it
 			// cannot see, and the useful answer is which ones it can.
 			return "", fmt.Errorf("%q is not something you can read; you have: %s", p.Resource, strings.Join(names, ", "))
+		},
+		// A read's arguments are about the resource it names — an audit action, a channel's activity —
+		// and are no more anybody's to see than the resource is.
+		needs: func(args json.RawMessage) []string {
+			var p struct{ Resource string }
+			json.Unmarshal(args, &p)
+			for _, rd := range readers {
+				if rd.name == p.Resource && rd.perm != "" {
+					return []string{rd.perm}
+				}
+			}
+			return nil
 		},
 	}}
 
@@ -558,7 +732,8 @@ func (b *Bot) consoleTools(c *consoleCall) []consoleTool {
 	tools = append(tools, consoleTool{
 		Name: "search_guide",
 		Desc: "Search attest_tag's own documentation: how connections, path prefixes, methods and access grants are configured, " +
-			"what an approval tier grants, how confirmed writes work, plans and what they cost, deployment and security. " +
+			"what an approval tier grants, how confirmed writes work, plans and what they cost, deployment and security, " +
+			"and code review: its types and their rules, branch rules, the settings tree, shadow and live, commands. " +
 			"Use it for any 'how do I…', 'how does X work' or 'what does X cost' question — the answer is here and not in this organisation's data, " +
 			"and none of it is in your training.",
 		Params: schema(map[string]any{"query": str("What to look for, in the product's own words")}, "query"),
@@ -572,13 +747,61 @@ func (b *Bot) consoleTools(c *consoleCall) []consoleTool {
 		},
 	})
 
-	if c.Perms[PermScopesManage] {
-		tools = append(tools, b.proposeChannelTool())
-	}
-	if c.Perms[PermApproversManage] {
-		tools = append(tools, b.proposeApprovalTool())
+	for _, p := range b.consoleProposers() {
+		if holdsAll(c.Perms, p.perms) && c.onPage(b, p.on, p.kinds) {
+			t := p.tool()
+			perms := p.perms
+			t.needs = func(json.RawMessage) []string { return perms }
+			tools = append(tools, t)
+		}
 	}
 	return tools
+}
+
+// consoleProposer is one propose_ tool and who it is offered to. perms are every permission its
+// Confirm needs: a card whose steps the person could not make is a button that only fails. on is
+// whether its feature is on here at all, and kinds the page focus kinds it belongs to — a tool for
+// one screen's settings is offered on that screen, and its schema is not paid for on every round of
+// every question asked anywhere else.
+type consoleProposer struct {
+	tool  func() consoleTool
+	perms []Permission
+	on    func(*Bot) bool
+	kinds []string
+}
+
+// consoleProposers are the propose_ tools in the order they are offered. A screen the assistant can
+// change something on adds its tool here with the focus kinds it belongs to (focusKinds).
+func (b *Bot) consoleProposers() []consoleProposer {
+	return []consoleProposer{
+		{tool: b.proposeChannelTool, perms: []Permission{PermScopesManage}},
+		{tool: b.proposeApprovalTool, perms: []Permission{PermApproversManage}},
+		// reviews.manage does not imply reviews.view (console_roles.go), and a card about a type or a list
+		// of branch rules the person cannot read is one they cannot check before they confirm it.
+		{tool: b.proposeReviewTypeTool, perms: []Permission{PermReviewsView, PermReviewsManage}, on: reviewsOn, kinds: reviewKinds},
+		{tool: b.proposeBranchRulesTool, perms: []Permission{PermReviewsView, PermReviewsManage}, on: reviewsOn, kinds: reviewKinds},
+	}
+}
+
+// onPage reports whether a reader or a proposer kept to a feature and to some pages is offered on
+// this call: its feature is on (on nil: always), and it belongs to every page (no kinds) or the
+// page's focus is one of its kinds. The focus is the resolved one, so a kind the browser merely
+// claimed — on another page, or by a caller who may not read what it names — offers nothing.
+func (c *consoleCall) onPage(b *Bot, on func(*Bot) bool, kinds []string) bool {
+	if on != nil && !on(b) {
+		return false
+	}
+	return len(kinds) == 0 || (c.Focus != nil && slices.Contains(kinds, c.Focus.Kind))
+}
+
+// holdsAll reports whether held has every permission in need.
+func holdsAll(held map[string]bool, need []Permission) bool {
+	for _, p := range need {
+		if !held[p] {
+			return false
+		}
+	}
+	return true
 }
 
 func (b *Bot) proposeChannelTool() consoleTool {
@@ -935,19 +1158,24 @@ func jsonResult(v any) string {
 // ---- the prompt ----
 
 // The stable half only. The page, the channel and the attached files go in the user message
-// instead: they change every turn, and withCache sets its breakpoint on the system message —
-// moving that prefix each turn is how a cache stops being one.
+// instead: they change every turn, and the cache breakpoint is on the system message — moving that
+// prefix each turn is how a cache stops being one. So does what holds on one page only
+// (focusKind.prompt): it rides with that page's line, and this stays the same bytes on every page.
+// runConsoleTurn sets the breakpoint itself (CachedSystemMessage) rather than leave it to withCache,
+// which passes over a system message shorter than minCacheChars, as this one is: the entry is worth
+// writing for the tool definitions in front of it, which this length says nothing about.
 const assistantPrompt = `You are the assistant inside the attest_tag admin console, helping one organisation's admin.
 
 You are talking to a console admin looking at a web page, not to anyone in Slack. Nothing you say reaches a Slack channel.
 
 PAGE CONTEXT
-A question may be preceded by a line naming the console page the person is on and, when the page had one selected, the channel it was showing. Treat that channel as the one they mean and do not ask which. If several such lines appear in a conversation, the most recent is where they are now. The id in that line is a hint for you; every tool resolves what it is given inside this organisation, so a tool result is the truth and the line is not.
+A question may be preceded by a line naming the console page the person is on and, when the page had something selected, what it was showing, such as a channel. Treat that as the one they mean and do not ask which. If several such lines appear in a conversation, the most recent is where they are now. The id in that line is a hint for you; every tool resolves what it is given inside this organisation, so a tool result is the truth and the line is not. A page with tools of its own adds what holds there after that line; follow it on that page.
 
 YOU CANNOT CHANGE ANYTHING
-The propose_ tools write nothing. Each checks a change and hands the person a card with a Confirm button; the change happens only if they press it. Say what you are proposing and why, say plainly that nothing has changed yet, and stop.
-Never say something has been changed, updated, saved or applied — you have no way to know, and you did not do it.
+The propose_ tools write nothing. Each checks a change and hands the person a card with a Confirm button; the change happens only if they press it. A staged card is not done: say what the card proposes and why, say plainly that nothing changes until they press Confirm, and stop.
+Never open with "Done", never write "I've added", "I've changed" or "I've set", and never say something has been changed, updated, saved or applied — you did not do it, and you have no way to know whether they will.
 If a proposal is refused, the reason you are given is the reason the save itself would have given. Repeat it rather than trying a different value.
+An earlier reply may end with [proposal "…": confirmed], [… not confirmed] or [… changed before Confirm]: that is the console telling you what the person did.
 
 WHAT YOU CAN SEE
 read_console lists exactly what this person may read; it changes with their permissions, so do not assume. If a resource is not in that list they cannot read it here, and neither can you — say so and name the page it lives on rather than guessing.
@@ -980,7 +1208,7 @@ func (b *Bot) runConsoleTurn(ctx context.Context, c *consoleCall, question strin
 		defs = append(defs, t.def())
 	}
 
-	msgs := []openai.ChatCompletionMessageParamUnion{openai.SystemMessage(assistantPrompt)}
+	msgs := []openai.ChatCompletionMessageParamUnion{CachedSystemMessage(assistantPrompt, "")}
 	for _, h := range history {
 		switch h.Role {
 		case "you":
@@ -1063,9 +1291,12 @@ func (c *consoleCall) userMessage(question string) (openai.ChatCompletionMessage
 // resolved row, which is what the tools use — the sentence is so the model knows a channel is
 // attached at all. A typed default with nothing said about it produces an assistant that asks
 // which channel while looking straight at one; a sentence with no typed default produces one
-// that quotes an id back at a tool instead of resolving it.
+// that quotes an id back at a tool instead of resolving it. A page focus is said the same way, after
+// the channel: its line was written from the row it resolved to (resolveFocus). What holds on that
+// page and nowhere else follows, in a bracket of its own, so a question asked anywhere else never
+// carries it.
 func (c *consoleCall) contextLine() string {
-	if c.Path == "" && c.Scope == nil {
+	if c.Path == "" && c.Scope == nil && c.Focus == nil {
 		return ""
 	}
 	var sb strings.Builder
@@ -1082,7 +1313,14 @@ func (c *consoleCall) contextLine() string {
 		fmt.Fprintf(&sb, `, showing the channel #%s (id %s) in %s — this is the channel they mean; do not ask which one`,
 			c.Scope.Name, c.Scope.SlackID, c.Scope.TeamName)
 	}
-	sb.WriteString("]\n\n")
+	if c.Focus != nil && c.Focus.Line != "" {
+		sb.WriteString(", " + c.Focus.Line)
+	}
+	sb.WriteString("]\n")
+	if c.Focus != nil && c.Focus.Prompt != "" {
+		sb.WriteString("[On this page:\n" + c.Focus.Prompt + "]\n")
+	}
+	sb.WriteString("\n")
 	return sb.String()
 }
 
@@ -1108,11 +1346,65 @@ func (b *Bot) runConsoleTool(ctx context.Context, c *consoleCall, byName map[str
 	if err != nil {
 		out = "error: " + err.Error()
 	}
-	result, _ := cutRunes(truncateToolOutput(redact(out)), assistantResultC)
+	result := consoleCut(truncateToolOutput(redact(out)), cmp.Or(c.resultCap, assistantResultC), c.resultMore)
+	c.resultCap, c.resultMore = 0, ""
 	logArgs, _ := cutRunes(string(args), 2000)
-	b.store.LogToolCall(ctx, c.OrgID, "", assistantChannel, "", name, logArgs, result, err == nil, ms)
+	// The assistant runs as an admin, and its reads reach what that admin may see — the audit log,
+	// the settings, the connections — none of which a plain activity.view holder is allowed to read
+	// directly. tool_calls is rendered on /activity to activity.view, so the result is kept out of
+	// it: the row records that the assistant ran a tool and how it went, not what came back. The
+	// person who ran it still sees the full result in the assistant panel (c.calls, below) and in
+	// their own turn history. The mark is what makes unmarkPrivate lay the row out as private.
+	//
+	// The arguments are kept, with what a reader must hold to be shown them (consoleArgNeeds), and the
+	// console's readers of the log withhold them from anybody else (unmarkPrivateFor). They are the
+	// model's, written from the question and from what it read before: one round's read of the audit log
+	// can be quoted in the next round's arguments as readily as in the reply.
+	loggedArgs := markPrivate(consoleLoggedArgs{Needs: consoleArgNeeds(t, args), Args: logArgs})
+	loggedResult := markPrivate(struct {
+		Bytes int  `json:"bytes"`
+		OK    bool `json:"ok"`
+	}{Bytes: len(result), OK: err == nil})
+	b.store.LogToolCall(ctx, c.OrgID, "", assistantChannel, "", name, loggedArgs, loggedResult, err == nil, ms)
 	c.calls = append(c.calls, assistantTool{Name: name, Args: logArgs, Result: result, OK: err == nil, MS: ms})
 	return result
+}
+
+// consoleArgNeeds is every permission a reader of the log must hold to be shown a call's arguments:
+// what the tool's own arguments are about (consoleTool.needs), and audit.view, which is what the
+// question and the reply of the same turn are shown for (GET /api/assistant/turns) — the arguments are
+// written from both, so they are no more anybody's to read than those are.
+func consoleArgNeeds(t consoleTool, args json.RawMessage) []string {
+	need := []string{PermAuditView}
+	own := []string{t.Perm}
+	if t.needs != nil {
+		own = t.needs(args)
+	}
+	for _, p := range own {
+		if p != "" && !slices.Contains(need, p) {
+			need = append(need, p)
+		}
+	}
+	slices.Sort(need)
+	return need
+}
+
+// consoleCutMore is what a cut result says to ask for when its reader has nothing more particular
+// to say (consoleReader.more).
+const consoleCutMore = "ask for fewer rows, a narrower filter, or one by its id"
+
+// consoleCut keeps a tool result within limit bytes and, when it had to cut, says so at its end. The
+// cut used to be silent: a list that ran past the cap just stopped, and a model counting what it
+// could see answered short by everything it could not, with nothing to tell it so. The mark is
+// inside the limit, so the limit is what reaches the model; and it is counted in bytes, as cutRunes
+// counts, since a line full of "·" and "—" is longer in bytes than in characters.
+func consoleCut(s string, limit int, more string) string {
+	if len(s) <= limit {
+		return s
+	}
+	mark := "\n…[cut — " + cmp.Or(more, consoleCutMore) + "]"
+	s, _ = cutRunes(s, max(limit-len(mark), 0))
+	return s + mark
 }
 
 // consoleModel is what a console turn runs on: the organisation's default, with "heavy"
