@@ -13,7 +13,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { api, type ToolCallRow } from "@/lib/api";
+import { ASSISTANT_CHANNEL, api, type ToolCallRow } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { formatBytes, formatDateTime, formatMillis } from "@/lib/format";
 
@@ -167,7 +167,13 @@ function CallDetail({ row }: { row: ToolCallRow }) {
       <Block
         title="Arguments"
         body={pretty(row.Args)}
-        empty={row.Private ? "Not logged." : "No arguments."}
+        empty={
+          row.Withheld?.length
+            ? `Hidden — reading them needs ${row.Withheld.join(", ")}.`
+            : row.Private
+              ? "Not logged."
+              : "No arguments."
+        }
       />
       <Block
         title="Output"
@@ -267,6 +273,8 @@ function parseKept(text: string): Kept | null {
 
 /** The row's line for what a private call asked: the endpoint it called, or whose it was. */
 function keptRequest(row: ToolCallRow): string {
+  // The console assistant's arguments are kept whole, for a reader who may see them.
+  if (row.Channel === ASSISTANT_CHANNEL) return row.Withheld?.length ? "Hidden" : row.Args;
   const k = parseKept(row.Args);
   if (k?.endpoint) return `${k.method ?? ""} ${k.endpoint.replace(/^https?:\/\//, "")}`.trim();
   if (k?.connection) return k.connection;
@@ -291,7 +299,11 @@ function PrivateNote({ row }: { row: ToolCallRow }) {
   const whose = k?.owner ? `${k.owner}'s` : "somebody's";
   const connection = k?.connection ? `${k.connection} connection` : "connection";
   let text: string;
-  if (!k) {
+  if (row.Channel === ASSISTANT_CHANNEL) {
+    text = row.Withheld?.length
+      ? "The console assistant made this call for somebody who asked it a question. Its arguments are written from that question and from what it read, so they are shown only to a reader who may read those; the log keeps the size of what came back."
+      : "The console assistant made this call for somebody who asked it a question. The log keeps its arguments, shown only to a reader who may read what they are about, and the size of what came back.";
+  } else if (!k) {
     text =
       "This call used somebody's own account or their personal notes, and was logged before the console kept whose it was.";
   } else if (NOTE_TOOLS.has(row.Name)) {

@@ -28,6 +28,8 @@ import { NewConnectionDialog } from "@/components/bundles/new-connection-dialog"
 import { AttachReposDialog } from "@/components/bundles/attach-repos-dialog";
 import { AttachScopesDialog } from "@/components/bundles/attach-scopes-dialog";
 import { RepoManagerDialog } from "@/components/bundles/repo-manager-dialog";
+import { takeInstallFromReviews } from "@/components/reviews/install-return";
+import { useRepoReviews } from "@/components/reviews/repo-review";
 import { RepoRecipeDialog } from "@/components/bundles/repo-recipe-dialog";
 import { RepoWritesDialog } from "@/components/bundles/repo-writes-dialog";
 import { RepoGroupList, type RepoBulkAction } from "@/components/bundles/repo-group-list";
@@ -121,6 +123,14 @@ export function BundlesPage() {
     const err = url.searchParams.get("github_error");
     const notice = url.searchParams.get("github_notice");
     if (installed === null && err === null && notice === null) return;
+    // Started from Reviews › Settings: a success goes on there, to the installation it names. A
+    // failure or a pending request is said here, where the toast is, and the mark is spent either way.
+    const fromReviews = takeInstallFromReviews();
+    if (installed !== null && err === null && notice === null && fromReviews) {
+      const next = new URLSearchParams({ tab: "settings", github_install: installed, connected_repos: url_connected });
+      window.location.replace(`/admin/reviews/?${next.toString()}`);
+      return;
+    }
     for (const p of [
       "github_install",
       "connected_repos",
@@ -155,6 +165,12 @@ export function BundlesPage() {
   // App in it should not call an endpoint to be told there is none.
   const installs = useInstallations(
     list.some((b) => (b.connections ?? []).some((c) => c.github_installation_id > 0)),
+  );
+  // Code review on each repository saved through the App — "review: shadow" on its row, and the way
+  // to its settings — asked for under the same condition: a repository only a token reaches is never
+  // reviewed, and a list with none of the App's has nothing to ask about.
+  const review = useRepoReviews(
+    list.some((b) => (b.connections ?? []).some((c) => c.cred_type === "github_app")),
   );
   // Looked up by id so the editor sees fresh data after every reload.
   const managing = list.find((b) => b.id === managingId) ?? null;
@@ -424,6 +440,7 @@ export function BundlesPage() {
               onRepoBulk={onRepoBulk}
               installs={installs}
               canAttach={canAttach}
+              review={review}
             />
           ))}
         </div>
@@ -540,6 +557,7 @@ export function BundlesPage() {
             onAction={onConnectionAction}
             onBulk={onRepoBulk}
             checkGitHub
+            review={review}
           />
         )}
       </RepoManagerDialog>

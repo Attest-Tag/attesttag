@@ -242,14 +242,15 @@ SECRET_KEYS = [
     "SLACK_SIGNING_SECRET", "OPENROUTER_API_KEY", "LLM_API_KEY", "MASTER_KEY", "MASTER_KEY_PREVIOUS",
     "SLACK_CLIENT_ID", "SLACK_CLIENT_SECRET", "RESEND_API_KEY", "OPENROUTER_PROVISIONING_KEY",
     "WORKER_LLM_API_KEY", "WORKER_ENGINE_API_KEY", "HEALTH_SECRET", "OPERATOR_SECRET",
-    "GITHUB_APP_PRIVATE_KEY_B64", "GITHUB_APP_CLIENT_SECRET", "DATABASE_URL",
+    "GITHUB_APP_PRIVATE_KEY_B64", "GITHUB_APP_CLIENT_SECRET", "GITHUB_APP_WEBHOOK_SECRET",
+    "GITHUB_APP_WEBHOOK_SECRET_PREVIOUS", "DATABASE_URL",
     "DOCS_S3_KEY_ID", "DOCS_S3_SECRET", "MSTEAMS_APP_PASSWORD",
 ]
 # Plain settings. DOCS_S3_URL names a bucket and carries no credential, so it is not a secret.
 PLAIN_KEYS = ["DOCS_S3_URL", "LLM_BASE_URL", "LLM_MODEL", "HEAVY_MODEL", "EMBED_MODEL",
-              "MAIL_FROM", "SIGNUP_MODE", "ORG_MODEL_KEYS", "TZ_NAME", "LOG_LEVEL",
+              "MAIL_FROM", "SIGNUP_MODE", "ORG_MODEL_KEYS", "CODE_REVIEW", "TZ_NAME", "LOG_LEVEL",
               # The GitHub App's public half: the id, and the slug in the install URL people
-              # click. Its private key and client secret are listed above.
+              # click. Its private key, client secret and webhook secrets are listed above.
               "GITHUB_APP_ID", "GITHUB_APP_SLUG", "GITHUB_APP_CLIENT_ID",
               # Microsoft Teams (guide/msteams.md). The ids are in the app package every tenant
               # installs, so they are not secrets; MSTEAMS_APP_PASSWORD is, and is listed above.

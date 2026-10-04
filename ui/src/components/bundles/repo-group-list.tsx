@@ -1,8 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Copy, GitBranch, MoreHorizontal, Pencil, RefreshCw, Terminal, Trash2, Zap } from "lucide-react";
+import Link from "next/link";
+import { Copy, GitBranch, GitPullRequest, MoreHorizontal, Pencil, RefreshCw, Terminal, Trash2, Zap } from "lucide-react";
 import { StatusChip } from "@/components/core/status-chip";
+import type { RepoReview, RepoReviewLookup } from "@/components/reviews/repo-review";
 import {
   testConnection,
   type ConnectionAction,
@@ -41,6 +43,7 @@ export function RepoGroupList({
   onAction,
   onBulk,
   checkGitHub = false,
+  review = null,
 }: {
   connections: Connection[];
   /** null until the installations endpoint answers; a group is named by its id until then. */
@@ -51,6 +54,9 @@ export function RepoGroupList({
    * per source, so only where somebody has deliberately opened the manager — not on every visit
    * to the Bundles page. */
   checkGitHub?: boolean;
+  /** How code review stands on each App-backed repository; null where it cannot say (no
+   * permission, not loaded), and then the rows say nothing about review at all. */
+  review?: RepoReviewLookup | null;
 }) {
   // Collapsed groups are how one person left one screen, so they live in this browser.
   const groupOpen = useStickyFlags("repos:groups");
@@ -77,6 +83,13 @@ export function RepoGroupList({
   const setGroup = (ids: number[], on: boolean) =>
     setPicked((cur) => (on ? [...new Set([...cur, ...ids])] : cur.filter((id) => !ids.includes(id))));
   const chosen = connections.filter((c) => isPicked(c.id));
+  // Only a repository saved through the App can be reviewed: GitHub tells nobody about a
+  // token-only repository's pull requests, so it has no review line and no settings to open.
+  const reviewOf = (c: Connection): RepoReview | null =>
+    review && c.cred_type === "github_app" ? review(c.repo, c.github_installation_id) : null;
+  // Set review: one repository opens on itself; several open on the connection of the first, which
+  // is where settings for more than one repository at a time are made.
+  const firstReviewable = chosen.map(reviewOf).find((r) => r !== null) ?? null;
 
   return (
     <div>
@@ -102,6 +115,7 @@ export function RepoGroupList({
               source.rows.map((c) => {
                 const active = (c.status || "active") === "active";
                 const alone = c.scope_ids?.length ?? 0;
+                const rv = reviewOf(c);
                 return (
                   <div
                     key={c.id}
@@ -126,6 +140,8 @@ export function RepoGroupList({
                       <p className="truncate text-xs text-muted-foreground">
                         {c.writes === "auto" ? "writes automatic" : c.writes === "all" ? "every call confirmed" : "writes confirmed in Slack"}
                         {alone > 0 && ` · on its own in ${alone} scope${alone === 1 ? "" : "s"}`}
+                        {/* The why in the line itself, not a tooltip: a phone and a keyboard never see a title. */}
+                        {rv && ` · review: ${rv.mode}${rv.why ? ` (${rv.why})` : ""}`}
                       </p>
                     </div>
                     {!active && <StatusChip variant="warning">{c.status}</StatusChip>}
@@ -154,6 +170,13 @@ export function RepoGroupList({
                         <DropdownMenuItem onClick={() => onAction("copy", c)}>
                           <Copy className="size-4" /> Copy to bundle…
                         </DropdownMenuItem>
+                        {rv && (
+                          <DropdownMenuItem asChild>
+                            <Link href={rv.repoHref}>
+                              <GitPullRequest className="size-4" /> Code review settings…
+                            </Link>
+                          </DropdownMenuItem>
+                        )}
                         <DropdownMenuSeparator />
                         <DropdownMenuItem variant="destructive" onClick={() => onAction("delete", c)}>
                           <Trash2 className="size-4" /> Delete
@@ -176,6 +199,13 @@ export function RepoGroupList({
         <Button variant="outline" size="sm" onClick={() => onBulk("recipe", chosen)}>
           Set recipe
         </Button>
+        {firstReviewable && (
+          <Button variant="outline" size="sm" asChild>
+            <Link href={chosen.length === 1 ? firstReviewable.repoHref : firstReviewable.connHref}>
+              Set review
+            </Link>
+          </Button>
+        )}
         <Button variant="outline" size="sm" onClick={() => onBulk("delete", chosen)}>
           Remove
         </Button>

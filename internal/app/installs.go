@@ -467,6 +467,10 @@ func (n *conversationNamer) name(ctx context.Context, teamID, channel string) st
 		return ""
 	case channel == assistantChannel:
 		return "Console assistant"
+	case strings.HasPrefix(channel, "github:"):
+		// Code review files its spend under the repository it reviewed (review_lane.go), which is
+		// no conversation anywhere: named for what it is, rather than asked of Slack.
+		return "Code review · " + strings.TrimPrefix(channel, "github:")
 	case isDirectConversation(channel):
 		// Ahead of the scopes, because a Slack DM can have a scope row of its own, named "#DM".
 		if n.people == nil {

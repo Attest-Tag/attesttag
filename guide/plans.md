@@ -34,6 +34,12 @@ under the topbar on every page — "the bot has stopped replying" — with the s
 and the budget that decide it. The bot's refusal in Slack and the alert name the address as before.
 There is no self-serve upgrade: a person reads the request and decides.
 
+Code review follows `CODE_REVIEW` ([who has it](code-review.md#who-has-code-review)). Where it is
+`pro`, as on the hosted service, a free account has none: its pull requests are not reviewed, the
+console's Reviews page says it needs the Pro plan, with the Upgrade button (or *Choose a plan* where
+billing is on), and moving the account to pro or enterprise switches it on within seconds, with its
+settings and history as they were.
+
 ## The operator page
 
 That message carries a link, `<your-origin>/operator/plan?org=<id>`, and the reply is one
@@ -232,4 +238,8 @@ embedding endpoint or model re-indexes the account's documents in the background
 meantime says the documents are being indexed again. A fix job runs the repository's own code with
 the model key in its environment, so the key form has a **Fix jobs** switch. It is off for a new key,
 switching it on asks for the same proof as a new key, and while it is off fix jobs are refused while
-the key is in use.
+the key is in use. Code review spends the key too — on every pull request it reviews, and on every
+reply it answers — so the form has a **Code reviews** switch as well, which works the same way: off
+for a new key, the same proof to turn on, and recorded in `model_key.saved`. While it is off every
+review is skipped as `own_key_off`, and a pull request that asked is told only that code review
+cannot run for the organisation right now, and that an admin can see why in the console.

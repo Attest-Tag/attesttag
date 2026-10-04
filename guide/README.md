@@ -26,6 +26,7 @@ The [README](../README.md) is the two-minute version. This is the rest of it.
 | [Connections](connections.md) | Reaching GitHub, ClickUp, Google Workspace and the rest without the model ever holding a credential |
 | [**Google**](google.md) | Two Google integrations that get confused for each other: mail and calendar on each person's own account, and a Drive folder mirrored into Documents |
 | [Fix jobs](fix-jobs.md) | Handing a code change to a worker that clones, edits, tests and opens a draft pull request |
+| [Code review](code-review.md) | Reviewing pull requests on GitHub: shadow and live, review types and branch rules, commands, replies, and what it costs |
 | [Admin console](console.md) | The pages, signing in, and the member-facing Configure page |
 | [Developer API](api.md) | `/v1`, authenticated with a key that carries its maker's access and nothing more |
 | [MCP server](mcp.md) | The same API as tools for Claude, Cursor and any MCP client, connected with OAuth or a key |

@@ -264,6 +264,23 @@ func (a *Agent) githubFindCode(ctx context.Context, c *Call, base, query, want s
 	if err != nil {
 		return "", err
 	}
+	return findCodeIn(ctx, all, base, terms, limit, "github_find_file",
+		func(ctx context.Context, conn *Connection, u string, out any) (ghResult, error) {
+			return a.getJSONFrom(ctx, c, conn, u, out)
+		})
+}
+
+// codeSearchGet sends one code search request under conn's own credential and decodes the answer
+// into out.
+type codeSearchGet func(ctx context.Context, conn *Connection, url string, out any) (ghResult, error)
+
+// findCodeIn is the search itself, one request per repository in all, each sent by get: under a
+// channel's connections for github_find_code, and under a review's read-only token for code
+// review's find_code (review_engine.go). One loop for both, so they cannot drift apart in how
+// they cap the fan-out, stop on a spent rate limit, or tell a refusal from an empty result —
+// which is the difference between "the code is not there" and "nobody would look". byPath names
+// the caller's tool for finding files by path, for when GitHub will not search at all.
+func findCodeIn(ctx context.Context, all []*Connection, base, terms string, limit int, byPath string, get codeSearchGet) (string, error) {
 	targets, capped := capTargets(all)
 
 	var b strings.Builder
@@ -277,8 +294,7 @@ func (a *Agent) githubFindCode(ctx context.Context, c *Call, base, query, want s
 			} `json:"items"`
 		}
 		q := terms + " repo:" + conn.Repo
-		r, err := a.getJSONFrom(ctx, c, conn,
-			fmt.Sprintf("%s/search/code?q=%s&per_page=%d", base, url.QueryEscape(q), limit), &res)
+		r, err := get(ctx, conn, fmt.Sprintf("%s/search/code?q=%s&per_page=%d", base, url.QueryEscape(q), limit), &res)
 		if err != nil {
 			// A spent budget stops the fan-out there and says so. Carrying on would spend the
 			// next minute's allowance too and still answer nothing.
@@ -307,8 +323,8 @@ func (a *Agent) githubFindCode(ctx context.Context, c *Call, base, query, want s
 		}
 	}
 	if refused == len(targets) && refused > 0 {
-		return "", fmt.Errorf("GitHub would not search the code with this channel's credential (%d refused). "+
-			"Code search is not open to every kind of token; use github_find_file to find files by name and path instead", refused)
+		return "", fmt.Errorf("GitHub would not search the code with the credentials this search was given (%d refused). "+
+			"Code search is not open to every kind of token; use %s to find files by name and path instead", refused, byPath)
 	}
 	if n == 0 {
 		return fmt.Sprintf("No code matches %q in %s.%s Only the default branch is searched, and only files under 384 KB.",

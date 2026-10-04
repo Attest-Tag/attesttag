@@ -147,6 +147,46 @@ func privateLine(s, rawURL string) string {
 	return s
 }
 
+// consoleLoggedArgs is what the log keeps of a console assistant call's arguments, after the mark:
+// the arguments, and every permission a reader must hold to be shown them (consoleArgNeeds). The
+// assistant runs as whoever asked, so its arguments can be about — and quote — what only they may
+// read, on a page anybody holding activity.view opens.
+type consoleLoggedArgs struct {
+	Needs []string `json:"needs"`
+	Args  string   `json:"args"`
+}
+
+// unmarkPrivateFor is unmarkPrivate for a reader holding perms, which is how every console reader of
+// the log reads a row. A console assistant call's arguments are kept for a reader holding everything
+// they need, and withheld from anybody else — Withheld then says what that is. A row logged before the
+// arguments said what they need is read as the turn's own words are, by audit.view; so is one logged
+// before the assistant's calls were kept private at all, whose result is withheld with its arguments.
+func (t *ToolCallRow) unmarkPrivateFor(perms map[string]bool) {
+	t.unmarkPrivate()
+	if t.Channel != assistantChannel {
+		return
+	}
+	if !t.Private {
+		if !perms[PermAuditView] {
+			t.Private, t.Args, t.Result, t.Withheld = true, "", "", []string{PermAuditView}
+		}
+		return
+	}
+	var kept struct {
+		Needs *[]string `json:"needs"`
+		Args  *string   `json:"args"`
+	}
+	needs, args := []string{PermAuditView}, t.Args
+	if json.Unmarshal([]byte(t.Args), &kept) == nil && kept.Needs != nil && kept.Args != nil {
+		needs, args = *kept.Needs, *kept.Args
+	}
+	if holdsAll(perms, needs) {
+		t.Args = args
+		return
+	}
+	t.Args, t.Withheld = "", needs
+}
+
 // unmarkPrivate is how the console reads a row: the flag set, and the mark taken off what the log
 // kept so the page can lay it out. The arguments decide, because a tool's own arguments are JSON
 // and cannot begin with the mark, where a result might quote it. A repeated call the guard

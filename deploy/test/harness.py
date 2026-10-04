@@ -663,6 +663,7 @@ HOSTED_POLICY = {
     "SITE_URL": "https://attesttag.com",
     "FREE_PLAN_BUDGET_USD": "5",
     "ORG_MODEL_KEYS": "enterprise",
+    "CODE_REVIEW": "pro",
 }
 
 
@@ -921,6 +922,72 @@ def _():
         ok(env.get(key, {}).get("value") == value, "containerapps.sh deployed %s=%r" % (key, env.get(key)))
     ok(env.get("LLM_API_KEY", {}).get("secretRef") == "llm-api-key", "containerapps.sh did not pass LLM_API_KEY as a secret")
     ok(llm_key not in r.output, "containerapps.sh printed LLM_API_KEY")
+
+
+@scenario("all: CODE_REVIEW in the env file reaches the container as it is, and nothing deploys one unasked")
+def _():
+    # Which organisations have code review is a plan policy, so it travels as a plain variable on
+    # every platform, as ORG_MODEL_KEYS does. Unset, nothing is deployed and the binary's default —
+    # all, a deployment of one organisation — holds; only HOSTED=1 names pro on Cloud Run.
+    r = aws_deploy(env_extra={"CODE_REVIEW": "enterprise"})
+    container = json.loads(r.capture("taskdef-attesttag-1.json"))["containerDefinitions"][0]
+    env = {e["name"]: e["value"] for e in container["environment"]}
+    ok(env.get("CODE_REVIEW") == "enterprise", "fargate.sh deployed CODE_REVIEW=%r" % env.get("CODE_REVIEW"))
+    r = aws_deploy()
+    container = json.loads(r.capture("taskdef-attesttag-1.json"))["containerDefinitions"][0]
+    ok("CODE_REVIEW" not in {e["name"] for e in container["environment"]}, "fargate.sh deployed a CODE_REVIEW nobody set")
+
+    r = azure_deploy(dict(S3_ENV, CODE_REVIEW="off"))
+    env = {e["name"]: e for e in spec_of(r)["properties"]["template"]["containers"][0]["env"]}
+    ok(env.get("CODE_REVIEW", {}).get("value") == "off", "containerapps.sh deployed CODE_REVIEW=%r" % env.get("CODE_REVIEW"))
+    r = azure_deploy(dict(S3_ENV))
+    env = {e["name"]: e for e in spec_of(r)["properties"]["template"]["containers"][0]["env"]}
+    ok("CODE_REVIEW" not in env, "containerapps.sh deployed a CODE_REVIEW nobody set")
+
+    r, envs = gcp_deploy(".env", extra={"CODE_REVIEW": "enterprise"})
+    ok(envs.get("CODE_REVIEW") == "enterprise", "cloudrun.sh deployed CODE_REVIEW=%r" % envs.get("CODE_REVIEW"))
+    r, envs = gcp_deploy(".env.prod", extra={"HOSTED": "1", "CODE_REVIEW": "all"})
+    ok(envs.get("CODE_REVIEW") == "all", "the env file's CODE_REVIEW lost to HOSTED=1: %r" % envs.get("CODE_REVIEW"))
+
+
+@scenario("all: the GitHub App's webhook secrets reach the container as secrets")
+def _():
+    # Code review hears from GitHub only through POST /github/webhook, and the secret it checks
+    # every delivery with is as much a credential as the App's key: anybody holding it can make a
+    # delivery up. Both it and the previous one kept during a rotation go the secrets' way on every
+    # platform, never as a plain variable and never into the script's output.
+    hook = {"GITHUB_APP_WEBHOOK_SECRET": "fake0webhook0secret0current000000",
+            "GITHUB_APP_WEBHOOK_SECRET_PREVIOUS": "fake0webhook0secret0previous00000"}
+
+    r, envs = gcp_deploy(".env", extra=hook)
+    argv = json.loads(r.capture("run-deploy.json") or "[]")
+    secrets = argv[argv.index("--set-secrets") + 1] if "--set-secrets" in argv else ""
+    for key in hook:
+        name = "attesttag-" + key.lower().replace("_", "-")
+        ok("%s=%s:latest" % (key, name) in secrets.split(","), "cloudrun.sh did not pass %s as a secret: %s" % (key, secrets))
+        ok(key not in envs, "cloudrun.sh passed %s as a plain variable" % key)
+    ok(not any(v in r.output for v in hook.values()), "cloudrun.sh printed a webhook secret")
+
+    r = aws_deploy(env_extra=hook)
+    container = json.loads(r.capture("taskdef-attesttag-1.json"))["containerDefinitions"][0]
+    for key in hook:
+        ok(key in {s["name"] for s in container["secrets"]}, "fargate.sh did not pass %s as a secret" % key)
+    ok(not any(v in json.dumps(container["environment"]) or v in r.output for v in hook.values()),
+       "fargate.sh put a webhook secret somewhere other than the secret")
+
+    r = azure_deploy(dict(S3_ENV, **hook))
+    doc = spec_of(r)
+    env = {e["name"]: e for e in doc["properties"]["template"]["containers"][0]["env"]}
+    for key in hook:
+        ref = key.lower().replace("_", "-")
+        ok(env.get(key, {}).get("secretRef") == ref, "containerapps.sh did not pass %s as a secret: %r" % (key, env.get(key)))
+    ok(not any(v in r.output for v in hook.values()), "containerapps.sh printed a webhook secret")
+
+    # Unset, the previous secret is not deployed at all: removing the line is what retires it.
+    r, envs = gcp_deploy(".env", extra={"GITHUB_APP_WEBHOOK_SECRET": hook["GITHUB_APP_WEBHOOK_SECRET"]})
+    argv = json.loads(r.capture("run-deploy.json") or "[]")
+    ok("GITHUB_APP_WEBHOOK_SECRET_PREVIOUS" not in argv[argv.index("--set-secrets") + 1],
+       "cloudrun.sh deployed a previous webhook secret nobody set")
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════
 # CREATE_DATABASE — the opt-in that creates a managed Postgres

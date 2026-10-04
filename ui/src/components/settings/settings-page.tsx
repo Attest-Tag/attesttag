@@ -38,6 +38,7 @@ import { AccountPanel } from "@/components/settings/account-panel";
 import { BillingPanel } from "@/components/settings/billing-panel";
 import { DeleteAccountPanel } from "@/components/settings/delete-account-panel";
 import { ModelKeyPanel } from "@/components/settings/model-key-panel";
+import { ReviewBudgetGroup } from "@/components/settings/review-budget-group";
 import { WebKeyPanel } from "@/components/settings/web-key-panel";
 import { SecurityPanel } from "@/components/settings/security-panel";
 import { ConsoleRolesPanel } from "@/components/settings/console-roles-panel";
@@ -388,7 +389,10 @@ function SettingsForm({ data, onSaved }: { data: SettingsResponse; onSaved: () =
 
       {billingEnabled && (
         <TabsContent value="billing" className="space-y-5">
-          <BillingPanel onSaved={onSaved} />
+          <BillingPanel
+            onSaved={onSaved}
+            afterCredit={<ReviewBudgetGroup settings={data} onSaved={onSaved} />}
+          />
         </TabsContent>
       )}
 
@@ -772,6 +776,10 @@ function SettingsForm({ data, onSaved }: { data: SettingsResponse; onSaved: () =
 
           <div className="px-1">{saveBar}</div>
         </form>
+        {/* Code review's caps sit with the monthly budget they are a share of: on Billing where
+            there is one, here where the budget is. Their own form, after this one, since each
+            row saves by itself and the two need a permission the rest of the tab does not. */}
+        {!billingEnabled && <ReviewBudgetGroup settings={data} onSaved={onSaved} />}
       </TabsContent>
 
       <TabsContent value="web" className="space-y-5">

@@ -61,8 +61,11 @@ export function AppSidebar() {
   // answered there is nothing to check against, and the rail shows everything rather than
   // flickering an entry in a moment later.
   const perms = me?.user?.permissions;
-  const visible = (item: { permission?: string }) =>
-    !item.permission || !perms || perms[item.permission] === true;
+  // A feature this deployment has turned off goes the same way: only an explicit "off" hides it, so
+  // an organisation whose plan lacks code review still finds the page that says which plan has it.
+  const visible = (item: { permission?: string; feature?: "code_review" }) =>
+    (!item.permission || !perms || perms[item.permission] === true) &&
+    !(item.feature && me?.[item.feature]?.reason === "off");
 
   const { isMobile, setOpenMobile } = useSidebar();
   React.useEffect(() => {

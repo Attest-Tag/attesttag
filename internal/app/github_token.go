@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 )
@@ -25,14 +27,68 @@ import (
 //
 // The cache is keyed on the installation rather than the connection, because twenty repository
 // connections under one install would otherwise mint twenty tokens where one exchange plus a
-// repository scope does. The digest slot carries the scope so two differently-scoped tokens for
-// one installation cannot be handed to each other.
+// repository scope does. The digest slot carries the scope — the repository and the permission
+// set — so two differently-scoped tokens for one installation cannot be handed to each other.
+
+// Token purposes. What a minted token may do is chosen by the Go code asking for it, never by a
+// model: ProxyRequest.Purpose has no JSON name, so no tool argument and no held write can carry
+// one. The default is the set every caller had before purposes existed — the fix-job push and the
+// Slack tools — and it never grows: a permission the App gains later is asked for by a new
+// purpose, so a token leaked from a worker reaches no more than it did the day it was written.
+//
+// Code review asks for two narrower ones. Reading a pull request needs nothing that writes, and
+// review_read is read-only, so a review that is talked into anything at all by the code it is
+// reading holds a token that cannot act on it. Posting needs only pull_requests:write — not
+// contents, which is the fix-job push, and not issues: GitHub documents the issue-comment
+// endpoints a summary is posted and edited through as open to either Issues or Pull requests on a
+// pull request, and whether that holds for an installation token is a thing to learn live. If it
+// does not, the fix is issues:write here and in nothing else, and every installation owner is then
+// asked to accept the new permission.
+const (
+	githubPurposeDefault    = ""
+	githubPurposeReviewRead = "review_read"
+	githubPurposeReviewPost = "review_post"
+)
+
+// githubPurposePermissions is the one list of what each purpose's token may do, pinned by
+// TestGitHubPurposePermissions so that widening one is a change somebody makes on purpose.
+var githubPurposePermissions = map[string]map[string]string{
+	githubPurposeDefault:    {"contents": "write", "pull_requests": "write"},
+	githubPurposeReviewRead: {"contents": "read", "pull_requests": "read"},
+	githubPurposeReviewPost: {"pull_requests": "write"},
+}
+
+// githubTokenPermissions is the permission set a purpose mints with, as a copy the caller may
+// keep. An unknown purpose is refused rather than read as the default: a caller that spelled
+// "review_read" wrong asked for less than the default, and must not be handed more.
+func githubTokenPermissions(purpose string) (map[string]string, error) {
+	perms, ok := githubPurposePermissions[purpose]
+	if !ok {
+		return nil, fmt.Errorf("unknown GitHub token purpose %q", truncate(purpose, 40))
+	}
+	return maps.Clone(perms), nil
+}
+
+// permissionList is a permission set as one stable line, "contents:read,pull_requests:read",
+// sorted so the same set always reads the same — for the cache key and for an error message.
+func permissionList(perms map[string]string) string {
+	parts := make([]string, 0, len(perms))
+	for k, v := range perms {
+		parts = append(parts, k+":"+v)
+	}
+	slices.Sort(parts)
+	return strings.Join(parts, ",")
+}
 
 // installTokenKey identifies a minted token by the installation it came from and what it was
-// scoped to. Not exchangeKey: that digests the whole secret, which here is just the installation
-// id, so every scope under one install would collide on the same key.
-func installTokenKey(installationID int64, repo string) tokenCacheKey {
-	return tokenCacheKey{id: installationID, kind: "github_app", digest: sha256.Sum256([]byte(strings.ToLower(repo)))}
+// scoped to: the repository and the permission set. Not exchangeKey: that digests the whole
+// secret, which here is just the installation id, so every scope under one install would collide
+// on the same key. The permissions are in the digest so a review's read-only token is never
+// handed to a fix job that needs to push, and — the direction that matters — a fix job's
+// write token is never handed to a review that asked for a read-only one.
+func installTokenKey(installationID int64, repo string, perms map[string]string) tokenCacheKey {
+	return tokenCacheKey{id: installationID, kind: "github_app",
+		digest: sha256.Sum256([]byte(strings.ToLower(repo) + "\x00" + permissionList(perms)))}
 }
 
 // forgetInstallToken drops every token minted from one installation. Needed because forgetToken
@@ -51,8 +107,13 @@ func (p *Proxy) forgetInstallToken(installationID int64) {
 	p.mu.Unlock()
 }
 
-// installationToken returns a token for this connection's installation, scoped to its repository.
-func (p *Proxy) installationToken(ctx context.Context, orgID int64, conn *Connection, s *Secret) (string, error) {
+// installationToken returns a token for this connection's installation, scoped to its repository
+// and to what purpose says it is for (githubPurposePermissions).
+func (p *Proxy) installationToken(ctx context.Context, orgID int64, conn *Connection, s *Secret, purpose string) (string, error) {
+	perms, err := githubTokenPermissions(purpose)
+	if err != nil {
+		return "", err
+	}
 	id := s.InstallationID
 	if id == 0 {
 		id = conn.GitHubInstallationID
@@ -73,11 +134,11 @@ func (p *Proxy) installationToken(ctx context.Context, orgID int64, conn *Connec
 	if err := p.installBelongsTo(ctx, orgID, id); err != nil {
 		return "", err
 	}
-	key := installTokenKey(id, conn.Repo)
+	key := installTokenKey(id, conn.Repo, perms)
 	if tok, ok := p.cached(key); ok {
 		return tok, nil
 	}
-	tok, expires, err := p.mintInstallationToken(ctx, id, conn.Repo)
+	tok, expires, err := p.mintInstallationToken(ctx, id, conn.Repo, perms)
 	if err != nil {
 		// Without a webhook this is how an uninstall or a narrowed selection reaches us: the
 		// next call says so. Record it on the installation so the console can explain it once
@@ -117,19 +178,24 @@ func (p *Proxy) installBelongsTo(ctx context.Context, orgID, id int64) error {
 	return nil
 }
 
-// mintInstallationToken does the exchange itself: app JWT in, installation token out.
-func (p *Proxy) mintInstallationToken(ctx context.Context, id int64, repo string) (string, time.Time, error) {
+// mintInstallationToken does the exchange itself: app JWT in, installation token out, holding
+// perms and nothing more.
+func (p *Proxy) mintInstallationToken(ctx context.Context, id int64, repo string, perms map[string]string) (string, time.Time, error) {
+	if len(perms) == 0 {
+		// GitHub reads no permissions field as "everything the installation was granted", which
+		// is exactly the token this is here to never mint.
+		return "", time.Time{}, errors.New("an installation token must name the permissions it is for")
+	}
 	jwt, err := p.ghApp.jwt(time.Now())
 	if err != nil {
 		return "", time.Time{}, err
 	}
-	// Narrow the token to what attest_tag actually does with it — read and write file contents
-	// (clone, push a branch) and open pull requests — rather than everything the App was granted.
-	// GitHub only ever narrows here, and metadata:read (which code search needs) is always
-	// included implicitly, so this holds for both callers: the fix-job push and the proxy's
-	// cross-repo search. Without it, a token leaked from the worker could reach issues, actions,
-	// deployments or anything else in the App's grant.
-	fields := map[string]any{"permissions": map[string]string{"contents": "write", "pull_requests": "write"}}
+	// Narrow the token to what the caller does with it rather than everything the App was granted:
+	// for the default purpose, read and write file contents (clone, push a branch) and open pull
+	// requests. GitHub only ever narrows here, and metadata:read (which code search needs) is
+	// always included implicitly. Without it, a token leaked from the worker could reach issues,
+	// actions, deployments or anything else in the App's grant.
+	fields := map[string]any{"permissions": perms}
 	if repo != "" {
 		// The bare name, not owner/name: GitHub scopes by repository within the installation's
 		// own account. This is the whole security win over a pasted token, and it costs nothing.
@@ -162,7 +228,7 @@ func (p *Proxy) mintInstallationToken(ctx context.Context, id int64, repo string
 	}
 	json.Unmarshal(raw, &out)
 	if resp.StatusCode >= 400 || out.Token == "" {
-		return "", time.Time{}, &installTokenError{status: resp.StatusCode, msg: out.Message, repo: repo, id: id}
+		return "", time.Time{}, &installTokenError{status: resp.StatusCode, msg: out.Message, repo: repo, id: id, perms: permissionList(perms)}
 	}
 	expires, err := time.Parse(time.RFC3339, out.ExpiresAt)
 	if err != nil {
@@ -179,14 +245,22 @@ type installTokenError struct {
 	msg    string
 	repo   string
 	id     int64
+	perms  string // what was asked for, permissionList's form
 }
 
 func (e *installTokenError) Error() string {
 	switch {
 	case e.status == 404:
 		return fmt.Sprintf("the GitHub App installation %d no longer exists: it was uninstalled at GitHub. Install it again from the console", e.id)
+	case e.status == 422 && strings.Contains(strings.ToLower(e.msg), "permission"):
+		// The App asks for more than this installation has accepted: a new version of the App
+		// added a permission, and GitHub holds it back until an owner of the account accepts it.
+		// Nothing in the repository selection is wrong, and saying so sent people to the wrong page.
+		return fmt.Sprintf("the GitHub App installation %d has not accepted the permissions this needs (%s). An owner of the account accepts the App's new permissions at GitHub, under the installation's Configure page", e.id, e.perms)
 	case e.status == 422 && e.repo != "":
-		return fmt.Sprintf("%s is not in this installation's repository selection. Add it at GitHub under the app's Configure page", e.repo)
+		// GitHub's 422 says one of two things and the message is the only way to tell them apart,
+		// so when it says neither plainly both are named.
+		return fmt.Sprintf("GitHub would not mint a token for %s (%s): either it is not in this installation's repository selection, or the installation has not accepted the App's new permissions. Both are fixed at GitHub on the installation's Configure page", e.repo, truncate(e.msg, 160))
 	case e.status == 403 && strings.Contains(strings.ToLower(e.msg), "suspend"):
 		return fmt.Sprintf("the GitHub App installation %d is suspended. An account owner unsuspends it at GitHub", e.id)
 	case e.status == 401 && strings.Contains(e.msg, "exp"):

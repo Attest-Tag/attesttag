@@ -304,6 +304,10 @@ type Agent struct {
 	sweepAccess func(ctx context.Context)
 	// cancelled rewrites the approver's card when a requester withdraws, for the same reason.
 	cancelled func(ctx context.Context, rs []AccessRequest, by string)
+	// startReview queues a code review somebody asked for in a channel (review_chat.go). It lives
+	// on Bot, with the review lane, and is nil where code review is off, which is what keeps
+	// github_start_review out of the tool list there.
+	startReview func(ctx context.Context, c *Call, repo string, pr int, types []string, shadow bool) (string, error)
 }
 
 func NewAgent(cfg Config, llm *LLM, slacks *ChatRegistry, st *Store, ix *Indexer, rs *Resolver, px *Proxy, sc *settingsCache) *Agent {

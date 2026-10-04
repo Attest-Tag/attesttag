@@ -66,6 +66,21 @@ const CATALOGUE: PermissionGroup[] = [
     ],
   },
   {
+    title: "Code review",
+    items: [
+      {
+        key: "reviews.view",
+        label: "See reviews",
+        hint: "Reviews of pull requests, what they found and what they cost",
+      },
+      {
+        key: "reviews.manage",
+        label: "Manage reviews",
+        hint: "Review types and rules, shadow mode and noise settings, and starting a review. Posting live, models and money also need Manage connections",
+      },
+    ],
+  },
+  {
     title: "Developer",
     items: [
       {

@@ -1,0 +1,38 @@
+<!-- attest_tag:review=0123456789abcdef0123456789abcdef.081c9d1c6d5ac86a -->
+### attest_tag review · Reviewing `ab12cd3`…
+
+Merge after fixing **Tenant check missing on list query** (P1, `src/totals.ts:L50-52`) and 1 more.
+
+<details open><summary>Summary</summary>
+
+Adds per-organisation item lists and a totals refresh.  Thanks @⁠octocat!
+
+</details>
+
+<details open><summary>Open findings (2)</summary>
+
+**P1** · Security · [Tenant check missing on list query](https://github.com/acme/web/pull/7#discussion_r101) · [`src/totals.ts:L50-52`](https://github.com/acme/web/blob/ab12cd3ef45678901234567890abcdef12345678/src/totals.ts#L50-L52) · open
+<details><summary>Code</summary>
+
+```ts
+38   func listOrders(w http.ResponseWriter, r *http.Request) {
+39   	rows := db.Query("select * from orders where status = $1", r.URL.Query().Get("status"))
+40   	json.NewEncoder(w).Encode(rows)
+41   }
+```
+
+</details>
+
+- **P2** · General · No test for the empty totals case · [`src/totals.ts:L50-52`](https://github.com/acme/web/blob/c03ddb1a2b3c4d5e6f708192a3b4c5d6e7f80912/src/totals.ts#L50-L52) · claimed fixed in `ab12cd3`
+
+</details>
+
+<details><summary>Not reviewed (2 files)</summary>
+
+- `assets/logo.png` — binary
+- `dist/bundle.js` — too large
+
+</details>
+
+<sub>Reviews (3) · Last reviewed `c03ddb1` · Rule: `any → testing` · cost $0.41 · [details ↗](https://console.example.com/reviews/0123)</sub>
+<!-- attest_tag:state sha=c03ddb1a2b3c4d5e6f708192a3b4c5d6e7f80912 score=- open=2 -->

@@ -215,6 +215,11 @@ function KeyForm({
   const [model, setModel] = useState(stored?.default_model ?? "");
   const [embed, setEmbed] = useState(stored?.embed_model ?? "");
   const [fixJobs, setFixJobs] = useState(stored?.fix_jobs ?? false);
+  const [reviews, setReviews] = useState(stored?.reviews ?? false);
+  // A deployment without code review (CODE_REVIEW=off) has no reviews to let spend the key: the
+  // switch is not offered, and what is stored for it is sent back as it is.
+  const { me } = useAuth();
+  const reviewOff = me?.code_review?.reason === "off";
   const [proof, setProof] = useState("");
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [busy, setBusy] = useState<"save" | "test" | "remove" | null>(null);
@@ -229,12 +234,19 @@ function KeyForm({
   const moved = !stored || key.trim() !== "" || address !== stored.base_url;
   // The server sends the stored key only where it was saved for, so a new address needs it again.
   const needsKey = !stored || address !== stored.base_url;
-  const needsProof = moved && view.proof !== "recent";
+  // Turning either switch on lets something other than a person here spend the key — a container
+  // running a repository's code, a pull request opened by anybody — and the server asks for the
+  // same proof as a new key before it does. Turning one off asks for nothing.
+  const widenJobs = fixJobs && !stored?.fix_jobs;
+  const widenReviews = reviews && !stored?.reviews;
+  const widening = widenJobs || widenReviews;
+  const needsProof = (moved || widening) && view.proof !== "recent";
   const dirty =
     moved ||
     model.trim() !== (stored?.default_model ?? "") ||
     embed.trim() !== (stored?.embed_model ?? "") ||
-    fixJobs !== (stored?.fix_jobs ?? false);
+    fixJobs !== (stored?.fix_jobs ?? false) ||
+    reviews !== (stored?.reviews ?? false);
   const ready =
     dirty &&
     address !== "" &&
@@ -285,10 +297,12 @@ function KeyForm({
         default_model: model.trim(),
         embed_model: embed.trim(),
         fix_jobs: fixJobs,
+        reviews,
         password: view.proof === "password" ? proof : "",
         code: view.proof === "code" ? proof : "",
       });
-      toast.success(`The bot now answers on ${hostOf(address)}`);
+      // Only a new key or address moves where the bot answers; a switch or a model is just saved.
+      toast.success(moved ? `The bot now answers on ${hostOf(address)}` : "Model key settings saved");
       onChanged(next);
     } catch (err) {
       // A refusal from the endpoint is the useful answer here — the key, the address or the
@@ -382,9 +396,9 @@ function KeyForm({
       <SettingsSection title="Where the models run" description="Your own provider account, instead of the models included here.">
         <div className="space-y-2">
           <p className="text-sm text-muted-foreground">
-            Every model call this organisation makes — replies, document search and fix jobs — goes
-            to this endpoint, on this key. Nothing falls back to the included models: if the key
-            stops working, the bot says so.
+            Every model call this organisation makes — replies, document search, fix jobs
+            {reviewOff ? "" : " and code reviews"} — goes to this endpoint, on this key. Nothing falls
+            back to the included models: if the key stops working, the bot says so.
           </p>
           {stored && (
             <p className="text-xs text-muted-foreground">
@@ -543,11 +557,27 @@ function KeyForm({
               <span className="text-sm">{fixJobs ? "May use this key" : "Off"}</span>
             </label>
           </SettingsEditRow>
-          {needsProof && dirty && (
+          {!reviewOff && (
+            <SettingsEditRow
+              label="Code reviews"
+              htmlFor="model_key_reviews"
+              hint="A review starts from GitHub — a pull request opening, a comment asking for one — not from anybody here, so whoever can open a pull request on a reviewed repository spends this key. Off means reviews are skipped while this key is in use."
+            >
+              <label className="flex items-center gap-2.5">
+                <Switch id="model_key_reviews" checked={reviews} onCheckedChange={setReviews} />
+                <span className="text-sm">{reviews ? "May use this key" : "Off"}</span>
+              </label>
+            </SettingsEditRow>
+          )}
+          {needsProof && (
             <SettingsEditRow
               label={view.proof === "password" ? "Your password" : "Your code"}
               htmlFor="model_key_proof"
-              hint="A new key or address decides where every conversation is sent, so it asks who you are."
+              hint={
+                moved
+                  ? "A new key or address decides where every conversation is sent, so it asks who you are."
+                  : `Letting ${widenJobs && widenReviews ? "fix jobs and code reviews" : widenJobs ? "fix jobs" : "code reviews"} spend this key hands it to more than the people here, so it asks who you are.`
+              }
             >
               <Input
                 id="model_key_proof"

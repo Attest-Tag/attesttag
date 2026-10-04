@@ -233,8 +233,8 @@ SECRET_KEYS=""
 SECRET_JSON="{"
 for KEY in SLACK_SIGNING_SECRET OPENROUTER_API_KEY LLM_API_KEY MASTER_KEY MASTER_KEY_PREVIOUS SLACK_CLIENT_ID \
            SLACK_CLIENT_SECRET RESEND_API_KEY OPENROUTER_PROVISIONING_KEY WORKER_LLM_API_KEY WORKER_ENGINE_API_KEY \
-           HEALTH_SECRET OPERATOR_SECRET GITHUB_APP_PRIVATE_KEY_B64 GITHUB_APP_CLIENT_SECRET DATABASE_URL \
-           MSTEAMS_APP_PASSWORD; do
+           HEALTH_SECRET OPERATOR_SECRET GITHUB_APP_PRIVATE_KEY_B64 GITHUB_APP_CLIENT_SECRET \
+           GITHUB_APP_WEBHOOK_SECRET GITHUB_APP_WEBHOOK_SECRET_PREVIOUS DATABASE_URL MSTEAMS_APP_PASSWORD; do
   VAL="$(envval "$KEY" || true)"
   [ -z "$VAL" ] && continue
   ESC="$(printf '%s' "$VAL" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')"
@@ -374,12 +374,14 @@ PY
 )"
 # ── Plain settings passed on as the env file has them, the same list containerapps.sh passes:
 # a model endpoint other than OpenRouter (its key, LLM_API_KEY, travels with the secrets above),
-# the GitHub App's public half (its private key and client secret are secrets above; without the
-# id and slug no App can be set up on this deployment), and Microsoft Teams (guide/msteams.md),
-# whose app id and tenant id are in the package every tenant installs, so only its password is a
-# secret. MSTEAMS_APP_TYPE left unset means SingleTenant.
+# who may bring a model key and who has code review (ORG_MODEL_KEYS, CODE_REVIEW: all, the binary's
+# default for a deployment of one organisation, unless the env file says otherwise),
+# the GitHub App's public half (its private key, client secret and webhook secrets are secrets
+# above; without the id and slug no App can be set up on this deployment), and Microsoft Teams
+# (guide/msteams.md), whose app id and tenant id are in the package every tenant installs, so only
+# its password is a secret. MSTEAMS_APP_TYPE left unset means SingleTenant.
 PLAIN_ARGS=()
-for KEY in LLM_BASE_URL LLM_MODEL HEAVY_MODEL EMBED_MODEL ORG_MODEL_KEYS LOG_LEVEL \
+for KEY in LLM_BASE_URL LLM_MODEL HEAVY_MODEL EMBED_MODEL ORG_MODEL_KEYS CODE_REVIEW LOG_LEVEL \
            GITHUB_APP_ID GITHUB_APP_SLUG GITHUB_APP_CLIENT_ID \
            MSTEAMS_APP_ID MSTEAMS_TENANT_ID MSTEAMS_APP_TYPE MSTEAMS_SIGNIN; do
   PLAIN_ARGS+=("$KEY=$(envval "$KEY" || true)")

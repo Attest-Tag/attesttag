@@ -37,6 +37,29 @@ func orgOf(r *http.Request) int64 {
 	return 0
 }
 
+// refuseOtherOrg answers a write whose body names the organisation it was made for, sent, when the
+// session is in another one now, and reports whether it did. The session's organisation is
+// whichever one it last switched to, from any tab, so a console assistant card proposed in one and
+// confirmed after a switch in another tab would otherwise land there: a review type's key names a
+// type in every organisation, and a create names none at all. A card's steps carry the
+// organisation they were proposed in (proposal.Org); a body that names none — the page's own save,
+// made under the session it reads under — is let through as it always was.
+//
+// 400 rather than 409: nothing moved under the card, and once the console is back in its
+// organisation the same Confirm lands, where a 409 tells the panel the card is spent.
+func refuseOtherOrg(w http.ResponseWriter, r *http.Request, sent string) bool {
+	sent = strings.TrimSpace(sent)
+	if sent == "" {
+		return false
+	}
+	if me := adminFromCtx(r.Context()); me != nil && me.OrgPublic == sent {
+		return false
+	}
+	writeJSON(w, http.StatusBadRequest, map[string]any{"error": "This was proposed in another organisation than the one this " +
+		"session is in now; switch back to it to confirm it. Nothing was saved."})
+	return true
+}
+
 func (b *Bot) permissionsFor(ctx context.Context, u *AdminUser) {
 	if u == nil {
 		return
@@ -134,6 +157,10 @@ func denialCopy(p Permission) string {
 		return "You need permission to manage API keys for that."
 	case PermBillingManage:
 		return "Only someone who can manage billing can do that."
+	case PermReviewsView:
+		return "You need permission to see code reviews for that."
+	case PermReviewsManage:
+		return "You need permission to manage code review for that."
 	}
 	return "You don't have permission to do that."
 }

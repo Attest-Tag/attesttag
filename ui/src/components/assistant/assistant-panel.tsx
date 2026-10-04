@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState, useSyncExternalStore } from "react";
 import { usePathname } from "next/navigation";
 import { FileText, Image as ImageIcon, Paperclip, Plus, Sparkles, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
@@ -9,18 +9,26 @@ import { Markdown } from "@/components/core/markdown";
 import { ModelCombobox } from "@/components/core/model-combobox";
 import { StatusChip } from "@/components/core/status-chip";
 import { WorkingIndicator } from "@/components/core/working-indicator";
-import { ProposalCard } from "@/components/assistant/proposal-card";
+import {
+  ProposalCard,
+  type ProposalBlock,
+  type ProposalOutcome,
+  type ProposalRecord,
+} from "@/components/assistant/proposal-card";
 import { useAssistant } from "@/components/assistant/assistant-provider";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { assistantHintFor } from "@/lib/assistant-hints";
+import { REVIEWS_SELECTION_EVENT, focusLabel, focusOnScreen } from "@/lib/assistant-screen";
 import { api, errorMessage, type AssistantMessage, type AssistantReply, type PlaygroundTool } from "@/lib/api";
 import { navItemFor } from "@/lib/nav";
 
 // The console assistant. One panel, mounted once beside the whole inset, so it survives every
 // navigation — which is also why it cannot be handed page context as a prop. The address bar is
 // the only thing the shell and the routed page both see, so that is where the context comes
-// from: usePathname for the page, and the ?scope= the channel pages already write.
+// from: usePathname for the page, the ?scope= the channel pages already write, and the focus a
+// page with more than one thing on it writes there too — the review type on Reviews › Types, the
+// level on Reviews › Settings (lib/assistant-screen.ts).
 //
 // The scope is read imperatively, at the moment Enter is pressed, rather than through
 // useSearchParams. This is a static export and this component is on every route, so a
@@ -32,6 +40,11 @@ import { navItemFor } from "@/lib/nav";
 // The conversation lives here and rides back with each question, so closing the tab ends it in
 // the panel. It is still recorded — every turn lands in Activity with what was asked and what
 // came back — but as history rather than as state: nothing is read back from there into a turn.
+//
+// History is text, so what became of each card is told in it: an answer goes back with one
+// [proposal "<target>": <outcome>] line per card it offered. Without that the model would read its
+// own "here is a card" and never learn whether the person confirmed it, let it be, or found it
+// refused because what it changed had moved on.
 
 type Turn =
   | { role: "you"; text: string; files: string[] }
@@ -46,6 +59,25 @@ function scopeOnScreen(): number {
   if (typeof window === "undefined") return 0;
   return Number(new URLSearchParams(window.location.search).get("scope")) || 0;
 }
+
+function newConversation(): string {
+  return typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
+}
+
+/** An answer as the next question carries it back: the reply, then what became of each of its cards. */
+function historyText(turn: Extract<Turn, { role: "bot" }>, cards: Record<string, ProposalRecord>): string {
+  const lines = (turn.meta.proposals ?? []).map((p) => {
+    const outcome: ProposalOutcome = cards[p.id]?.outcome ?? "not confirmed";
+    return `[proposal "${p.target}": ${outcome}]`;
+  });
+  return [turn.text, ...lines].filter(Boolean).join("\n");
+}
+
+// The chip is redrawn when Reviews says its selection changed, and on any render of the panel.
+const subscribeSelection = (redraw: () => void) => {
+  window.addEventListener(REVIEWS_SELECTION_EVENT, redraw);
+  return () => window.removeEventListener(REVIEWS_SELECTION_EVENT, redraw);
+};
 
 function ToolRow({ tool }: { tool: PlaygroundTool }) {
   return (
@@ -65,8 +97,26 @@ function ToolRow({ tool }: { tool: PlaygroundTool }) {
   );
 }
 
-function BotTurn({ turn }: { turn: Extract<Turn, { role: "bot" }> }) {
+function BotTurn({
+  turn,
+  cards,
+  onRecord,
+}: {
+  turn: Extract<Turn, { role: "bot" }>;
+  cards: Record<string, ProposalRecord>;
+  onRecord: (id: string, patch: ProposalRecord) => void;
+}) {
   const m = turn.meta;
+  // A card naming another (a branch rule running a type only that card creates) waits for it — and
+  // says so differently once that card is dismissed or refused, since then it can never go through.
+  const blockedBy = (requires?: string): ProposalBlock | undefined => {
+    const needed = requires ? cards[requires] : undefined;
+    if (!requires || needed?.outcome === "confirmed") return undefined;
+    const target = m.proposals?.find((p) => p.id === requires)?.target ?? "the card above";
+    if (needed?.dismissed) return { target, why: "dismissed" };
+    if (needed?.outcome === "changed before Confirm") return { target, why: "changed" };
+    return { target, why: "waiting" };
+  };
   return (
     <div className="space-y-2">
       {turn.text && (
@@ -74,7 +124,15 @@ function BotTurn({ turn }: { turn: Extract<Turn, { role: "bot" }> }) {
           <Markdown text={turn.text} className="text-sm" />
         </div>
       )}
-      {m.proposals?.map((p) => <ProposalCard key={p.id} proposal={p} />)}
+      {m.proposals?.map((p) => (
+        <ProposalCard
+          key={p.id}
+          proposal={p}
+          record={cards[p.id] ?? {}}
+          onRecord={(patch) => onRecord(p.id, patch)}
+          blocked={blockedBy(p.requires)}
+        />
+      ))}
       {m.files?.filter((f) => f.kind === "skipped").map((f) => (
         <p key={f.name} className="rounded-lg border border-warning/30 bg-warning-soft px-3 py-2 text-xs text-warning">
           {f.name} — {f.note}
@@ -107,12 +165,25 @@ export function AssistantPanel() {
   const [files, setFiles] = useState<File[]>([]);
   const [model, setModel] = useState("");
   const [busy, setBusy] = useState(false);
+  // What became of each card, by proposal id: kept here, where it outlives the panel closing.
+  const [cards, setCards] = useState<Record<string, ProposalRecord>>({});
   const tail = useRef<HTMLDivElement>(null);
   const picker = useRef<HTMLInputElement>(null);
   // Groups this panel's questions together in Activity. A ref rather than state: it must not
-  // change when the component re-renders, and nothing renders from it.
-  const conversation = useRef(
-    typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),
+  // change when the component re-renders, and nothing renders from it. Minted at the first
+  // question, not here, since a render must not draw a random number.
+  const conversation = useRef("");
+  // The address is read as the chip is drawn, so focusing the composer redraws it too: an address
+  // rewritten by something that said nothing is caught before the question is typed.
+  const [, recheck] = useReducer((n: number) => n + 1, 0);
+  const chip = useSyncExternalStore(
+    subscribeSelection,
+    () => focusLabel(focusOnScreen(pathname)),
+    () => "",
+  );
+  const record = useCallback(
+    (id: string, patch: ProposalRecord) => setCards((c) => ({ ...c, [id]: { ...c[id], ...patch } })),
+    [],
   );
 
   useEffect(() => {
@@ -134,8 +205,11 @@ export function AssistantPanel() {
     const ask = text.trim();
     if ((!ask && files.length === 0) || busy) return;
     const history: AssistantMessage[] = turns.map((t) =>
-      t.role === "you" ? { role: "you", text: t.text } : { role: "assistant", text: t.text },
+      t.role === "you" ? { role: "you", text: t.text } : { role: "assistant", text: historyText(t, cards) },
     );
+    // Read now, with the scope: what was on screen when the question was asked.
+    const focus = focusOnScreen(pathname);
+    if (!conversation.current) conversation.current = newConversation();
     const sent = files;
     setText("");
     setFiles([]);
@@ -149,6 +223,7 @@ export function AssistantPanel() {
         path: pathname,
         page: page?.title ?? "",
         scope_id: scopeOnScreen(),
+        focus: focus ?? undefined,
         model,
         conversation: conversation.current,
       };
@@ -162,6 +237,7 @@ export function AssistantPanel() {
         form.set("model", common.model);
         form.set("conversation", common.conversation);
         form.set("history", JSON.stringify(history));
+        if (focus) form.set("focus", JSON.stringify(focus));
         for (const f of sent) form.append("file", f);
         res = await api.upload<AssistantReply>("/api/assistant", form);
       } else {
@@ -199,8 +275,8 @@ export function AssistantPanel() {
             className="size-8 text-muted-foreground"
             onClick={() => {
               setTurns([]);
-              conversation.current =
-                typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
+              setCards({});
+              conversation.current = "";
             }}
             aria-label="Clear the conversation"
           >
@@ -244,7 +320,7 @@ export function AssistantPanel() {
               ))}
             </div>
           ) : (
-            <BotTurn key={i} turn={turn} />
+            <BotTurn key={i} turn={turn} cards={cards} onRecord={record} />
           ),
         )}
         {busy && <WorkingIndicator />}
@@ -253,12 +329,12 @@ export function AssistantPanel() {
 
       <div className="shrink-0 space-y-1.5 border-t px-3 py-2.5">
         {/* What the question will carry. The page tag is why the assistant can answer "this
-            channel" without being told which — showing it is what makes that predictable
-            rather than uncanny. */}
+            channel" or "this type" without being told which — showing it is what makes that
+            predictable rather than uncanny. */}
         <div className="flex flex-wrap items-center gap-1">
-          <span className="inline-flex items-center gap-1 rounded bg-secondary px-1.5 py-0.5 text-[11px] text-muted-foreground">
-            <Sparkles className="size-3 text-ai" />
-            {page?.title ?? "Console"}
+          <span className="inline-flex max-w-full items-center gap-1 rounded bg-secondary px-1.5 py-0.5 text-[11px] text-muted-foreground">
+            <Sparkles className="size-3 shrink-0 text-ai" />
+            <span className="truncate">{chip || page?.title || "Console"}</span>
           </span>
           {files.map((f, i) => (
             <span key={i} className="inline-flex items-center gap-1 rounded bg-secondary px-1.5 py-0.5 text-[11px]">
@@ -279,6 +355,7 @@ export function AssistantPanel() {
         <Textarea
           value={text}
           onChange={(e) => setText(e.target.value)}
+          onFocus={recheck}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();

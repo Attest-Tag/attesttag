@@ -179,7 +179,7 @@ func (d *driveAPI) do(ctx context.Context, path string, q url.Values) (*http.Res
 	if err != nil {
 		return nil, err
 	}
-	if err := d.proxy.inject(ctx, d.orgID, d.conn, req, ProxyAudit{}); err != nil {
+	if err := d.proxy.inject(ctx, d.orgID, d.conn, req, ProxyAudit{}, githubPurposeDefault); err != nil {
 		return nil, fmt.Errorf("%w: %w", errCredential, err)
 	}
 	res, err := d.client.Do(req)

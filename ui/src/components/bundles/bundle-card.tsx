@@ -3,6 +3,7 @@
 import { ChevronRight, MoreHorizontal, PackageOpen, Pencil, SlidersHorizontal, Trash2 } from "lucide-react";
 import { ConnectionTable, type ConnectionAction } from "@/components/bundles/connection-table";
 import { RepoGroupList, type RepoBulkAction } from "@/components/bundles/repo-group-list";
+import type { RepoReviewLookup } from "@/components/reviews/repo-review";
 import { countRepoSources, isRepoBundle } from "@/components/scopes/repo-sources";
 import { Button } from "@/components/ui/button";
 import {
@@ -48,6 +49,7 @@ export function BundleCard({
   onRepoBulk,
   installs,
   canAttach,
+  review = null,
 }: {
   bundle: Bundle;
   /** Open or closed is the page's to hold: it is remembered across visits, per bundle. */
@@ -61,6 +63,8 @@ export function BundleCard({
   installs: GithubInstall[] | null;
   /** Whether this session may attach the bundle itself — scopes.manage, not bundles.manage. */
   canAttach: boolean;
+  /** How code review stands on each repository, for the repository bundle's rows. */
+  review?: RepoReviewLookup | null;
 }) {
   const used = bundle.used_in;
   // Scopes that took one of this bundle's connections on its own, without the bundle.
@@ -158,6 +162,7 @@ export function BundleCard({
               installs={installs}
               onAction={onConnectionAction}
               onBulk={onRepoBulk}
+              review={review}
             />
           ) : (
             <ConnectionTable

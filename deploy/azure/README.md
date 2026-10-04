@@ -111,12 +111,13 @@ database, it cannot make it useful.
 From the env file, these become Container Apps secrets: `SLACK_SIGNING_SECRET`,
 `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET`, `OPENROUTER_API_KEY`, `LLM_API_KEY`, `MASTER_KEY`,
 `MASTER_KEY_PREVIOUS`, `RESEND_API_KEY`, `OPENROUTER_PROVISIONING_KEY`, `WORKER_LLM_API_KEY`,
-`WORKER_ENGINE_API_KEY`, `HEALTH_SECRET`, `OPERATOR_SECRET`, the GitHub App's private key and
-client secret, `DATABASE_URL`, `DOCS_S3_KEY_ID`, `DOCS_S3_SECRET` and `MSTEAMS_APP_PASSWORD`. And
+`WORKER_ENGINE_API_KEY`, `HEALTH_SECRET`, `OPERATOR_SECRET`, the GitHub App's private key,
+client secret and webhook secret (and `GITHUB_APP_WEBHOOK_SECRET_PREVIOUS` during a rotation),
+`DATABASE_URL`, `DOCS_S3_KEY_ID`, `DOCS_S3_SECRET` and `MSTEAMS_APP_PASSWORD`. And
 these become plain settings: `DOCS_S3_URL`, `LLM_BASE_URL`, `LLM_MODEL`, `HEAVY_MODEL`,
-`EMBED_MODEL`, `MAIL_FROM`, `SIGNUP_MODE`, `ORG_MODEL_KEYS`, `TZ_NAME`, `LOG_LEVEL`,
-`ALLOWED_EMAIL_DOMAINS`, the GitHub App's id, slug and client id, the other four `MSTEAMS_*`
-settings, and the five worker settings below.
+`EMBED_MODEL`, `MAIL_FROM`, `SIGNUP_MODE`, `ORG_MODEL_KEYS`, `CODE_REVIEW`, `TZ_NAME`,
+`LOG_LEVEL`, `ALLOWED_EMAIL_DOMAINS`, the GitHub App's id, slug and client id, the other four
+`MSTEAMS_*` settings, and the five worker settings below.
 
 Nothing else in the file reaches the app — not `ADMIN_BASE_URL`, which only `DOMAIN` sets (see
 [A name of your own](#a-name-of-your-own)), and not `PUBLIC_ORIGIN_HOSTS` or the `LIMIT_*`

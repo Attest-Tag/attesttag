@@ -728,6 +728,7 @@ function RecommendedSecret({
 // here is what the callback will actually be, not a guess at it.
 function RedirectURI() {
   const [origin, setOrigin] = useState("");
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot origin read after mount
   useEffect(() => setOrigin(window.location.origin), []);
   const uri = origin ? `${origin}/connect/callback` : "";
   return (

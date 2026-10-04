@@ -1,0 +1,123 @@
+package review
+
+import (
+	"slices"
+	"testing"
+)
+
+func TestParseCommand(t *testing.T) {
+	cases := []struct {
+		name  string
+		body  string
+		ok    bool
+		verb  Verb
+		types []string
+	}{
+		{"plain", "@slug review", true, VerbReview, nil},
+		{"any case", "@SLUG Review", true, VerbReview, nil},
+		{"rereview", "@slug rereview", true, VerbReview, nil},
+		{"re-review", "@slug re-review", true, VerbReview, nil},
+		{"review please", "@slug review please", true, VerbReview, nil},
+		{"please review", "@slug please review", true, VerbReview, nil},
+		{"review this PR again", "@slug review this PR again, thanks!", true, VerbReview, nil},
+		{"comma after the mention", "@slug, review", true, VerbReview, nil},
+		{"colon after the mention", "@slug: review", true, VerbReview, nil},
+		{"tab after the mention", "@slug\treview", true, VerbReview, nil},
+		{"trailing full stop", "@slug review.", true, VerbReview, nil},
+		{"trailing question mark", "@slug review?", true, VerbReview, nil},
+		{"the App's own login", "@slug[bot] review", true, VerbReview, nil},
+		{"indented", "   @slug review", true, VerbReview, nil},
+		{"after blank lines, with more below", "\n\n@slug review\nThe tests are in a separate commit.", true, VerbReview, nil},
+		{"CRLF body", "\r\n@slug review\r\nthanks", true, VerbReview, nil},
+		{"after a quote", "> Older totals can overwrite newer ones\n\n@slug review", true, VerbReview, nil},
+		{"a quoted command does not count, the next line does", "> @slug review\n@slug status", true, VerbStatus, nil},
+
+		{"types by space", "@slug review security tests", true, VerbReview, []string{"security", "tests"}},
+		{"types by comma", "@slug review security,tests", true, VerbReview, []string{"security", "tests"}},
+		{"types with and, any case", "@slug review Security and tests", true, VerbReview, []string{"security", "tests"}},
+		{"a type twice", "@slug review security security", true, VerbReview, []string{"security"}},
+		{"a hyphenated key", "@slug review api-contract please", true, VerbReview, []string{"api-contract"}},
+
+		{"full review", "@slug full review", true, VerbFullReview, nil},
+		{"full re-review with a type", "@slug full re-review security", true, VerbFullReview, []string{"security"}},
+		{"full-review", "@slug full-review", true, VerbFullReview, nil},
+
+		{"status", "@slug status", true, VerbStatus, nil},
+		{"status?", "@slug status?", true, VerbStatus, nil},
+		{"why the score", "@slug why is the score 3?", true, VerbStatus, nil},
+		{"why only this score", "@slug Why only a 2/5 score", true, VerbStatus, nil},
+
+		{"help", "@slug help", true, VerbHelp, nil},
+		{"a bare mention is help, not a paid review", "@slug", true, VerbHelp, nil},
+		{"a bare mention with punctuation", "@slug ?", true, VerbHelp, nil},
+
+		{"pause", "@slug pause", true, VerbPause, nil},
+		{"pause reviews please", "@slug pause automatic reviews, please", true, VerbPause, nil},
+		{"resume", "@slug resume", true, VerbResume, nil},
+		{"unpause reviews", "@slug unpause reviews.", true, VerbResume, nil},
+		{"pause with a condition is a question", "@slug pause until the release is out", true, VerbQuestion, nil},
+		{"resume with more to say is a question", "@slug resume tomorrow", true, VerbQuestion, nil},
+
+		{"a question", "@slug what does this function do?", true, VerbQuestion, nil},
+		{"a sentence that starts with review", "@slug review the error handling in store.go", true, VerbQuestion, nil},
+		{"a question that starts with review", "@slug review is this safe?", true, VerbQuestion, nil},
+		{"why without score", "@slug why did you flag this", true, VerbQuestion, nil},
+		{"full on its own", "@slug full", true, VerbQuestion, nil},
+		{"too many words to be types", "@slug review a b c d e f g h i j k", true, VerbQuestion, nil},
+
+		// Not commands.
+		{"another App's slug sharing a prefix", "@slug-dev review", false, "", nil},
+		{"an email address", "email@slug review", false, "", nil},
+		{"no separator", "@slugreview", false, "", nil},
+		{"underscore after the slug", "@slug_x review", false, "", nil},
+		{"mentioned mid-sentence", "please @slug review", false, "", nil},
+		{"only quoted", "> @slug review", false, "", nil},
+		{"in a code block", "```\n@slug review\n```", false, "", nil},
+		{"after other text", "Thanks!\n@slug review", false, "", nil},
+		{"someone else", "@octocat review", false, "", nil},
+		{"empty", "", false, "", nil},
+		{"blank", "  \n\t\n", false, "", nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cmd, ok := ParseCommand(c.body, "slug")
+			if ok != c.ok {
+				t.Fatalf("ok = %v, want %v (%+v)", ok, c.ok, cmd)
+			}
+			if cmd.Verb != c.verb || !slices.Equal(cmd.Types, c.types) {
+				t.Errorf("got %s %q, want %s %q", cmd.Verb, cmd.Types, c.verb, c.types)
+			}
+		})
+	}
+}
+
+// The development App's commands must reach the development App only, and the other way
+// round: a word boundary would let both answer.
+func TestParseCommandKeepsSlugsThatShareAPrefixApart(t *testing.T) {
+	if _, ok := ParseCommand("@slug-dev review", "slug-dev"); !ok {
+		t.Error("the dev App should answer its own mention")
+	}
+	if _, ok := ParseCommand("@slug review", "slug-dev"); ok {
+		t.Error("the dev App answered the production App's mention")
+	}
+	if _, ok := ParseCommand("@slug review", "@slug"); !ok {
+		t.Error("a slug passed with its @ should still match")
+	}
+	if _, ok := ParseCommand("@ review", ""); ok {
+		t.Error("an empty slug matches nothing")
+	}
+}
+
+func TestParseCommandKeepsTheTextAsWritten(t *testing.T) {
+	cmd, ok := ParseCommand("> Missing tenant check\n@slug, Is this really reachable?\r\nThe handler is behind auth.\n", "slug")
+	if !ok || cmd.Verb != VerbQuestion {
+		t.Fatalf("got %+v, %v", cmd, ok)
+	}
+	if want := "Is this really reachable?\nThe handler is behind auth."; cmd.Text != want {
+		t.Errorf("Text = %q, want %q", cmd.Text, want)
+	}
+	cmd, _ = ParseCommand("@slug", "slug")
+	if cmd.Text != "" {
+		t.Errorf("a bare mention has no text, got %q", cmd.Text)
+	}
+}

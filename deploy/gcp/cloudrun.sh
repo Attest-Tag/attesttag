@@ -30,20 +30,21 @@ envval() {
 
 # HOSTED marks the maintainer's own service (app.attesttag.com), the only deployment the policy
 # defaults further down belong to: open signup, a public support address, the attesttag.com site,
-# a $5 free-plan cap, BYOK gated to enterprise. It is on only when asked for by name, HOSTED=1 in
-# the shell or in the env file, and the maintainer's .env.prod says so. It used to follow from the
-# file being called .env.prod, which turned a copy of this repository, deployed with the file name
-# this script asks for, into a public service anyone could sign up to. Without it a deployment is
-# one organisation: signup is first-run, no support address is set, the console talks to its own
-# origin, and the free budget and key policy take the binary's self-host defaults. Anything set
-# explicitly in the env file wins either way. Only 1 is on, because HOSTED=0 used to read as on.
+# a $5 free-plan cap, BYOK gated to enterprise, code review sold on pro. It is on only when asked
+# for by name, HOSTED=1 in the shell or in the env file, and the maintainer's .env.prod says so. It
+# used to follow from the file being called .env.prod, which turned a copy of this repository,
+# deployed with the file name this script asks for, into a public service anyone could sign up to.
+# Without it a deployment is one organisation: signup is first-run, no support address is set, the
+# console talks to its own origin, and the free budget, the key policy and code review take the
+# binary's self-host defaults. Anything set explicitly in the env file wins either way. Only 1 is
+# on, because HOSTED=0 used to read as on.
 HOSTED="${HOSTED:-$(envval HOSTED || true)}"
 [ "$HOSTED" = 1 ] || HOSTED=
 
 # The hosted policy is a public one — anyone may sign up, and users' support mail goes to
 # attesttag.com — so it is never applied silently.
 if [ -n "$HOSTED" ]; then
-  echo "▸ HOSTED policy ON: open signup · support@attesttag.com · https://attesttag.com · \$5 free-plan cap · own model key gated to Enterprise"
+  echo "▸ HOSTED policy ON: open signup · support@attesttag.com · https://attesttag.com · \$5 free-plan cap · own model key gated to Enterprise · code review on Pro and up"
 fi
 
 echo "▸ project=$PROJECT region=$REGION service=$SERVICE bucket=gs://$BUCKET"
@@ -113,7 +114,8 @@ SECRETS=""
 for KEY in SLACK_SIGNING_SECRET OPENROUTER_API_KEY MASTER_KEY MASTER_KEY_PREVIOUS SLACK_CLIENT_ID SLACK_CLIENT_SECRET RESEND_API_KEY \
            OPENROUTER_PROVISIONING_KEY WORKER_LLM_API_KEY WORKER_ENGINE_API_KEY HEALTH_SECRET OPERATOR_SECRET \
            STRIPE_SECRET_KEY STRIPE_WEBHOOK_SECRET \
-           GITHUB_APP_PRIVATE_KEY_B64 GITHUB_APP_CLIENT_SECRET DATABASE_URL MSTEAMS_APP_PASSWORD; do
+           GITHUB_APP_PRIVATE_KEY_B64 GITHUB_APP_CLIENT_SECRET GITHUB_APP_WEBHOOK_SECRET GITHUB_APP_WEBHOOK_SECRET_PREVIOUS \
+           DATABASE_URL MSTEAMS_APP_PASSWORD; do
   VAL="$(envval "$KEY" || true)"
   [ -z "$VAL" ] && continue
   NAME="attesttag-$(echo "$KEY" | tr 'A-Z_' 'a-z-')"
@@ -223,8 +225,11 @@ BASE="${ADMIN_BASE_URL:-$(envval ADMIN_BASE_URL || true)}"
 [ -n "$BASE" ] && addenv ADMIN_BASE_URL "${BASE%/}"
 
 # The GitHub App this deployment installs as (internal/app/github_app.go). The id and slug are
-# public — the slug is in the install URL people click — so only the key is a secret, and it
-# ships base64 because envval reads one line and a PEM is twenty-eight of them.
+# public — the slug is in the install URL people click — so only the key, the client secret and
+# the webhook secret are secrets, in the --set-secrets list above. The key ships base64 because
+# envval reads one line and a PEM is twenty-eight of them. GITHUB_APP_WEBHOOK_SECRET_PREVIOUS is
+# the old webhook secret during a rotation, like MASTER_KEY_PREVIOUS: --set-secrets replaces the
+# whole list, so deleting the line from the env file and redeploying is what retires it.
 for KEY in GITHUB_APP_ID GITHUB_APP_SLUG GITHUB_APP_CLIENT_ID; do
   VAL="$(envval "$KEY" || true)"
   [ -n "$VAL" ] && addenv "$KEY" "$VAL"
@@ -283,6 +288,13 @@ esac
 OMK="${ORG_MODEL_KEYS:-$(envval ORG_MODEL_KEYS || true)}"
 [ -z "$OMK" ] && [ -n "$HOSTED" ] && OMK=enterprise
 [ -n "$OMK" ] && addenv ORG_MODEL_KEYS "$OMK"
+# Which organisations have code review (review_plan.go). This service sells it on the pro plan and
+# up: a review is minutes of the operator's model on somebody's pull request, more than a free
+# plan's month. The binary defaults to all, because a self-host is one organisation and has no plan
+# to gate it on; off takes the feature off a deployment altogether.
+CR="${CODE_REVIEW:-$(envval CODE_REVIEW || true)}"
+[ -z "$CR" ] && [ -n "$HOSTED" ] && CR=pro
+[ -n "$CR" ] && addenv CODE_REVIEW "$CR"
 # This service's public site. It is the one cross-origin the console's CSP allows, because the
 # Get started page fetches its walkthrough library from there (headers.go), and it is the origin
 # that page is handed on /api/me — one runtime setting, not a second one baked into the console

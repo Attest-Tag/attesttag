@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useImperativeHandle, useRef, useState } from "react";
+import { useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -46,7 +46,12 @@ export function ChipsInput({
   // what is in the box now rather than what it held when they were created.
   const draftRef = useRef("");
   const valueRef = useRef(value);
-  valueRef.current = value;
+  // Kept current once each render has committed rather than during it: React may render more than
+  // once, or throw a render away, so a ref written mid-render can hold a value never drawn. A layout
+  // effect still runs before any click, keystroke or flush can read it.
+  useLayoutEffect(() => {
+    valueRef.current = value;
+  });
 
   const setBoth = (next: string) => {
     draftRef.current = next;

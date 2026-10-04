@@ -1,8 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { GitBranch, KeyRound, Loader2, Lock, PackagePlus } from "lucide-react";
+import { AlertTriangle, GitBranch, KeyRound, Loader2, Lock, PackagePlus } from "lucide-react";
 import { toast } from "sonner";
+import { CopyButton } from "@/components/core/copy-button";
+import { forgetInstallFrom } from "@/components/reviews/install-return";
+import { installationURL } from "@/components/reviews/review-format";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -34,7 +37,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { groupRepos, useInstallations } from "@/components/scopes/repo-sources";
-import { api, errorMessage } from "@/lib/api";
+import { api, errorMessage, type GithubInstall, type GithubInstalls } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 type GithubRepo = { repo: string; private: boolean; pushed_at?: string };
@@ -51,21 +54,6 @@ export type TokenSource = {
 type ConnectResult = {
   repos: string[];
   failed: { repo: string; error: string }[];
-};
-/** A GitHub App installation: an account whose admin ticked which repositories we may see. */
-type GithubInstall = {
-  installation_id: number;
-  account_login: string;
-  repo_selection: string;
-  status: string;
-};
-type InstallsResponse = {
-  installations: GithubInstall[];
-  install_configured: boolean;
-  install_url?: string;
-  setup_url?: string;
-  // What is missing when install_configured is false, so the disabled entry can name it.
-  install_missing?: string[];
 };
 
 // "Connect repo". Two ways in, and an account may use both at once: a GitHub App installation,
@@ -130,11 +118,15 @@ export function ConnectRepoPopover({
   const [installs, setInstalls] = useState<GithubInstall[] | null>(null);
   const [appConfigured, setAppConfigured] = useState(false);
   const [appMissing, setAppMissing] = useState<string[]>([]);
+  // Where GitHub should deliver code review's events, and whether the secret that verifies them is
+  // set. Only a deployment of its own is told (handleGitHubInstallations): there the person adding
+  // a repository is likely the one who pastes the URL into the App's settings. Null elsewhere.
+  const [hook, setHook] = useState<{ url: string; secretSet: boolean; review: boolean } | null>(null);
   useEffect(() => {
     if (!open || installs !== null) return;
     let live = true;
     api
-      .get<InstallsResponse>("/api/github/installations")
+      .get<GithubInstalls>("/api/github/installations")
       .then((res) => {
         if (!live) return;
         setInstalls(
@@ -142,6 +134,11 @@ export function ConnectRepoPopover({
         );
         setAppConfigured(res.install_configured);
         setAppMissing(res.install_missing ?? []);
+        setHook(
+          res.webhook_url
+            ? { url: res.webhook_url, secretSet: !!res.webhook_secret_set, review: res.code_review !== false }
+            : null,
+        );
       })
       // A deployment with no app configured answers this fine; anything else failing should not
       // take the token path down with it, so an error just means "no installations".
@@ -434,7 +431,7 @@ export function ConnectRepoPopover({
                 >
                   {/* A real navigation, not a fetch: the browser leaves for GitHub's own
                       account and repository picker, and comes back to /github/setup. */}
-                  <a href="/github/install">
+                  <a href="/github/install" onClick={forgetInstallFrom}>
                     <PackagePlus className="size-4 shrink-0" />
                     <span className="min-w-0 flex-1 text-left">
                       <span className="block text-sm font-medium">
@@ -464,6 +461,7 @@ export function ConnectRepoPopover({
                     </span>
                   </span>
                 </Button>
+                {hook && appConfigured && <WebhookFacts {...hook} />}
               </div>
             ) : mode === "install" ? (
               <div className="space-y-1.5">
@@ -495,11 +493,32 @@ export function ConnectRepoPopover({
                     : "The app can see the repositories chosen for it at GitHub."}{" "}
                   <a
                     href="/github/install"
+                    onClick={forgetInstallFrom}
                     className="text-primary hover:underline"
                   >
                     Add another account
                   </a>
                 </p>
+                {/* Saving repositories works without it; a review of them cannot post until the
+                    account's owner accepts what the App asks for now, and only GitHub can say yes. */}
+                {install && (install.missing_permissions?.length ?? 0) > 0 && (
+                  <div className="flex items-start gap-2 rounded-md border border-warning/30 bg-warning-soft px-2.5 py-2 text-xs">
+                    <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-warning" aria-hidden />
+                    <p className="min-w-0 flex-1 text-foreground">
+                      Code review needs {install.missing_permissions?.join(", ")}, which this
+                      installation has not granted yet.{" "}
+                      <a
+                        href={installationURL(install)}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="font-medium text-primary underline-offset-2 hover:underline"
+                      >
+                        Accept the new permissions at GitHub
+                      </a>
+                    </p>
+                  </div>
+                )}
+                {hook && <WebhookFacts {...hook} />}
               </div>
             ) : mode === "saved" && toScope ? (
               // Saved repositories, grouped by the credential they came through, so a channel
@@ -646,7 +665,7 @@ export function ConnectRepoPopover({
                         size="sm"
                         className="h-auto p-0 text-xs"
                       >
-                        <a href="/github/install">Install the GitHub App</a>
+                        <a href="/github/install" onClick={forgetInstallFrom}>Install the GitHub App</a>
                       </Button>
                     ) : (
                       <Tooltip>
@@ -968,5 +987,39 @@ export function ConnectRepoPopover({
         ) : null}
       </PopoverContent>
     </Popover>
+  );
+}
+
+/**
+ * Code review's half of the App's setup, where this deployment is the one being set up: the URL
+ * GitHub delivers pull-request events to, and whether the secret that verifies them is set. A
+ * repository saves without either; a pull request on it is only heard about with both. Where code
+ * review is off (review false) the webhook still carries the installation's own events, and is
+ * described without it.
+ */
+function WebhookFacts({ url, secretSet, review }: { url: string; secretSet: boolean; review: boolean }) {
+  return (
+    <div className="space-y-1 rounded-md border bg-muted/40 px-2.5 py-2 text-xs">
+      <p className="text-muted-foreground">
+        {review ? "For code review, the App's webhook at GitHub sends to:" : "The App's webhook at GitHub sends to:"}
+      </p>
+      <div className="flex items-start gap-1">
+        {/* Wrapped rather than cut: this is the line somebody reads to type it into GitHub. */}
+        <code className="min-w-0 flex-1 font-mono break-all">
+          {url}
+        </code>
+        <CopyButton text={url} label="Copy the webhook URL" className="shrink-0" />
+      </div>
+      <p className={secretSet ? "text-muted-foreground" : "text-warning"}>
+        {secretSet ? (
+          "Its secret is set on this deployment."
+        ) : (
+          <>
+            No secret is set: <span className="font-mono">GITHUB_APP_WEBHOOK_SECRET</span> is empty,
+            so GitHub&apos;s deliveries are refused{review ? " and nothing is reviewed as it opens" : ""}.
+          </>
+        )}
+      </p>
+    </div>
   );
 }

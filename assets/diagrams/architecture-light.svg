@@ -105,8 +105,8 @@
   <text x="235" y="757" class="ink">key sent only</text>
   <text x="235" y="774" class="b">over https</text>
   <rect x="374" y="738" width="133" height="46" rx="4" class="st"/>
-  <text x="384" y="757" class="ink">a write waits</text>
-  <text x="384" y="774" class="b">for Confirm</text>
+  <text x="384" y="757" class="ink">model's writes</text>
+  <text x="384" y="774" class="b">wait for Confirm</text>
   <rect x="523" y="738" width="133" height="46" rx="4" class="st"/>
   <text x="533" y="757" class="ink">model's auth</text>
   <text x="533" y="774" class="b">headers dropped</text>
@@ -183,7 +183,7 @@
   <text x="752" y="225" class="b">it calls a tool via the proxy</text>
   <circle cx="735" cy="250" r="9" class="bdg"/>
   <text x="735" y="254" class="bdgt" text-anchor="middle">5</text>
-  <text x="752" y="254" class="b">a write waits for Confirm</text>
+  <text x="752" y="254" class="b">its write waits for Confirm</text>
   <circle cx="735" cy="279" r="9" class="bdg"/>
   <text x="735" y="283" class="bdgt" text-anchor="middle">6</text>
   <text x="752" y="283" class="b">key added at egress, TLS only</text>

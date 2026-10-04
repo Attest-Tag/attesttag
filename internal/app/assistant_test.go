@@ -115,7 +115,11 @@ func (f *assistFix) consoleCallFor(perms ...string) *consoleCall {
 	for _, s := range perms {
 		p[s] = true
 	}
-	return &consoleCall{OrgID: f.org, Actor: "actor", Perms: p, model: "test"}
+	org, err := f.st.Org(context.Background(), f.org)
+	if err != nil || org == nil {
+		f.t.Fatalf("the fixture's organisation: %v", err)
+	}
+	return &consoleCall{OrgID: f.org, OrgPublic: org.PublicID, Actor: "actor", Perms: p, model: "test"}
 }
 
 func (f *assistFix) tool(c *consoleCall, name string) consoleTool {
@@ -182,10 +186,10 @@ func (f *assistFix) seedTier(name string, rank int) *ApprovalRole {
 // requests the console's own pages make.
 //
 // That is a property of the code rather than of the prompt, so it is checked as one. The list
-// below is the whole set of store methods those two files may call: a reader who wants to know
-// what the assistant can do to the database reads this list instead of a thousand lines, and
-// anyone adding to it has to say why here, in front of the two entries that are writes and the
-// reasons they are allowed.
+// below is the whole set of store methods its files may call: a reader who wants to know what the
+// assistant can do to the database reads this list instead of a thousand lines, and anyone adding
+// to it has to say why here, in front of the two entries that are writes and the reasons they are
+// allowed.
 func TestAssistantHasNoWriteCapability(t *testing.T) {
 	allowed := map[string]string{
 		// Reads. Each is the same query the console's own route for that page makes, and the
@@ -197,8 +201,10 @@ func TestAssistantHasNoWriteCapability(t *testing.T) {
 		"Documents": "the document corpus", "Routines": "routines", "Jobs": "fix jobs",
 		"Artifacts": "artifacts", "OverviewStats": "the overview tiles", "Teams": "whether a workspace is connected",
 		"UsageByChannel": "spend per channel", "MonthSpend": "spend against the account's budget",
-		"RecentToolCalls":   "the tool-call log, for running an analysis over",
-		"ConsoleTurnsSince": "this account's own rate limit",
+		"RecentToolCalls":        "the tool-call log, for running an analysis over",
+		"ConsoleTurnsSince":      "this account's own rate limit",
+		"GitHubInstalls":         "an installation's account, which is how the console names a review connection",
+		"ReviewRuleFirstVersion": "the first version of a review type holding a learned rule, read to say who wrote it on GitHub",
 		// The two writes, and neither touches configuration. Both are the record of what
 		// happened, which is the thing an assistant that can propose changes most needs to
 		// leave behind.
@@ -206,11 +212,45 @@ func TestAssistantHasNoWriteCapability(t *testing.T) {
 		"LogUsageBy":       "append-only: what the turn spent, so it lands inside the budget",
 		"AddAssistantTurn": "append-only: the transcript Activity shows, in its own org-scoped table",
 	}
-	for _, file := range []string{"assistant.go", "assistant_api.go"} {
+	// The files about a screen's settings reach the store through that screen's own helpers as
+	// well, and a write can hide behind a helper's name — reviewTypeForEdit copies a built-in into
+	// the organisation, the settings save ensures a repository's row — where a list of what may not
+	// be called only ever catches the names somebody thought of. So in those files every call on b
+	// is on a list of what may be: one of these helpers, a store method above, or the Config read at
+	// boot. Each helper here reads and checks, and writes nothing.
+	helpers := map[string]string{
+		"reviewTreeIndex":       "the organisation's review tree, read once",
+		"reviewTypeTarget":      "one review type, by key or public id",
+		"reviewTypeViews":       "every review type, as Reviews › Types lists them",
+		"checkReviewSettings":   "the settings save's own checks, which read and ask Slack about a channel",
+		"checkReviewTypeMoney":  "whether a type's save would need connections.manage",
+		"fillReviewNotifyTeams": "the workspace a notify channel is in, read",
+		"reviewTypeCreateBase":  "what a new type starts from, read",
+	}
+	strict := map[string]bool{"assistant_focus.go": true, "assistant_review.go": true}
+	files := map[string]*ast.File{}
+	for _, file := range []string{"assistant.go", "assistant_api.go", "assistant_focus.go", "assistant_review.go"} {
 		f, err := parser.ParseFile(token.NewFileSet(), file, nil, 0)
 		if err != nil {
 			t.Fatalf("parse %s: %v", file, err)
 		}
+		files[file] = f
+		// A method these files declare themselves is held to the same list, since its body is walked
+		// here with the rest of them: calling it is calling what it calls.
+		for _, d := range f.Decls {
+			fn, ok := d.(*ast.FuncDecl)
+			if !ok || fn.Recv == nil || !strict[file] {
+				continue
+			}
+			if star, ok := fn.Recv.List[0].Type.(*ast.StarExpr); ok {
+				if id, ok := star.X.(*ast.Ident); ok && id.Name == "Bot" {
+					helpers[fn.Name.Name] = "declared in " + file + ", and walked with it"
+				}
+			}
+		}
+	}
+	for _, file := range []string{"assistant.go", "assistant_api.go", "assistant_focus.go", "assistant_review.go"} {
+		f := files[file]
 		ast.Inspect(f, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
 			if !ok {
@@ -220,14 +260,27 @@ func TestAssistantHasNoWriteCapability(t *testing.T) {
 			if !ok {
 				return true
 			}
-			// b.changed invalidates the resolver and settings caches. Only a write needs it, so
-			// reaching for it here is the tell that one arrived.
-			if inner, ok := sel.X.(*ast.Ident); ok && inner.Name == "b" && sel.Sel.Name == "changed" {
-				t.Errorf("%s calls b.changed, which only a write needs", file)
+			if inner, ok := sel.X.(*ast.Ident); ok && inner.Name == "b" {
+				// b.changed invalidates the resolver and settings caches. Only a write needs it,
+				// so reaching for it here is the tell that one arrived.
+				if sel.Sel.Name == "changed" {
+					t.Errorf("%s calls b.changed, which only a write needs", file)
+				} else if _, ok := helpers[sel.Sel.Name]; strict[file] && !ok {
+					t.Errorf("%s calls b.%s, which is not in the assistant's list of helpers it may call.\n"+
+						"If it reads and checks only, add it with the reason. If it can write, it does not belong here.",
+						file, sel.Sel.Name)
+				}
 				return true
 			}
 			store, ok := sel.X.(*ast.SelectorExpr)
-			if !ok || store.Sel.Name != "store" {
+			if !ok {
+				return true
+			}
+			if store.Sel.Name != "store" {
+				if root, ok := store.X.(*ast.Ident); ok && root.Name == "b" && strict[file] && store.Sel.Name != "cfg" {
+					t.Errorf("%s calls b.%s.%s; only the store methods above and the Config are reached this way here",
+						file, store.Sel.Name, sel.Sel.Name)
+				}
 				return true
 			}
 			if _, ok := allowed[sel.Sel.Name]; !ok {
@@ -238,6 +291,167 @@ func TestAssistantHasNoWriteCapability(t *testing.T) {
 			return true
 		})
 	}
+	// The lists above only see a call written on b. In those files b also goes nowhere else — not
+	// into a variable, not to a function, not as a method value — since each would carry the store
+	// past this walk: st := b.store; st.UpdateReviewSettings(…) calls nothing on b at all. So a
+	// function without b, wherever it is declared, has no store to write to. The one place b may be
+	// handed is a function of these files themselves, called by name or through a func field of one
+	// of their types (focusKind.resolve), and whatever such a field is given there must be one too.
+	ownFuncs, ownFields := map[string]bool{}, map[string]bool{}
+	for file := range strict {
+		for _, d := range files[file].Decls {
+			switch d := d.(type) {
+			case *ast.FuncDecl:
+				if d.Recv == nil {
+					ownFuncs[d.Name.Name] = true
+				}
+			case *ast.GenDecl:
+				for _, s := range d.Specs {
+					if ts, ok := s.(*ast.TypeSpec); ok {
+						if st, ok := ts.Type.(*ast.StructType); ok {
+							for _, fl := range st.Fields.List {
+								if _, ok := fl.Type.(*ast.FuncType); ok {
+									for _, name := range fl.Names {
+										ownFields[name.Name] = true
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	for file := range strict {
+		var stack []ast.Node
+		ast.Inspect(files[file], func(n ast.Node) bool {
+			if n == nil {
+				stack = stack[:len(stack)-1]
+				return true
+			}
+			defer func() { stack = append(stack, n) }()
+			if kv, ok := n.(*ast.KeyValueExpr); ok {
+				if key, ok := kv.Key.(*ast.Ident); ok && ownFields[key.Name] {
+					if v, ok := kv.Value.(*ast.Ident); ok && !ownFuncs[v.Name] {
+						t.Errorf("%s gives %s the function %s, which is not declared in these files: what is handed b through "+
+							"that field has to be walked with them", file, key.Name, v.Name)
+					}
+				}
+			}
+			// And the Bot is only ever called b, and the store is never a parameter: a func(x *Bot)
+			// would be a body this walk reads without knowing x for what it is.
+			if f, ok := n.(*ast.Field); ok {
+				star, _ := f.Type.(*ast.StarExpr)
+				if star != nil {
+					if x, ok := star.X.(*ast.Ident); ok && (x.Name == "Store" || x.Name == "Bot") {
+						for _, name := range f.Names {
+							if x.Name == "Store" || name.Name != "b" {
+								t.Errorf("%s declares %s *%s: here the Bot is b and nothing else, and the store is reached "+
+									"only as b.store, so this walk sees every use of either", file, name.Name, x.Name)
+							}
+						}
+					}
+				}
+			}
+			id, ok := n.(*ast.Ident)
+			if !ok || id.Name != "b" || !namesTheBot(stack) {
+				return true
+			}
+			if msg := botEscapes(stack, id, ownFuncs, ownFields); msg != "" {
+				t.Errorf("%s: %s", file, msg)
+			}
+			return true
+		})
+	}
+}
+
+// namesTheBot is whether b, at the innermost end of stack, is the *Bot: a receiver or a parameter of
+// that type, in the nearest function that declares a b at all.
+func namesTheBot(stack []ast.Node) bool {
+	for i := len(stack) - 1; i >= 0; i-- {
+		var lists []*ast.FieldList
+		switch fn := stack[i].(type) {
+		case *ast.FuncDecl:
+			lists = []*ast.FieldList{fn.Recv, fn.Type.Params}
+		case *ast.FuncLit:
+			lists = []*ast.FieldList{fn.Type.Params}
+		default:
+			continue
+		}
+		for _, l := range lists {
+			if l == nil {
+				continue
+			}
+			for _, f := range l.List {
+				for _, name := range f.Names {
+					if name.Name == "b" {
+						star, ok := f.Type.(*ast.StarExpr)
+						if !ok {
+							return false
+						}
+						x, ok := star.X.(*ast.Ident)
+						return ok && x.Name == "Bot"
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+// botEscapes says what is wrong with one use of the Bot's b, or "": the receiver of a call (which the
+// lists above judge), or of a call on b.store or a read of b.cfg, its own declaration, or an argument
+// to a function of the strict files.
+func botEscapes(stack []ast.Node, id *ast.Ident, ownFuncs, ownFields map[string]bool) string {
+	at := func(back int) ast.Node {
+		if len(stack) < back {
+			return nil
+		}
+		return stack[len(stack)-back]
+	}
+	switch p := at(1).(type) {
+	case *ast.Field:
+		return "" // its declaration
+	case *ast.SelectorExpr:
+		if p.X != id {
+			return ""
+		}
+		switch q := at(2).(type) {
+		case *ast.CallExpr:
+			if q.Fun == p {
+				return "" // b.X(…)
+			}
+		case *ast.SelectorExpr:
+			if q.X == p && p.Sel.Name == "cfg" {
+				return "" // the Config, read at boot
+			}
+			if call, ok := at(3).(*ast.CallExpr); ok && q.X == p && call.Fun == q && p.Sel.Name == "store" {
+				return "" // b.store.X(…)
+			}
+		}
+		return fmt.Sprintf("b.%s is used other than by calling it (in a variable, as an argument or as a method value), "+
+			"which takes it where this test does not follow", p.Sel.Name)
+	case *ast.CallExpr:
+		handed := false
+		for _, a := range p.Args {
+			handed = handed || a == ast.Expr(id)
+		}
+		if handed {
+			switch fn := p.Fun.(type) {
+			case *ast.Ident:
+				if ownFuncs[fn.Name] {
+					return ""
+				}
+				return fmt.Sprintf("b is handed to %s, which is not declared in these files and is not walked with them", fn.Name)
+			case *ast.SelectorExpr:
+				if x, ok := fn.X.(*ast.Ident); ok && x.Name != "b" && ownFields[fn.Sel.Name] {
+					return ""
+				}
+			}
+			return "b is handed to a function this test does not walk"
+		}
+	}
+	return "b is used as a value (in a variable, a literal or a return), which takes it where this test does not follow"
 }
 
 // The second claim: a staged step is always one of a fixed set of paths the console already
@@ -246,8 +460,16 @@ func TestAssistantHasNoWriteCapability(t *testing.T) {
 // in the console's own voice — the permission on the endpoint would stop the worst of it, but
 // an admin pressing Confirm holds most of those permissions already.
 func TestStagedStepsAreOnTheAllowList(t *testing.T) {
-	if !stepAllowed("PUT", "/api/scopes/7") || !stepAllowed("POST", "/api/approval-roles/3/members") {
-		t.Fatal("the allow-list does not admit the steps the tools build")
+	for _, ok := range [][2]string{
+		{"PUT", "/api/scopes/7"}, {"POST", "/api/approval-roles/3/members"},
+		{"PUT", "/api/review-types/general"}, {"PUT", "/api/review-types/api-contract"}, {"POST", "/api/review-types"},
+		{"PUT", "/api/review-settings/0123456789abcdef0123456789abcdef"},
+		{"PUT", "/api/review-settings/0123456789abcdef0123456789abcdef?repo=acme%2Fweb"},
+		{"PUT", "/api/review-settings/0123456789abcdef0123456789abcdef?repo=my-org%2Fsite.v2_beta"},
+	} {
+		if !stepAllowed(ok[0], ok[1]) {
+			t.Errorf("the allow-list does not admit %s %s, a step the tools build", ok[0], ok[1])
+		}
 	}
 	for _, bad := range [][2]string{
 		{"DELETE", "/api/approval-roles/3"},     // deliberately not offered
@@ -256,6 +478,37 @@ func TestStagedStepsAreOnTheAllowList(t *testing.T) {
 		{"PUT", "/api/settings"},
 		{"PUT", "/api/scopes/7/../../org"},
 		{"GET", "/api/scopes/7"},
+		// A review type is saved and made; it is never reset, reverted, switched by its own routes, or
+		// tried on a pull request from a card.
+		{"POST", "/api/review-types/general/reset"},
+		{"POST", "/api/review-types/general/revert"},
+		{"POST", "/api/review-types/general/enable"},
+		{"POST", "/api/review-types/general/disable"},
+		{"POST", "/api/review-types/try"},
+		{"DELETE", "/api/review-types/general"},
+		{"PUT", "/api/review-types/general/x"},
+		{"PUT", "/api/review-types/../settings"},
+		{"PUT", "/api/review-types/General"},
+		{"PUT", "/api/review-types/general?x=1"},
+		// A level's branch rules are saved by its PUT and nothing else: not moved, removed, restored,
+		// deleted or given repositories from a card, and its address carries one escaped repository name
+		// or none — never a second parameter, never a path of its own.
+		{"PUT", "/api/review-settings/0123456789abcdef0123456789abcdef?repo=a%2Fb&x=1"},
+		{"PUT", "/api/review-settings/0123456789abcdef0123456789abcdef?repo=a/b"},
+		{"PUT", "/api/review-settings/0123456789abcdef0123456789abcdef?repo=a%2Fb%2Fc"},
+		{"PUT", "/api/review-settings/0123456789abcdef0123456789abcdef?x=1"},
+		{"PUT", "/api/review-settings/0123456789ABCDEF0123456789ABCDEF"},
+		{"PUT", "/api/review-settings/0123456789abcdef0123456789abcde"},
+		{"PUT", "/api/review-settings/../review-types/general"},
+		{"PUT", "/api/review-settings"},
+		{"POST", "/api/review-settings"},
+		{"POST", "/api/review-settings/0123456789abcdef0123456789abcdef"},
+		{"DELETE", "/api/review-settings/0123456789abcdef0123456789abcdef"},
+		{"POST", "/api/review-settings/0123456789abcdef0123456789abcdef/move"},
+		{"POST", "/api/review-settings/0123456789abcdef0123456789abcdef/remove"},
+		{"POST", "/api/review-settings/0123456789abcdef0123456789abcdef/restore"},
+		{"POST", "/api/review-settings/0123456789abcdef0123456789abcdef/repos"},
+		{"PUT", "/api/review-settings/0123456789abcdef0123456789abcdef/move"},
 	} {
 		if stepAllowed(bad[0], bad[1]) {
 			t.Errorf("the allow-list admits %s %s", bad[0], bad[1])
@@ -346,6 +599,42 @@ func TestConsoleToolsFollowTheCallersPermissions(t *testing.T) {
 	// ones it can.
 	if _, err := f.tool(viewer, "read_console").Run(context.Background(), viewer, args(map[string]any{"resource": "audit"})); err == nil {
 		t.Error("a member without audit.view read the audit log")
+	}
+
+	// On Reviews, its tools follow the same rule over two permissions — a card about a type the person
+	// cannot read is one they cannot check — and its page: off it, or where code review is off, they are
+	// nobody's. A member who may change code review and nothing else gets them and nothing else's.
+	seedReviewTree(f)
+	onReviews := func(perms ...string) *consoleCall {
+		c := f.reviewCall(perms...)
+		c.Focus = f.b.resolveFocus(context.Background(), c, focusOf("review_type", map[string]string{"type": "general"}))
+		return c
+	}
+	names := f.toolNames(onReviews(PermReviewsView, PermReviewsManage))
+	if !names["propose_review_type"] || !names["propose_branch_rules"] || names["propose_channel_settings"] || names["propose_approval_change"] {
+		t.Errorf("reviews.view and reviews.manage on Reviews were offered %v", names)
+	}
+	if res := f.resources(onReviews(PermReviewsView)); !res["review_types"] || !res["review_settings"] {
+		t.Errorf("reviews.view on Reviews did not open the review resources: %v", res)
+	}
+	for who, c := range map[string]*consoleCall{
+		"a viewer of code review":   onReviews(PermReviewsView),
+		"scopes.manage alone":       onReviews(PermScopesManage),
+		"approvers.manage alone":    onReviews(PermApproversManage),
+		"no page focus":             f.reviewCall(PermReviewsView, PermReviewsManage),
+		"another page, all of them": f.consoleCallFor(PermReviewsView, PermReviewsManage, PermScopesManage, PermApproversManage),
+	} {
+		for _, tool := range []string{"propose_review_type", "propose_branch_rules"} {
+			if f.toolNames(c)[tool] {
+				t.Errorf("%s was offered %s", who, tool)
+			}
+		}
+	}
+	f.b.cfg.CodeReview = CodeReviewOff
+	off := f.reviewCall(PermReviewsView, PermReviewsManage)
+	off.Focus = &consoleFocus{Kind: "review_type", Ref: map[string]string{"type": "general"}}
+	if names := f.toolNames(off); names["propose_review_type"] || names["propose_branch_rules"] || f.resources(off)["review_types"] {
+		t.Error("with code review off its tools or its resources were still offered")
 	}
 }
 
@@ -784,6 +1073,10 @@ func TestGuideSearchFindsTheRightSection(t *testing.T) {
 		{"path prefixes and methods on a connection", "connections.md", "Connections"},
 		{"approve a github repository collaborator", "connections.md", "Repositories"},
 		{"monorepo more than one package", "fix-jobs.md", "Monorepos"},
+		// Asked on Reviews, and answered by code review's page rather than by the console's own
+		// section on the assistant, which says only that it can and links there.
+		{"change a review type's rules from the assistant", "code-review.md", "Changing types and rules from the assistant"},
+		{"add a branch rule from the assistant", "code-review.md", "Changing types and rules from the assistant"},
 	} {
 		out := searchGuide(tc.query)
 		if !strings.Contains(out, tc.wantFile) {
@@ -792,6 +1085,13 @@ func TestGuideSearchFindsTheRightSection(t *testing.T) {
 		if tc.wantTitle != "" && !strings.Contains(out, tc.wantTitle) {
 			t.Errorf("%q did not reach a section titled like %q:\n%s", tc.query, tc.wantTitle, firstHeadings(out))
 		}
+	}
+	// Both sections are returned for that question, and the order is the point: the console's says
+	// the assistant can do it, and only code review's says what a position or an R-number means, so
+	// the one a model reads first has to be the one that says how.
+	first := firstHeadings(searchGuide("change a review type's rules from the assistant"))
+	if !strings.HasPrefix(first, "## code-review.md — Changing types and rules from the assistant") {
+		t.Errorf("code review's section on the assistant does not come first:\n%s", first)
 	}
 }
 
@@ -869,6 +1169,20 @@ func TestEveryResourceReadsWithoutError(t *testing.T) {
 			}
 		})
 	}
+
+	// And the Reviews page's own, offered there, before anybody has set code review up: every type is
+	// still there to read, one rule of one of them, and a tree that is empty says so.
+	rc := f.reviewCall(PermReviewsView)
+	rc.Focus = f.b.resolveFocus(ctx, rc, focusOf("reviews", map[string]string{"tab": "types"}))
+	for _, a := range []map[string]any{
+		{"resource": "review_types"}, {"resource": "review_types", "id": "general"}, {"resource": "review_types", "id": "general R3"},
+		{"resource": "review_settings"},
+	} {
+		out, err := f.tool(rc, "read_console").Run(ctx, rc, args(a))
+		if err != nil || strings.TrimSpace(out) == "" {
+			t.Errorf("%v: %q, %v", a, out, err)
+		}
+	}
 }
 
 // The whole set, in one place, so adding a tool is a decision somebody makes rather than
@@ -884,6 +1198,32 @@ func TestTheToolsAnAdminIsOffered(t *testing.T) {
 	}
 	if len(got) != len(want) {
 		t.Errorf("the tool set has changed: %v", got)
+	}
+}
+
+// And on the Reviews page, with a type or a level open, the page's own two tools on top — offered there
+// and nowhere else, so their schemas are not paid for on a question asked from any other page.
+func TestTheToolsOfferedOnReviews(t *testing.T) {
+	f := newAssist(t, RoleAdmin, &fakeLLM{answer: "ok"})
+	seedReviewTree(f)
+	want := []string{"read_console", "search_guide", "propose_channel_settings", "propose_approval_change", "propose_review_type",
+		"propose_branch_rules"}
+	for _, focus := range []*assistantFocus{
+		focusOf("review_type", map[string]string{"type": "general"}),
+		focusOf("review_node", map[string]string{"node": "acme/web"}),
+		focusOf("reviews", map[string]string{"tab": "history"}),
+	} {
+		c := f.reviewCall(PermScopesManage, PermApproversManage, PermConnView, PermReviewsView, PermReviewsManage)
+		c.Focus = f.b.resolveFocus(context.Background(), c, focus)
+		got := f.toolNames(c)
+		for _, w := range want {
+			if !got[w] {
+				t.Errorf("on %s an admin was not offered %q", focus.Kind, w)
+			}
+		}
+		if len(got) != len(want) {
+			t.Errorf("on %s the tool set has changed: %v", focus.Kind, got)
+		}
 	}
 }
 
@@ -938,6 +1278,42 @@ func TestPageContextReachesTheModel(t *testing.T) {
 	for _, want := range []string{"Workspaces", "/workspaces/", "#ops", "C1", "do not ask which one"} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("the model was not told %q:\n%s", want, truncate(prompt, 600))
+		}
+	}
+
+	// What else a page had open reaches it the same way, from either shape of request: the type on
+	// Reviews › Types, and the level on Reviews › Settings, each said from the row it resolved to.
+	seedReviewTree(f)
+	body, _ = json.Marshal(assistantRequest{Question: "add a rule to this", Path: "/reviews/", Page: "Reviews",
+		Focus: focusOf("review_type", map[string]string{"type": "general"})})
+	if w := f.send(httptest.NewRequest("POST", "/api/assistant", strings.NewReader(string(body)))); w.Code != 200 {
+		t.Fatalf("turn failed: %d %s", w.Code, w.Body.String())
+	}
+	prompt = llm.prompt()
+	for _, want := range []string{`the Reviews page (/reviews/), on the Types tab, showing review type \"General\"`, // quoted, inside the request's JSON
+		"key general; built-in, unedited, v0", "this is the type they mean; do not ask which"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("the model was not told %q:\n%s", want, truncate(prompt, 600))
+		}
+	}
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	mw.WriteField("question", "add a branch rule here")
+	mw.WriteField("path", "/reviews")
+	mw.WriteField("page", "Reviews")
+	mw.WriteField("focus", `{"kind":"review_node","params":{"node":"acme/web","dirty":"1"}}`)
+	mw.Close()
+	r := httptest.NewRequest("POST", "/api/assistant", &buf)
+	r.Header.Set("Content-Type", mw.FormDataContentType())
+	if w := f.send(r); w.Code != 200 {
+		t.Fatalf("turn failed: %d %s", w.Code, w.Body.String())
+	}
+	prompt = llm.prompt()
+	for _, want := range []string{"on the Settings tab, showing repository acme/web under connection octo-org",
+		"inherits 2 branch rules from connection octo-org", "this is the level they mean", "unsaved edits"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("the model was not told %q:\n%s", want, truncate(prompt, 800))
 		}
 	}
 }

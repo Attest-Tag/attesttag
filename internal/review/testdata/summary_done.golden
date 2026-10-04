@@ -1,0 +1,92 @@
+<!-- attest_tag:review=0123456789abcdef0123456789abcdef.081c9d1c6d5ac86a -->
+### attest_tag review · Confidence 1/5 (advisory)
+
+Do not merge yet: **Session token logged on every request** (P0, `api/log.go:L12`) and 4 more.
+
+<details open><summary>Summary</summary>
+
+Adds per-organisation item lists and a totals refresh.  Thanks @⁠octocat!
+
+</details>
+
+<details open><summary>Open findings (5)</summary>
+
+**P0** · Security · Session token logged on every request · [`api/log.go:L12`](https://github.com/acme/web/blob/ab12cd3ef45678901234567890abcdef12345678/api/log.go#L12) · open
+<details><summary>Code</summary>
+
+`````go
+10   func logRequest(r *http.Request) {
+11   	// ```` not a fence 
+12 › 	log.Printf("%s %s auth=%s", r.Method, r.URL, r.Header.Get("Authorization"))
+13   }
+`````
+
+</details>
+
+- **P1** · General · Stale closure keeps the first account · [`src/account.ts:L50-52`](https://github.com/acme/web/blob/c03ddb1a2b3c4d5e6f708192a3b4c5d6e7f80912/src/account.ts#L50-L52) · open, possibly outdated
+
+**P1** · Security · [Tenant check missing on list query](https://github.com/acme/web/pull/7#discussion_r101) · [`src/totals.ts:L50-52`](https://github.com/acme/web/blob/ab12cd3ef45678901234567890abcdef12345678/src/totals.ts#L50-L52) · open
+<details><summary>Code</summary>
+
+```ts
+38   func listOrders(w http.ResponseWriter, r *http.Request) {
+39   	rows := db.Query("select * from orders where status = $1", r.URL.Query().Get("status"))
+40   	json.NewEncoder(w).Encode(rows)
+41   }
+```
+
+</details>
+
+- **P2** · General · Magic number for the page size · [`src/page.ts:L50-52`](https://github.com/acme/web/blob/c03ddb1a2b3c4d5e6f708192a3b4c5d6e7f80912/src/page.ts#L50-L52) · disputed
+
+- **P2** · General · No test for the empty totals case · [`src/totals.ts:L50-52`](https://github.com/acme/web/blob/c03ddb1a2b3c4d5e6f708192a3b4c5d6e7f80912/src/totals.ts#L50-L52) · claimed fixed in `ab12cd3`
+
+</details>
+
+<sub>Reviewed as General and Security · open: General 3 · Security 2</sub>
+
+<details><summary>Outside the diff (1)</summary>
+
+**Security · P0 · Session token logged on every request** · [`api/log.go:L12`](https://github.com/acme/web/blob/ab12cd3ef45678901234567890abcdef12345678/api/log.go#L12)
+
+`````go
+10   func logRequest(r *http.Request) {
+11   	// ```` not a fence 
+12 › 	log.Printf("%s %s auth=%s", r.Method, r.URL, r.Header.Get("Authorization"))
+13   }
+`````
+
+`logRequest` writes the Authorization header to the access log, which ships to the log vendor.
+
+</details>
+
+<details><summary>Pre-existing (1)</summary>
+
+**General · P2 · Retry loop never gives up** · [`src/retry.ts:L50-52`](https://github.com/acme/web/blob/c03ddb1a2b3c4d5e6f708192a3b4c5d6e7f80912/src/retry.ts#L50-L52)
+
+The loop retries forever on a 500 from the totals service.
+
+<sub>Not introduced by this pull request, so not scored.</sub>
+
+</details>
+
+<details><summary>Not reviewed (2 files, 1 review type)</summary>
+
+- `assets/logo.png` — binary
+- `dist/bundle.js` — too large
+- Release summary review — not run: budget
+
+</details>
+
+<details><summary>Possibly outdated (1)</summary>
+
+<sub>These files changed after `c03ddb1` was reviewed, so these findings may no longer apply.</sub>
+
+**General · P1 · Stale closure keeps the first account** · [`src/account.ts:L50-52`](https://github.com/acme/web/blob/c03ddb1a2b3c4d5e6f708192a3b4c5d6e7f80912/src/account.ts#L50-L52)
+
+The effect captures `account` once; switching accounts keeps loading the first one.
+
+</details>
+
+<sub>Reviews (3) · Last reviewed `c03ddb1` · head `ab12cd3` not reviewed — `@attest-tag-test review` · Rule: `any → testing` · cost $0.41 · [details ↗](https://console.example.com/reviews/0123)</sub>
+<!-- attest_tag:state sha=c03ddb1a2b3c4d5e6f708192a3b4c5d6e7f80912 score=1 open=5 -->

@@ -57,6 +57,8 @@ export function SegmentedControl<T extends string>({
             key={option.value}
             type="button"
             disabled={option.disabled}
+            // Which one is chosen is drawn with a border alone; a screen reader is told it too.
+            aria-pressed={option.value === value}
             onClick={() => onValueChange?.(option.value)}
             className={itemClass(option.value === value)}
           >
