@@ -14,7 +14,10 @@ Versions follow [semantic versioning](https://semver.org). Before 1.0 that means
   down migrations, so back the database up before a minor upgrade: going back means restoring
   that backup.
 
-## Unreleased
+## 0.2.0 (2026-10-04)
+
+Like 0.1.0, the source alone: no images, Helm chart or binaries are published for it, so build from
+the checkout as the deploy guides say.
 
 **Code review.** attest_tag reviews pull requests on GitHub, through the GitHub App it already
 installs. → [Code review](guide/code-review.md)
@@ -91,6 +94,18 @@ installs. → [Code review](guide/code-review.md)
   [Guardrails](guide/security.md#code-review-posts-without-a-confirm) says what stands in for the
   Confirm.
 
+**Security fixes**, found by an audit of the code review change, of which the first two were in
+0.1.0 too:
+
+- Attaching a GitHub App installation to an organisation now needs its account's owner, or somebody
+  with admin on every repository it covers. It used to need only that the installation was visible
+  to the person, so an organisation's member or outside collaborator could attach one nobody had
+  claimed yet, with its tokens.
+- A member without `audit.view` can no longer search the console assistant's questions and replies,
+  which told them, a guess at a time, what a redacted reply said.
+- A label rule no longer hides a branch-rule change from the check that keeps live posting with
+  `connections.manage`.
+
 What an upgrade asks of you:
 
 - Five migrations, `0027_code_review`, `0028_review_lane`, `0029_review_snippet`,
@@ -100,6 +115,9 @@ What an upgrade asks of you:
   webhook on at GitHub with the five events
   [configuration](guide/configuration.md#the-apps-webhook-and-permissions-for-code-review) lists,
   and add an installation under Automation › Reviews.
+- Connecting a GitHub App installation (Connect GitHub, or the install redirect) takes the account's
+  owner or an admin of every repository it covers; somebody who only requested the install is told
+  to ask one of them. Installations already connected are not affected.
 - Two new permissions: `reviews.view`, which the viewer, editor and admin roles hold, and
   `reviews.manage`, which editor and admin hold. A role you made yourself has neither until somebody
   ticks them.
