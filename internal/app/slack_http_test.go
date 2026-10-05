@@ -465,3 +465,28 @@ func TestSlackDeliveryGlobalLimitAndReceiptCleanup(t *testing.T) {
 		t.Fatal("cleanup deleted pending work or kept expired receipt", n)
 	}
 }
+
+// tokens_revoked names the user tokens and the bot's apart, and only the bot's is what a workspace
+// runs on: a person giving back their own grant leaves the workspace connected, and the bot's
+// token revoked disconnects it, like an uninstall.
+func TestTokensRevokedDisconnectsOnlyForTheBotsToken(t *testing.T) {
+	b, _ := slackHTTPTestBot(t)
+	ctx := context.Background()
+	event := func(tokens string) slackevents.EventsAPIEvent {
+		t.Helper()
+		body := `{"type":"event_callback","event_id":"Ev1","team_id":"T_A","event":{"type":"tokens_revoked","tokens":` + tokens + `}}`
+		ev, err := slackevents.ParseEvent(json.RawMessage(body), slackevents.OptionNoVerifyToken())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ev
+	}
+	b.route(ctx, "T_A", event(`{"oauth":["U1","U2"],"bot":[]}`))
+	if team, _ := b.store.Team(ctx, "T_A"); team == nil || team.Status != "active" {
+		t.Fatalf("user tokens given back disconnected the workspace: %+v", team)
+	}
+	b.route(ctx, "T_A", event(`{"oauth":[],"bot":["U_BOT"]}`))
+	if team, _ := b.store.Team(ctx, "T_A"); team == nil || team.Status == "active" {
+		t.Fatalf("the bot's token revoked left the workspace connected: %+v", team)
+	}
+}
