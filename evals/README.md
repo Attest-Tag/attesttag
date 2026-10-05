@@ -11,6 +11,25 @@ and the reply text. Re-run whenever the model, provider or system prompt changes
 The `connection_*` cases need a bundle attached to the pilot channel with a bearer connection
 for `httpbin.org` (any token) — create it in the console under Access bundles.
 
+## Fix-job evals
+
+`fixjobs/` holds small repositories, each with a task (`task.json`: the title, the request and the
+acceptance criteria a fix job's brief carries) and hidden tests (`hidden/`) the engine never sees.
+The eval runs every task as a real job — the worker, its model proxy, a real engine on a real
+model — against a local copy of the repository, then checks the pushed branch out with the hidden
+tests added and runs `make test`. Each row says whether the change was right and what it took:
+turns, input tokens and the share served from cache, output tokens, the billed cost and the time.
+
+    FIXEVAL_API_KEY=sk-or-... go test ./internal/worker -run TestFixEval -fixeval -v -timeout 2h
+
+`FIXEVAL_ENGINES` (default `qwen_code,pi`), `FIXEVAL_MODELS` (`z-ai/glm-5.3`), `FIXEVAL_TASKS` (all),
+`FIXEVAL_PROVIDERS`, `FIXEVAL_MAX_ROUNDS` (`80`), `FIXEVAL_BUDGET_USD` (`1` a run) and `FIXEVAL_OUT` (a
+JSON file for the rows) shape it; `WORKER_QWEN_BIN` and `WORKER_PI_BIN` point at the engines. It
+spends real money, a few cents a run on the tasks here, and never runs without `-fixeval`. A new
+task is a folder with `repo/` (a `Makefile` whose `test` target runs the suite), `hidden/` (files
+copied over the result before grading) and `task.json`; its hidden tests must fail on `repo/` as
+committed.
+
 ## HTTP staging setup
 
 Live evals must run on a staging host where the bot and eval process share the same `DB_PATH`.

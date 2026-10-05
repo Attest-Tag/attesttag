@@ -81,6 +81,7 @@ func (r *Reporter) Usage(u app.JobUsage) {
 	}
 	r.mu.Lock()
 	r.usage.In += u.In
+	r.usage.Cached += u.Cached
 	r.usage.Out += u.Out
 	r.usage.CostUSD += u.CostUSD
 	r.mu.Unlock()

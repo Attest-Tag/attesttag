@@ -238,6 +238,7 @@ func (b *Bot) handleJobClaim(w http.ResponseWriter, r *http.Request, j *Job) {
 		Limits: JobLimits{BudgetUSD: j2.BudgetUSD, Deadline: deadline.UTC().Format(time.RFC3339), HeartbeatSeconds: JobHeartbeatSecs,
 			EventMaxBytes: JobEventMaxBytes, SummaryMaxBytes: JobSummaryMaxBytes, LogTailMaxBytes: JobLogTailMaxBytes, DiffMaxBytes: JobDiffMaxBytes},
 		Cache: b.jobs.cacheURLs(ctx, j2),
+		Price: b.jobs.listPrice(ctx, j2),
 	}
 	slog.Info("job claimed", "job", j2.ID, "worker", string(info), "claims", j2.ClaimCount)
 	b.jobs.refresh(j2.OrgID, j2.ID)

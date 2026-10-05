@@ -16,8 +16,8 @@ import (
 // sandbox user for every subprocess that executes a repository's code. That user owns the job
 // directory and nothing else: it cannot read /proc/<worker>/environ (the job token), it never
 // sees the environment git clone and push are given (the repository token), and what it can
-// write is what git will commit. The engine's model key is per job and budget-capped, and is
-// the one secret that has to be in its environment.
+// write is what git will commit. The engine's model key stays in the worker too: the engine is
+// handed a token for the job's model proxy on the loopback (llmproxy.go), not the key.
 
 var sandbox struct {
 	uid, gid uint32

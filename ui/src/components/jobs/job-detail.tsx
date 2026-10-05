@@ -313,7 +313,11 @@ function JobDetailBody({ id }: { id: number }) {
           <dt className="text-muted-foreground">Cost</dt>
           <dd className="tabular-nums">
             {formatJobCost(job.cost_usd)} of {formatJobCost(job.budget_usd)} budget ·{" "}
-            {formatNumber(job.tokens_in)} in / {formatNumber(job.tokens_out)} out tokens
+            {formatNumber(job.tokens_in)} in
+            {job.tokens_cached > 0 && job.tokens_in > 0 && (
+              <> ({Math.floor((job.tokens_cached * 100) / job.tokens_in)}% from cache)</>
+            )}{" "}
+            / {formatNumber(job.tokens_out)} out tokens
           </dd>
           <dt className="text-muted-foreground">Coding agent</dt>
           <dd className="font-mono text-xs">

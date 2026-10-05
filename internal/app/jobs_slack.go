@@ -157,10 +157,24 @@ func jobSpendLine(j *Job) string {
 	if d := jobDuration(j); d > 0 {
 		parts = append(parts, fmtDuration(d))
 	}
-	if j.TokensIn > 0 || j.TokensOut > 0 {
-		parts = append(parts, fmtTokens(j.TokensIn)+" in / "+fmtTokens(j.TokensOut)+" out")
+	if t := jobTokensWords(j.TokensIn, j.TokensCached, j.TokensOut); t != "" {
+		parts = append(parts, t)
 	}
 	return strings.Join(parts, " · ")
+}
+
+// jobTokensWords is "9.8M in (91% cached) / 74k out". The cache share is the number that says
+// whether a long job was expensive or merely long: an agent re-sends its whole conversation every
+// turn, and a provider that caches it charges a fraction for all but the newest part.
+func jobTokensWords(in, cached, out int) string {
+	if in <= 0 && out <= 0 {
+		return ""
+	}
+	s := fmtTokens(in) + " in"
+	if cached > 0 && in > 0 {
+		s += fmt.Sprintf(" (%d%% cached)", cached*100/in)
+	}
+	return s + " / " + fmtTokens(out) + " out"
 }
 
 func jobFooter(j *Job) string {
@@ -464,4 +478,13 @@ func (r *JobRunner) attach(ctx context.Context, j *Job, kind, filename, title, c
 	r.store.SetJobFileLink(ctx, j.OrgID, j.ID, kind, fileID, link)
 	r.store.AddArtifact(ctx, j.OrgID, &Artifact{TeamID: j.TeamID, Channel: j.Channel, ThreadTS: j.ThreadTS, CreatedBy: j.Requester, Title: title, Kind: artifactKind,
 		Bytes: len(content), Content: content, FileID: fileID, Permalink: link})
+}
+
+// jobCostWords is the job's cost and a separator, for a line that goes on with its tokens; empty
+// when nothing priced the job.
+func jobCostWords(j *Job) string {
+	if j.CostUSD <= 0 {
+		return ""
+	}
+	return fmtCost(j.CostUSD) + " · "
 }

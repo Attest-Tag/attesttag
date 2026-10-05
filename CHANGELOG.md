@@ -82,7 +82,37 @@ job's files in memory, and a large JavaScript repository's suite and build did n
 `deploy/gcp/worker.sh` again to apply it (`MEMORY=4Gi` keeps the old size). The other platforms'
 defaults are unchanged.
 
-Upgrading: nothing to migrate. For the code review check, add *Checks: Read and write* under the
+**Fix jobs keep their prompt cache, are billed exactly, and stop at their budget.** A coding agent
+re-sends its whole conversation every turn, so a long job reads millions of input tokens, nearly all
+of them the same prefix again. → [What a job costs](guide/fix-jobs.md#what-a-job-costs)
+
+- **A model proxy in the worker.** The engine calls a proxy on the worker's loopback instead of the
+  provider, with a token for that port: the model key no longer enters the sandbox. On OpenRouter
+  every call carries the job's `session_id`, which keeps the job on the provider holding its cache,
+  and asks for usage accounting, so each answer says what it cost, what came from cache and who
+  served it — the real bill, even on the shared key. At the job's budget the proxy stops the engine
+  and what it changed is opened as a draft.
+- **Providers on purpose.** A new `worker_providers` setting (Settings → Workers → Providers) names
+  the OpenRouter providers a job asks for, in order.
+- **The cache share everywhere the cost is.** The cached part of the input is stored on the job and
+  shown in the Slack report ("9.8M in (90% cached) / 74k out"), the console's job page, the reply on
+  a pull request a fix was pushed to, and a new **Cost** section in the pull request a job opens.
+- **pi as a second coding agent** (Settings → Workers → Coding agent). Seven tools, a short system
+  prompt and its own compaction; on the fix-job evals it read about a sixth of the tokens Qwen Code
+  did for the same correct fix. → [Engines and long jobs](guide/fix-jobs.md#engines-and-long-jobs)
+- **Long jobs carry less.** Both engines compact against a 160,000-token window instead of the
+  model's million; Qwen Code runs without its sub-agent, web and memory tools and cuts tool output
+  at 6,000 characters. The brief lists the files the request names as they are in the clone, and
+  tells the engine to batch reads and read each file once.
+- **Node builds get the memory the container has.** Repository commands run with a V8 heap of about
+  60% of it, where a large front end's build ran out of Node's default.
+- **Fix-job evals.** `evals/fixjobs` runs small tasks as real jobs and grades them with hidden tests,
+  to compare engines, models and providers on what was right and what it cost.
+  → [Fix-job evals](evals/README.md#fix-job-evals)
+
+Upgrading: migration `0032_job_cached_tokens` adds the columns and applies itself at startup. The
+proxy, pi and the rest of the worker's changes need the worker image rebuilt from this release
+(`deploy/<platform>/worker.sh`); an older worker's jobs record no cached tokens. For the code review check, add *Checks: Read and write* under the
 App's *Permissions & events* at GitHub; each account that installed it is then asked to accept, and
 its next review has a check. Fixes on the pull request need the worker image rebuilt from this
 release (`deploy/<platform>/worker.sh`): an older worker refuses such a job at its clone and pushes

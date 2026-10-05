@@ -1387,6 +1387,8 @@ export type Job = {
   error: string;
   cost_usd: number;
   tokens_in: number;
+  /** The part of tokens_in the provider served from its prompt cache; 0 when not reported. */
+  tokens_cached: number;
   tokens_out: number;
   created_at: string;
   started_at: string;
@@ -1725,6 +1727,8 @@ export type EffectiveSettings = {
   WorkerMaxJobs: number;
   WorkerBranchPrefix: string;
   WorkerBranchSuffix: string;
+  /** OpenRouter providers a fix job's model calls ask for, in order; empty lets OpenRouter choose. */
+  WorkerProviders?: string;
   WorkerEventRetentionDays: number;
   /** Days of turns, tool calls, proxied requests and artifacts to keep; 0 keeps everything. */
   DataRetentionDays: number;

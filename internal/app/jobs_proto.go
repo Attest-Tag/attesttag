@@ -134,6 +134,9 @@ type JobConstraints struct {
 	BranchPrefix string  `json:"branch_prefix,omitempty"`
 	BranchSuffix string  `json:"branch_suffix"`
 	MaxRounds    int     `json:"max_rounds"`
+	// Providers are the OpenRouter providers the job's model calls ask for, in order, with a
+	// fallback to any other. Empty lets OpenRouter choose; the job's session keeps it on one.
+	Providers []string `json:"providers,omitempty"`
 	// Recipe is what the console knows about how to build and test this repository, or nil to
 	// let the worker read the repository's own .attest/recipe.yaml and then fall back to
 	// detection. It is snapshotted at dispatch like everything else here.
@@ -242,6 +245,22 @@ type JobClaim struct {
 	Secrets JobSecrets  `json:"secrets"`
 	Limits  JobLimits   `json:"limits"`
 	Cache   JobCache    `json:"cache,omitempty"`
+	// Price is the model's list price from the bot's catalogue, so the pull request the worker
+	// writes can say what the run came to. An estimate: the provider that served each call may
+	// charge differently, and the bot's own figure (metered or priced) is the one it records.
+	Price *JobPrice `json:"price,omitempty"`
+}
+
+// JobPrice is a model's list price in dollars per million tokens.
+type JobPrice struct {
+	InPerM     float64 `json:"in_per_m"`
+	CachedPerM float64 `json:"cached_per_m"`
+	OutPerM    float64 `json:"out_per_m"`
+}
+
+// Cost prices a job's tokens; cached prompt tokens are part of In and priced as cache reads.
+func (p JobPrice) Cost(u JobUsage) float64 {
+	return modelPrice{In: p.InPerM / 1e6, CachedIn: p.CachedPerM / 1e6, Out: p.OutPerM / 1e6}.cost(u.usage())
 }
 
 // JobCache is where a worker restores and saves this repository's dependency cache: two
@@ -297,17 +316,18 @@ type JobLimits struct {
 // ---- events ----
 
 type JobUsage struct {
-	In      int     `json:"in"`
+	In int `json:"in"`
+	// Cached is the part of In the provider served from its prompt cache, as the engine reported
+	// it. A worker built before it was sent reports none, and zero is a floor, not a claim.
+	Cached  int     `json:"cached,omitempty"`
 	Out     int     `json:"out"`
 	CostUSD float64 `json:"cost_usd"`
 }
 
-// usage is what a worker's report looks like as a turn's usage. The cache and reasoning counts
-// are zero because the worker never sends them: it runs someone else's agent in another
-// container and reports three numbers over this wire. Zero is the truthful value here, not a
-// missing one — see the note on the columns in migrations/sqlite/0010_usage_cache_tokens.sql.
+// usage is what a worker's report looks like as a turn's usage. Reasoning stays zero: the engine
+// reports it inside Out, if at all — see migrations/sqlite/0010_usage_cache_tokens.sql.
 func (u JobUsage) usage() Usage {
-	return Usage{In: u.In, Out: u.Out, CostUSD: u.CostUSD}
+	return Usage{In: u.In, CachedIn: u.Cached, Out: u.Out, CostUSD: u.CostUSD}
 }
 
 // usageOn is usage as one job spent it: on the organisation's own key it is recorded as the
@@ -375,7 +395,8 @@ type JobResult struct {
 	Unchecked     []string    `json:"unchecked,omitempty"`
 	DiffStat      JobDiffStat `json:"diff_stat"`
 	FilesChanged  []string    `json:"files_changed,omitempty"`
-	Usage         JobUsage    `json:"usage"` // total for the job
+	Usage         JobUsage    `json:"usage"`           // total for the job
+	Turns         int         `json:"turns,omitempty"` // model replies the engine took
 	Model         string      `json:"model,omitempty"`
 	Engine        string      `json:"engine,omitempty"`
 	LogTail       string      `json:"log_tail,omitempty"`
