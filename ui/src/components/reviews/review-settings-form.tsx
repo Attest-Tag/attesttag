@@ -349,13 +349,24 @@ export function ReviewSettingsForm({
         </SettingsSection>
         <SettingsSection
           title="Authors to skip"
-          description="GitHub logins, or globs of them, never reviewed automatically — bots, mostly. A command still reviews them."
+          description="GitHub logins, or globs of them, never reviewed automatically — machine accounts, mostly. A command still reviews them."
         >
           <ChipsListField
             env={env}
             field="exclude_authors"
             label="Authors"
-            placeholder="renovate[bot], *-bot"
+            placeholder="release-bot, *-ci"
+          />
+        </SettingsSection>
+        <SettingsSection
+          title="Bots to review"
+          description="A pull request a bot opened is skipped, unless the bot is listed here — by login, with or without [bot], or a glob; * lets every bot through. The authors to skip still apply."
+        >
+          <ChipsListField
+            env={env}
+            field="review_bots"
+            label="Bots"
+            placeholder="dependabot, renovate[bot]"
           />
         </SettingsSection>
         <SettingsSection title="Paths to ignore" description="Path globs left out of every review: generated code, lockfiles, vendored packages.">

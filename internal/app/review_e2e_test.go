@@ -635,3 +635,32 @@ func TestReviewCatchupHoldsEachOrganisationToItsShare(t *testing.T) {
 		t.Errorf("after pass 3 %d of acme's %d missed pull requests acted on", acted(orgID), 2*repos)
 	}
 }
+
+// A bot's pull request is turned away unless the settings name the bot: renovate, listed at the
+// connection without its "[bot]", is reviewed like anybody's, and dependabot, not listed, is not.
+func TestReviewE2EReviewsOnlyTheBotsListed(t *testing.T) {
+	rig := newE2ERig(t)
+	connID := rig.liveOnTesting()
+	rig.confirmLock()
+	rig.must(200, "PUT", "/api/review-settings/"+connID, rig.admin, map[string]any{"settings": map[string]any{"review_bots": []string{"renovate"}}})
+	skip := func(n int) string {
+		if p := rig.pr(n); p != nil {
+			return p.SkipReason
+		}
+		return "(no pull request)"
+	}
+	sha8, sha9 := strings.Repeat("8", 40), strings.Repeat("9", 40)
+
+	rig.deliver("pull_request", prEvent("opened", 8, sha8, func(pr map[string]any) {
+		pr["user"] = map[string]any{"login": "renovate[bot]", "type": "Bot"}
+	}))
+	if runs := rig.runs(8); len(runs) != 1 || runs[0].Kind != "review" || runs[0].Status != "queued" {
+		t.Fatalf("renovate, listed, got %+v, skipped as %q", runs, skip(8))
+	}
+	rig.deliver("pull_request", prEvent("opened", 9, sha9, func(pr map[string]any) {
+		pr["user"] = map[string]any{"login": "dependabot[bot]", "type": "Bot"}
+	}))
+	if got := skip(9); got != "bot" || len(rig.runs(9)) != 0 {
+		t.Fatalf("dependabot, not listed: skipped as %q with %d runs", got, len(rig.runs(9)))
+	}
+}

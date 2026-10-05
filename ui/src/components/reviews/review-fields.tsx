@@ -527,7 +527,7 @@ export function ChipsListField({
   reachAll = false,
 }: {
   env: FieldEnv;
-  field: "exclude_authors" | "ignore_paths";
+  field: "exclude_authors" | "review_bots" | "ignore_paths";
   label: string;
   placeholder: string;
   reachAll?: boolean;

@@ -226,9 +226,10 @@ A value is resolved **repository → group → connection → built-in default**
 
 - **A single value** comes from the nearest level that sets one, so a repository can override its
   group and a group its connection.
-- **The four lists add up**, connection first: instructions, authors to skip, paths to ignore and
-  context repositories. A connection's "skip `renovate[bot]`" still applies to a repository that
-  adds one more author, so nobody restates the basics, and nobody loses them by adding to the list.
+- **The lists add up**, connection first: instructions, authors to skip, bots to review, paths to
+  ignore and context repositories. A connection's "skip `release-bot`" still applies to a repository
+  that adds one more author, so nobody restates the basics, and nobody loses them by adding to the
+  list.
 - **Branch rules** are the exception: an ordered list where the first match wins cannot be merged,
   so the nearest level that has any rules supplies the whole list.
 
@@ -259,7 +260,8 @@ or *off*; its menu's **Code review settings…** and **Set review** in the selec
 | Model | Advanced | the default model, the advanced one, or one offered to channels; it verifies every finding, and finds them for every type without a model of its own |
 | Max $ per review | $1.00 | $0.10 to $5.00, verification included ([money](#money-and-budgets)) |
 | Instructions | none | what the team wants checked, one entry each, put in the prompt as the team's criteria |
-| Authors to skip | none | GitHub logins or globs (`*-bot`, `renovate[bot]`) never reviewed without somebody asking; a pull request another bot opened is skipped anyway, and one this App opened — a [fix job](fix-jobs.md)'s — is reviewed like a person's, once it is out of draft |
+| Authors to skip | none | GitHub logins or globs (`release-bot`, `*-ci`) never reviewed without somebody asking |
+| Bots to review | none | the bots whose pull requests are reviewed without anybody asking: a login with or without `[bot]` (`dependabot`, `renovate[bot]`), a glob, or `*` for every bot. Any other bot's pull request is skipped; one this App opened — a [fix job](fix-jobs.md)'s — is reviewed like a person's, once it is out of draft. The authors to skip still apply |
 | Paths to ignore | none | path globs left out of every review (`dist/**`, `**/*.snap`) |
 | Context repositories | none | the organisation's other repositories connected through the App, which the review may read, and quote, for contracts that cross them — up to five per review |
 | Channel | none | the chat channel each review and the merge are announced in ([announcements](#announcements-in-a-chat-channel)) |
@@ -426,11 +428,11 @@ The run records the label beside the rule — `Rule: any → testing +label:secu
 review with a label's types is a different review from one without. A label put on a pull request
 already reviewed reviews what it adds and nothing else, on the head as it is, 90 seconds later —
 unless a review of that head has run those types or is queued to. It is held to *When*, drafts, the
-authors to skip and forks like any review nobody asked for, and is not run while the pull request's
-automatic reviews are [paused](#pausing-automatic-reviews); one a person's label asks for does not
-count towards the pause, one a bot's label asks for does. Taking the label off, or changing its rule,
-during the 90 seconds ends its review having spent nothing; taking it off later changes nothing
-already reviewed.
+bots to review, the authors to skip and forks like any review nobody asked for, and is not run while
+the pull request's automatic reviews are [paused](#pausing-automatic-reviews); one a person's label
+asks for does not count towards the pause, one a bot's label asks for does. Taking the label off, or
+changing its rule, during the 90 seconds ends its review having spent nothing; taking it off later
+changes nothing already reviewed.
 `GET /api/review-settings/{id}?base=&head=&labels=` says what a pull request between those branches
 with those labels would run, and Start review ticks a pull request's types with its labels' added.
 
@@ -636,9 +638,10 @@ Commands are taken from the repository's own people: whoever GitHub marks on the
 owner, a member of the organisation that owns it, or somebody invited to collaborate on it. Anybody
 else is ignored on a private repository, and on a public one gets one line a day per pull request
 saying who can ask. One person may send ten commands an hour. A command is picked up with an eyes
-reaction, and skips *When*, drafts and the authors to skip — a person asked — but not fork policy,
-the money or the throttles. On a pull request whose review is recorded in shadow a command is acted
-on and nothing is written to GitHub. Each is audited (`review.command`) with what it came to.
+reaction, and skips *When*, drafts, the bots to review and the authors to skip — a person asked —
+but not fork policy, the money or the throttles. On a pull request whose review is recorded in
+shadow a command is acted on and nothing is written to GitHub. Each is audited (`review.command`)
+with what it came to.
 
 ### Pausing automatic reviews
 
@@ -763,11 +766,11 @@ From the console, with `reviews.manage`:
 - A past review in History has **Run again** — the same types and destination, on the head as it is
   now — and **Run with other types…**.
 
-A review somebody asks for skips *When*, drafts and the authors to skip, and still needs the
-connection added, fork policy, the budgets and the throttles. Posting *Live* on a repository in
-*Shadow* needs `connections.manage`. A review of a head already reviewed with the same types and
-settings, to the same place, is answered from that review at no cost, and the dialog says so;
-**Run anyway** reviews it again from scratch. *Since last review* still reads the whole pull
+A review somebody asks for skips *When*, drafts, the bots to review and the authors to skip, and
+still needs the connection added, fork policy, the budgets and the throttles. Posting *Live* on a
+repository in *Shadow* needs `connections.manage`. A review of a head already reviewed with the same
+types and settings, to the same place, is answered from that review at no cost, and the dialog says
+so; **Run anyway** reviews it again from scratch. *Since last review* still reads the whole pull
 request, and holds new minor findings to the files that changed since. **Run again** leaves out a
 type turned off since the review it repeats, and says so.
 
