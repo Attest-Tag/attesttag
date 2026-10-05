@@ -62,8 +62,9 @@ the kind of change, `fix-<id>-<slug>`, then the suffix that marks it as the bot'
 `worker_branch_prefix` in [configuration](configuration.md#console-settings)) — and opens a
 **draft** pull request whose body carries the brief, the evidence, the files changed and every gate
 before and after, with an honest note on top when one still fails or none could be found. Every
-pull request is a draft, and no setting changes that. Build output and lockfiles the install step
-generated are never committed. Progress comes back as events; one checklist message in the thread
+pull request is a draft, and no setting changes that; on a repository under
+[code review](code-review.md) it is reviewed like anybody's once somebody marks it ready for review.
+Build output and lockfiles the install step generated are never committed. Progress comes back as events; one checklist message in the thread
 (`○ clone → ○ set up and check → ○ fix → ○ build and test → ○ pull request`) is edited as they
 arrive, and the result is posted with the PR link, the diff and the log as files. *stop* in the
 thread, `!job cancel <id>` or the console's Cancel end a job; the worker learns on its next event

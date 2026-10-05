@@ -134,8 +134,9 @@ func reviewGitHubFixture(t *testing.T) (*reviewGitHub, *fakeGitHub) {
 }
 
 const (
-	readPerms = "contents:read,pull_requests:read"
-	postPerms = "pull_requests:write"
+	readPerms   = "contents:read,pull_requests:read"
+	postPerms   = "pull_requests:write"
+	checksPerms = "checks:write"
 )
 
 // A pull request's files come a hundred to a page, and the client reads until GitHub runs out —
@@ -348,6 +349,14 @@ func TestReviewGitHubRefusesEverythingOffItsAllowlist(t *testing.T) {
 		{"GET", "pulls/7/files", url.Values{"q": {"x"}}},      // a parameter it does not take
 		{"GET", "issues/7/comments/extra", nil},               // a longer path than any route
 		{"POST", "issues/7/comments", url.Values{"x": {"1"}}}, // a write with a query
+		{"DELETE", "issues/7/reactions/5", nil},               // taking off a reaction this review did not put on
+		{"GET", "issues/7/reactions", nil},                    // reading who reacted, which takes Issues
+		{"POST", "issues/8/reactions", nil},                   // reacting to another pull request
+		{"DELETE", "issues/7", nil},                           // deleting the pull request's conversation
+		{"PATCH", "check-runs/9", nil},                        // rewriting a check run this review did not make
+		{"GET", "commits/main/check-runs", nil},               // a branch's checks, not a commit's
+		{"POST", "check-runs/9/rerequest", nil},               // re-running somebody's check
+		{"POST", "check-suites", nil},                         // anything else of checks
 	} {
 		if _, err := c.do(ctx, tc.method, tc.rel, tc.q, nil, "", 0); err == nil || !strings.Contains(err.Error(), "code review may not") {
 			t.Errorf("%s %s: %v", tc.method, tc.rel, err)
@@ -407,6 +416,128 @@ func TestReviewGitHubRefusesEverythingOffItsAllowlist(t *testing.T) {
 	c.KnowReviewComment(6)
 	if err := c.ReactToReviewComment(ctx, 6, "+1"); err != nil {
 		t.Errorf("reacting to a known inline comment: %v", err)
+	}
+}
+
+// The signals stay within what is the App's own. A reaction on the pull request is taken off only
+// once the client put it on — which, for one the App had there already, GitHub answers with that
+// one's id — never anybody else's; a check run is updated only once the client made it or found it as
+// the App's by the run it belongs to, never another App's of the same name; and no check is ever
+// concluded as a failure, which would block a merge. Reactions go out under the token for pull
+// requests, checks under the token for checks alone.
+func TestReviewGitHubSignalsStayTheAppsOwn(t *testing.T) {
+	c, f := reviewGitHubFixture(t)
+	ctx := context.Background()
+	const sha = "0123456789abcdef0123456789abcdef01234567"
+	tokens := map[string]string{}
+	seen := func(r *http.Request) { tokens[r.Method+" "+r.URL.Path] = f.permsOf(r) }
+	f.mux.HandleFunc("POST /repos/acme/web/issues/7/reactions", func(w http.ResponseWriter, r *http.Request) {
+		seen(r)
+		var in struct {
+			Content string `json:"content"`
+		}
+		json.NewDecoder(r.Body).Decode(&in)
+		if in.Content == "rocket" {
+			// The App's rocket is there already: GitHub answers 200 with it.
+			io.WriteString(w, `{"id":12,"content":"rocket","user":{"login":"attesttag[bot]","type":"Bot"}}`)
+			return
+		}
+		w.WriteHeader(201)
+		io.WriteString(w, `{"id":11,"content":"eyes","user":{"login":"attesttag[bot]","type":"Bot"}}`)
+	})
+	f.mux.HandleFunc("DELETE /repos/acme/web/issues/7/reactions/{id}", func(w http.ResponseWriter, r *http.Request) {
+		seen(r)
+		w.WriteHeader(204)
+	})
+	f.mux.HandleFunc("POST /repos/acme/web/check-runs", func(w http.ResponseWriter, r *http.Request) {
+		seen(r)
+		w.WriteHeader(201)
+		io.WriteString(w, `{"id":21}`)
+	})
+	f.mux.HandleFunc("PATCH /repos/acme/web/check-runs/{id}", func(w http.ResponseWriter, r *http.Request) {
+		seen(r)
+		io.WriteString(w, `{"id":`+r.PathValue("id")+`}`)
+	})
+	f.mux.HandleFunc("GET /repos/acme/web/commits/{sha}/check-runs", func(w http.ResponseWriter, r *http.Request) {
+		seen(r)
+		if q := r.URL.Query(); q.Get("app_id") != "1234567" || q.Get("check_name") != reviewCheckName {
+			t.Errorf("check runs looked for with %v", q)
+		}
+		// Another App's check of the same name and run id comes first, and is not ours to touch.
+		io.WriteString(w, `{"total_count":2,"check_runs":[{"id":31,"external_id":"run-1","app":{"id":999}},
+			{"id":32,"external_id":"run-1","app":{"id":1234567}}]}`)
+	})
+
+	eyes, err := c.ReactToPull(ctx, "eyes")
+	if err != nil || eyes != 11 {
+		t.Fatalf("ReactToPull = %d, %v", eyes, err)
+	}
+	if err := c.DeletePullReaction(ctx, eyes); err != nil {
+		t.Errorf("taking off the eyes the client put on: %v", err)
+	}
+	if err := c.DeletePullReaction(ctx, 13); err == nil {
+		t.Error("a reaction the client never put on was taken off")
+	}
+	rocket, err := c.ReactToPull(ctx, "rocket")
+	if err != nil || rocket != 12 {
+		t.Fatalf("ReactToPull on the App's rocket already there = %d, %v", rocket, err)
+	}
+	if err := c.DeletePullReaction(ctx, rocket); err != nil {
+		t.Errorf("taking off the App's rocket that was there already: %v", err)
+	}
+	if _, err := c.ReactToPull(ctx, "tada"); err == nil {
+		t.Error("a reaction GitHub does not have was sent")
+	}
+
+	start := reviewCheckRun{Name: reviewCheckName, HeadSHA: sha, ExternalID: "run-1", Status: "in_progress",
+		Output: &reviewCheckOutput{Title: "Reviewing 0123456", Summary: "Reviewing."}}
+	if err := c.UpdateCheckRun(ctx, 32, reviewCheckRun{Status: "in_progress"}); err == nil {
+		t.Error("a check run neither made nor found was updated")
+	}
+	if id, err := c.CreateCheckRun(ctx, start); err != nil || id != 21 {
+		t.Fatalf("CreateCheckRun = %d, %v", id, err)
+	}
+	if id, err := c.FindCheckRun(ctx, sha, reviewCheckName, "run-1", "1234567"); err != nil || id != 32 {
+		t.Fatalf("FindCheckRun = %d, %v; want the App's own", id, err)
+	}
+	done := reviewCheckRun{Status: "completed", Conclusion: "success", Output: &reviewCheckOutput{Title: "Confidence 5/5", Summary: "Done."}}
+	for _, id := range []int64{21, 32} {
+		if err := c.UpdateCheckRun(ctx, id, done); err != nil {
+			t.Errorf("completing check run %d: %v", id, err)
+		}
+	}
+	if err := c.UpdateCheckRun(ctx, 31, done); err == nil {
+		t.Error("another App's check run was updated")
+	}
+	for _, bad := range []reviewCheckRun{
+		{Status: "completed", Conclusion: "failure", Output: done.Output},         // a failed check blocks a merge
+		{Status: "completed", Conclusion: "action_required", Output: done.Output}, // and so does this
+		{Status: "completed", Output: done.Output},                                // completed with no conclusion
+		{Status: "in_progress", Conclusion: "success"},                            // a conclusion while running
+		{Status: "queued"},
+		{Status: "completed", Conclusion: "success", DetailsURL: "https://evil.example/x"},
+		{Status: "completed", Conclusion: "success", Output: &reviewCheckOutput{Title: "", Summary: "x"}},
+		{Status: "completed", Conclusion: "success", Output: &reviewCheckOutput{Title: strings.Repeat("t", reviewCheckTitleMax+1), Summary: "x"}},
+		{Name: "renamed", Status: "completed", Conclusion: "success"}, // a check is named when it is made
+	} {
+		if err := c.UpdateCheckRun(ctx, 21, bad); err == nil {
+			t.Errorf("an update %+v was sent", bad)
+		}
+	}
+	if _, err := c.CreateCheckRun(ctx, reviewCheckRun{Name: reviewCheckName, HeadSHA: "main", Status: "in_progress"}); err == nil {
+		t.Error("a check run was made on a branch name")
+	}
+
+	for route, want := range map[string]string{
+		"POST /repos/acme/web/issues/7/reactions":            postPerms,
+		"DELETE /repos/acme/web/issues/7/reactions/12":       postPerms,
+		"POST /repos/acme/web/check-runs":                    checksPerms,
+		"PATCH /repos/acme/web/check-runs/32":                checksPerms,
+		"GET /repos/acme/web/commits/" + sha + "/check-runs": checksPerms,
+	} {
+		if got, ok := tokens[route]; !ok || got != want {
+			t.Errorf("%s went out with a token for %q (sent %v), want %q", route, got, ok, want)
+		}
 	}
 }
 

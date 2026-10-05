@@ -229,7 +229,9 @@ request alone gets its reviews and nothing else: `@` commands and replies in a f
 never delivered, and nothing reports that they are missing.
 
 The permissions code review's tokens ask for are *Contents: Read* and *Pull requests: Read and
-write*, which an App set up for fix jobs already has (with Contents read and write). An App given a
+write*, which an App set up for fix jobs already has (with Contents read and write). *Checks: Read
+and write* is optional: with it, each live review shows as an *attest_tag review* check on the pull
+request, and without it there is no check and nothing else changes. An App given a
 new permission at GitHub asks every account that installed it to accept the change, and until one
 does, the console's Reviews page warns on that installation's connection. On a deployment that does
 not take open sign-ups, `GET /api/github/installations` returns the exact `webhook_url` to paste and

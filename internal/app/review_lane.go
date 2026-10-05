@@ -541,7 +541,7 @@ func (b *Bot) enqueueReview(ctx context.Context, orgID int64, repo string, pr in
 		// a bot's bump, a push to a repository reviewed on open: the gate would let none of them
 		// through on any plan, and a channel told of each would hear "plan" all day.
 		if p, ps, err := planReview(eff, pull, req.Types, req.Post, req.AllowLive); err == nil && ps == nil {
-			if fs, _ := reviewFilterSkip(req, p, pull); fs == nil {
+			if fs, _ := reviewFilterSkip(req, p, pull, b.reviewByUs(pull.User)); fs == nil {
 				tell(p.eff, s)
 			}
 		}
@@ -556,7 +556,7 @@ func (b *Bot) enqueueReview(ctx context.Context, orgID int64, repo string, pr in
 	}
 	plan.withLabel(req.Label)
 	automatic := automaticTrigger(req.Trigger) && !req.BypassFilters
-	if s, record := reviewFilterSkip(req, plan, pull); s != nil {
+	if s, record := reviewFilterSkip(req, plan, pull, b.reviewByUs(pull.User)); s != nil {
 		if !record {
 			return nil, s
 		}
@@ -683,7 +683,12 @@ func (b *Bot) enqueueReview(ctx context.Context, orgID int64, repo string, pr in
 // nobody asked for the "when" setting, drafts, bots and excluded authors, and for any the forks.
 // record is whether the reason goes on the pull request. The plan's refusal asks them too, to tell
 // the channel only of a pull request they would have let through.
-func reviewFilterSkip(req reviewRequest, plan reviewPlan, pull *githubPull) (s *reviewSkip, record bool) {
+//
+// ownApp is a pull request this App opened — a fix job's — which is not passed over as a bot's: a
+// bot's pull request is skipped because it is a dependency bump nobody needs read, and a fix job's is
+// code a model wrote, which is what most needs a review. It opens as a draft, so it is reviewed once
+// somebody marks it ready, as anybody's draft is; the authors' list still applies to it.
+func reviewFilterSkip(req reviewRequest, plan reviewPlan, pull *githubPull, ownApp bool) (s *reviewSkip, record bool) {
 	automatic := automaticTrigger(req.Trigger) && !req.BypassFilters
 	if automatic {
 		switch t := plan.eff.Trigger; {
@@ -699,7 +704,7 @@ func reviewFilterSkip(req reviewRequest, plan reviewPlan, pull *githubPull) (s *
 			return &reviewSkip{"trigger", "this repository is reviewed only when somebody asks"}, true
 		case pull.Draft && !plan.eff.Drafts:
 			return &reviewSkip{"draft", "draft pull requests are not reviewed automatically here"}, true
-		case strings.EqualFold(pull.User.Type, "Bot"):
+		case strings.EqualFold(pull.User.Type, "Bot") && !ownApp:
 			return &reviewSkip{"bot", pull.User.Login + " is a bot"}, true
 		case plan.eff.ExcludesAuthor(pull.User.Login):
 			return &reviewSkip{"excluded_author", pull.User.Login + " is on this repository's list of authors not reviewed automatically"}, true
@@ -1200,6 +1205,9 @@ type reviewHold struct {
 	noticed   chan struct{}
 	startSaid bool
 	ending    *ReviewRunResult
+	// signals are a live review's reactions and check run on its pull request (review_signals.go),
+	// once processReview has planned it; nil for every other run.
+	signals *reviewSignals
 }
 
 // write runs one fenced write, or refuses it once the lease is known to be lost.
@@ -1292,7 +1300,8 @@ func (b *Bot) nextReviewRun(ctx context.Context) bool {
 	<-held
 	// How the run ended is told here, once its work is done and its pull request let go, rather than
 	// where it is recorded: what follows the record there — a command answered from an earlier review,
-	// the model failure's alert — is not to wait on a chat platform that is slow or down.
+	// the model failure's alert — is not to wait on a chat platform that is slow or down, nor on GitHub.
+	b.signalRunEnded(ctx, h)
 	if h.ending != nil {
 		b.noticeRunEnded(ctx, h, *h.ending)
 	}
@@ -1612,6 +1621,15 @@ func (b *Bot) processReview(work, lane context.Context, h *reviewHold) {
 			sha: cmp.Or(pull.Head.SHA, r.HeadSHA), shadow: plan.post != review.ModeLive}
 	}
 	ck, resumed := checkpointFrom(r)
+	if !reviewTry(r) {
+		// The commit the check run reports on is the one reviewed: the head now, which the engine
+		// reads, or for a run resumed into its post, the head its stored findings are of.
+		sha := cmp.Or(pull.Head.SHA, r.HeadSHA)
+		if resumed {
+			sha = r.HeadSHA
+		}
+		h.signals = b.reviewSignalsFor(work, h, pr, plan, sha)
+	}
 	if resumed {
 		// The model work is done and stored: post it, under the types it was done with.
 		plan.keys = nil
@@ -1714,8 +1732,10 @@ func (b *Bot) processReview(work, lane context.Context, h *reviewHold) {
 				return
 			}
 		}
-		// Through the gate, the money held: the review is under way, and its channel may hear so.
+		// Through the gate, the money held: the review is under way, and its channel and its pull
+		// request may say so.
 		b.noticeReviewStarted(lane, h, pr, specs)
+		b.signalReviewStarted(lane, h, specs)
 		var ok bool
 		if out, ck, ok = b.reviewWork(work, lane, h, pr, pull, plan, specs, skippedTypes, opts); !ok {
 			return

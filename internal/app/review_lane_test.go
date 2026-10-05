@@ -52,6 +52,14 @@ type laneGitHub struct {
 	issueComments  []githubComment
 	patches        []string
 	nextID         int64
+
+	// The App's signals on the pull request (review_signals.go): its reactions there now, every one
+	// put on or taken off in order ("+eyes", "-eyes"), and its check runs as last written, with every
+	// write to them ("create in_progress", "update completed/success").
+	reactions   []githubReaction
+	reactionLog []string
+	checkRuns   []map[string]any
+	checkLog    []string
 }
 
 func (g *laneGitHub) id() int64 { g.nextID++; return g.nextID }
@@ -203,6 +211,71 @@ func (rig *laneRig) serve(fx reviewPRFixture) {
 		w.WriteHeader(201)
 		json.NewEncoder(w).Encode(c)
 	}))
+	f.mux.HandleFunc("POST /repos/acme/web/issues/7/reactions", perms(postPerms, func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Content string `json:"content"`
+		}
+		json.NewDecoder(r.Body).Decode(&in)
+		for _, x := range g.reactions {
+			if x.Content == in.Content {
+				json.NewEncoder(w).Encode(x) // GitHub's 200: the App's one already there
+				return
+			}
+		}
+		x := githubReaction{ID: g.id(), Content: in.Content, User: bot}
+		g.reactions, g.reactionLog = append(g.reactions, x), append(g.reactionLog, "+"+in.Content)
+		w.WriteHeader(201)
+		json.NewEncoder(w).Encode(x)
+	}))
+	f.mux.HandleFunc("DELETE /repos/acme/web/issues/7/reactions/{id}", perms(postPerms, func(w http.ResponseWriter, r *http.Request) {
+		id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+		for i, x := range g.reactions {
+			if x.ID == id {
+				g.reactions, g.reactionLog = slices.Delete(g.reactions, i, i+1), append(g.reactionLog, "-"+x.Content)
+				w.WriteHeader(204)
+				return
+			}
+		}
+		w.WriteHeader(404)
+		w.Write([]byte(`{"message":"Not Found"}`))
+	}))
+	f.mux.HandleFunc("POST /repos/acme/web/check-runs", perms(checksPerms, func(w http.ResponseWriter, r *http.Request) {
+		var in map[string]any
+		json.NewDecoder(r.Body).Decode(&in)
+		id := g.id()
+		in["id"], in["app"] = id, map[string]any{"id": 1234567}
+		g.checkRuns, g.checkLog = append(g.checkRuns, in), append(g.checkLog, fmt.Sprintf("create %v", in["status"]))
+		w.WriteHeader(201)
+		json.NewEncoder(w).Encode(map[string]any{"id": id})
+	}))
+	f.mux.HandleFunc("PATCH /repos/acme/web/check-runs/{id}", perms(checksPerms, func(w http.ResponseWriter, r *http.Request) {
+		id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+		var in map[string]any
+		json.NewDecoder(r.Body).Decode(&in)
+		for _, cr := range g.checkRuns {
+			if cr["id"] == id {
+				maps.Copy(cr, in)
+				entry := fmt.Sprintf("update %v", in["status"])
+				if c, ok := in["conclusion"]; ok {
+					entry += fmt.Sprintf("/%v", c)
+				}
+				g.checkLog = append(g.checkLog, entry)
+				json.NewEncoder(w).Encode(cr)
+				return
+			}
+		}
+		w.WriteHeader(404)
+		w.Write([]byte(`{"message":"Not Found"}`))
+	}))
+	f.mux.HandleFunc("GET /repos/acme/web/commits/{sha}/check-runs", perms(checksPerms, func(w http.ResponseWriter, r *http.Request) {
+		out := []map[string]any{}
+		for _, cr := range g.checkRuns {
+			if cr["head_sha"] == r.PathValue("sha") && cr["name"] == r.URL.Query().Get("check_name") {
+				out = append(out, cr)
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"total_count": len(out), "check_runs": out})
+	}))
 	f.mux.HandleFunc("PATCH /repos/acme/web/issues/comments/{id}", perms(postPerms, func(w http.ResponseWriter, r *http.Request) {
 		id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
 		var in struct {
@@ -235,6 +308,31 @@ func (g *laneGitHub) snapshot() (posts []map[string]any, reviews []githubReview,
 	defer g.mu.Unlock()
 	return append([]map[string]any{}, g.reviewPosts...), append([]githubReview{}, g.reviews...),
 		append([]githubComment{}, g.issueComments...), append([]string{}, g.patches...)
+}
+
+// signals is what the App's signals on the pull request came to, under the fake's lock: every
+// reaction put on and taken off, the reactions there now, every write to a check run, and the check
+// runs as last written.
+func (g *laneGitHub) signals() (log []string, now []string, checkLog []string, checks []map[string]any) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, x := range g.reactions {
+		now = append(now, x.Content)
+	}
+	for _, cr := range g.checkRuns {
+		checks = append(checks, maps.Clone(cr))
+	}
+	return slices.Clone(g.reactionLog), now, slices.Clone(g.checkLog), checks
+}
+
+// grantChecks records the installation as having granted Checks, as the delivery of its owner
+// accepting the App's new permissions does.
+func (rig *laneRig) grantChecks() {
+	rig.t.Helper()
+	if err := rig.st.SetGitHubInstallPermissions(context.Background(), orgID, fakeInstallation,
+		`{"checks":"write","contents":"read","metadata":"read","pull_requests":"write"}`); err != nil {
+		rig.t.Fatal(err)
+	}
 }
 
 // prEvent is a pull_request delivery for number, as GitHub sends one.
@@ -552,7 +650,8 @@ func TestReviewLanePushDuringTheFirstReviewStillPosts(t *testing.T) {
 
 // GitHub refusing a review's anchors (422) is answered by reading the files again and checking
 // every anchor: one that moved goes to the summary and the rest are posted on a second try; when
-// nothing moved, nothing is posted inline and every finding is in the summary.
+// nothing moved, nothing is posted inline, every finding is in the summary, and the one review
+// posted — which lists the App among the reviewers — says so.
 func TestReviewLaneRefusedAnchorsAreCheckedAgain(t *testing.T) {
 	second := map[string]any{
 		"path": "src/totals.go", "side": "RIGHT", "line": 11, "severity": "P1", "category": "contract", "symbol": "Add",
@@ -599,15 +698,21 @@ func TestReviewLaneRefusedAnchorsAreCheckedAgain(t *testing.T) {
 		rig.deliver("pull_request", prEvent("opened", 7, reviewHead))
 		rig.drain()
 		posts, reviews, comments, _ := rig.gh.snapshot()
-		if len(posts) != 1 || len(reviews) != 0 {
-			t.Fatalf("%d review posts, %d accepted; want the refused one and no retry", len(posts), len(reviews))
+		if len(posts) != 2 || len(reviews) != 1 {
+			t.Fatalf("%d review posts, %d accepted; want the refused one, no retry, and the one that lists the App", len(posts), len(reviews))
 		}
 		if len(comments) != 1 || !strings.Contains(comments[0].Body, "Add writes the total without the lock") {
 			t.Errorf("the finding is not in the summary:\n%v", comments)
 		}
+		// With nothing inline, the review that keeps the App among the reviewers says where it went.
+		summary := fmt.Sprintf("[summary comment](https://github.com/acme/web/pull/7#issuecomment-%d)", comments[0].ID)
+		if plain := posts[1]; len(plain["comments"].([]reviewInlineComment)) != 0 ||
+			!strings.Contains(plain["body"].(string), "No comment on the diff: its one open finding is in the "+summary) {
+			t.Errorf("the review after the refusal: %v", plain)
+		}
 		run := rig.runs(7)[0]
 		fs, _ := rig.st.ReviewFindings(context.Background(), orgID, run.ReviewPRID)
-		if run.Status != "posted" || run.GitHubReviewID != 0 || len(fs) != 1 || fs[0].Placement != review.PlacementSummary {
+		if run.Status != "posted" || run.GitHubReviewID != reviews[0].ID || len(fs) != 1 || fs[0].Placement != review.PlacementSummary {
 			t.Errorf("run %s review %d, findings %+v", run.Status, run.GitHubReviewID, fs)
 		}
 	})
@@ -871,7 +976,8 @@ func TestReviewLaneThrottlesReviewsPerPullRequest(t *testing.T) {
 }
 
 // Closing a pull request while its review runs stops the review: the lane hears the cancel at its
-// next renewal, abandons the model call it is in, and ends the run cancelled with nothing posted.
+// next renewal, abandons the model call it is in, and ends the run cancelled with nothing posted —
+// the eyes it put on as it started come off again.
 func TestReviewLaneClosedWhileRunningStops(t *testing.T) {
 	rig := newLaneRig(t, totalsFixture(), `{"mode":"live"}`)
 	saved := reviewRunTouchEvery
@@ -900,10 +1006,14 @@ func TestReviewLaneClosedWhileRunningStops(t *testing.T) {
 	if run := rig.runs(7)[0]; run.Status != "cancelled" {
 		t.Errorf("run = %s, want cancelled", run.Status)
 	}
+	// Its eyes went on as it started, and came off as it ended: nothing else was written.
 	for _, s := range rig.fake.sent() {
-		if !strings.HasPrefix(s, "GET ") {
+		if !strings.HasPrefix(s, "GET ") && !strings.Contains(s, "/issues/7/reactions") {
 			t.Errorf("a cancelled review wrote to GitHub: %s", s)
 		}
+	}
+	if log, now, _, _ := rig.gh.signals(); !slices.Equal(log, []string{"+eyes", "-eyes"}) || len(now) != 0 {
+		t.Errorf("the pull request's reactions went %v and are %v; want the eyes on, then off", log, now)
 	}
 }
 
@@ -1072,7 +1182,7 @@ func TestReviewLaneClaimHoldsARaisedMaxUSD(t *testing.T) {
 }
 
 // A model provider that refuses — a key at its limit answers 402 — fails the review after one call,
-// with no retry, tells the admins, and posts nothing.
+// with no retry, tells the admins, and posts nothing: the eyes it put on as it started come off.
 func TestReviewLaneModelFailureAlertsAndPostsNothing(t *testing.T) {
 	ctx := context.Background()
 	rig := newLaneRig(t, totalsFixture(), `{"mode":"live"}`)
@@ -1091,10 +1201,14 @@ func TestReviewLaneModelFailureAlertsAndPostsNothing(t *testing.T) {
 	if alerts != 1 {
 		t.Errorf("the model failure raised %d alerts", alerts)
 	}
+	// Its eyes went on as it started, and came off as it failed, with no rocket: nothing else.
 	for _, s := range rig.fake.sent() {
-		if !strings.HasPrefix(s, "GET ") {
+		if !strings.HasPrefix(s, "GET ") && !strings.Contains(s, "/issues/7/reactions") {
 			t.Errorf("a failed review wrote to GitHub: %s", s)
 		}
+	}
+	if log, now, _, _ := rig.gh.signals(); !slices.Equal(log, []string{"+eyes", "-eyes"}) || len(now) != 0 {
+		t.Errorf("the pull request's reactions went %v and are %v; want the eyes on, then off", log, now)
 	}
 }
 

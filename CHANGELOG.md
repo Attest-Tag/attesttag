@@ -14,6 +14,27 @@ Versions follow [semantic versioning](https://semver.org). Before 1.0 that means
   down migrations, so back the database up before a minor upgrade: going back means restoring
   that backup.
 
+## Unreleased
+
+**Code review shows on the pull request while it works.** → [The reactions and the check](guide/code-review.md#the-reactions-and-the-check)
+
+- **Eyes, then a rocket.** A live review puts an eyes reaction on the pull request as it starts and
+  swaps it for a rocket once it is posted; a review that fails or is cancelled only takes the eyes
+  off.
+- **An *attest_tag review* check.** In progress while the review runs, then a success with the score
+  and the open findings — or neutral, skipped or cancelled when it was not posted, never a failure,
+  so requiring it blocks nothing. It needs the App's **Checks: Read and write** permission, which is
+  optional: an installation without it gets the reactions alone.
+- **Listed among the reviewers.** A first review with nothing to say inline now posts a review of
+  one line — the commit, the score and where the findings are — so the App appears under the pull
+  request's reviewers; later runs with nothing new inline still post none.
+- **A fix job's pull request is reviewed.** A pull request the App opened itself is no longer skipped
+  as a bot's: it is reviewed once somebody marks it ready, as anybody's draft is.
+
+Upgrading: nothing to migrate. For the check, add *Checks: Read and write* under the App's
+*Permissions & events* at GitHub; each account that installed it is then asked to accept, and its
+next review has a check.
+
 ## 0.2.0 (2026-10-04)
 
 Like 0.1.0, the source alone: no images, Helm chart or binaries are published for it, so build from

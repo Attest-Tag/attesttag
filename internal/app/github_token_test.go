@@ -17,9 +17,10 @@ import (
 // needs it is a thing to learn live, and if it does it goes into review_post alone.
 func TestGitHubPurposePermissions(t *testing.T) {
 	want := map[string]map[string]string{
-		"":            {"contents": "write", "pull_requests": "write"},
-		"review_read": {"contents": "read", "pull_requests": "read"},
-		"review_post": {"pull_requests": "write"},
+		"":              {"contents": "write", "pull_requests": "write"},
+		"review_read":   {"contents": "read", "pull_requests": "read"},
+		"review_post":   {"pull_requests": "write"},
+		"review_checks": {"checks": "write"},
 	}
 	if len(githubPurposePermissions) != len(want) {
 		t.Fatalf("purposes = %v, want exactly %v", githubPurposePermissions, want)
