@@ -161,6 +161,10 @@ export function ReviewTypesTab() {
             offeredModels={settings.data?.effective.ChannelModels ?? []}
             heavy={settings.data?.effective.HeavyModel ?? ""}
             onChanged={list.reload}
+            onDeleted={(gone) => {
+              setSel(types.find((t) => t.key !== gone)?.key ?? "");
+              list.reload();
+            }}
           />
         ) : (
           <Skeleton className="h-96 w-full rounded-xl" />
