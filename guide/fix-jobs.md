@@ -118,8 +118,12 @@ What a job runs is a **recipe**, and three things can decide it, in this order:
    correcting the test command does not cost you the rest.
 
 Whichever decided it, the resolved recipe reaches the engine's prompt — the exact commands, the
-directory, and what they said before the change — so it runs the same checks the harness will
-grade it with instead of going looking for them.
+directory, what they said before the change and how long they took — so it knows the checks the
+harness will grade it with instead of going looking for them. It checks its change with the
+narrowest run that covers it, such as the tests for the files it changed or the linter on just
+those files, and runs a whole command itself only when it passed before the change in under two
+minutes; the harness runs every one after it stops either way. A command the sandbox stops is not
+worked around: the agent says in its summary what it could not check.
 
 #### Monorepos and more than one package
 

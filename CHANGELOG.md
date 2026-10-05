@@ -39,6 +39,15 @@ the coding agent was told the suite failed before its change, "that may be the b
 the agent's brief — and the headline also says whether a failing check passed before the change,
 fails worse after it, or was failing already. → [Fix jobs](guide/fix-jobs.md)
 
+**Fix jobs check their change with a narrower run.** The coding agent was told to run the whole
+build, lint and test suite itself before it stopped, although the harness runs them again after it.
+On a large repository, one job spent some 60 of its 150 turns running them, and a type check, again
+and again, each turn re-sending the whole conversation so far. The brief now gives each check's
+time from before the change and asks for the narrowest run that covers the change — the tests for
+the files it touched, the linter on just those files. It runs a whole command only when it passed
+in under two minutes, and spends no turns making a command run that the sandbox stops.
+→ [Fix jobs](guide/fix-jobs.md)
+
 **The fix-job worker on Google Cloud gets 8 GiB**, up from 4, beside its 2 CPUs: Cloud Run keeps a
 job's files in memory, and a large JavaScript repository's suite and build did not fit. Run
 `deploy/gcp/worker.sh` again to apply it (`MEMORY=4Gi` keeps the old size). The other platforms'
