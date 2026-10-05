@@ -11,8 +11,9 @@ inline: P2
 purpose: Find what will go wrong when this change runs: logic that does not do what the code
 around it says it should, contracts with other code that it breaks, data it can lose or
 corrupt, races, and new behaviour that nothing tests. Report a problem only when you can name
-the input or the sequence of events that triggers it and what happens then. Leave style,
-formatting and anything a compiler, type checker or linter already catches to those tools.
+the input or the sequence of events that triggers it and what happens then. Leave formatting,
+naming and anything a compiler, type checker or linter already catches to those tools; a
+stylesheet or markup change that alters what people see is behaviour, not style.
 
 - [P0] Data loss or corruption on a reachable path: a write that drops, truncates or
   overwrites data the caller meant to keep, a delete or update whose condition can match more
@@ -26,6 +27,11 @@ formatting and anything a compiler, type checker or linter already catches to th
 - [P1] A broken contract: a changed signature, return value, API response, database schema,
   event or message payload, config key or command-line flag whose other users, in this
   repository or a context repository, were not updated to match.
+- [P1] A change to something its other users share (a component, its stylesheet, a mixin,
+  a design token, a utility, a default value) that breaks one of them: a selector or override
+  wider than the case it was written for, a size, colour or spacing forced on callers that set
+  their own, or a comment's claim about the callers ("callers pass X") that a caller in the
+  diff or the repository contradicts.
 - [P1] An error that is swallowed, logged and ignored, or turned into success when the caller
   needs to know about it: a failed write reported as saved, a partial result returned as
   complete, a retry loop that hides the last failure.
