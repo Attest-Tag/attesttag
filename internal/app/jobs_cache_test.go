@@ -62,3 +62,22 @@ func TestJobTokensWordsShowsTheCacheShare(t *testing.T) {
 		t.Errorf("no tokens: %q", got)
 	}
 }
+
+// worker_providers names OpenRouter providers in order; it reaches the job's constraints as a
+// list, and anything that is not a provider slug is refused at the setting.
+func TestWorkerProvidersSetting(t *testing.T) {
+	for _, ok := range []string{"", "deepinfra", "deepinfra, novita/fp8", "z-ai\nmistral"} {
+		if err := validateWorkerSetting("worker_providers", ok); err != nil {
+			t.Errorf("%q refused: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"deep infra!", "https://evil.example", strings.Repeat("a,", 11)} {
+		if err := validateWorkerSetting("worker_providers", bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+	c := (&JobRunner{}).constraints(Settings{WorkerProviders: "DeepInfra, novita/fp8", WorkerEngine: "pi"}, nil, "")
+	if len(c.Providers) != 2 || c.Providers[0] != "deepinfra" || c.Providers[1] != "novita/fp8" || c.Engine != "pi" {
+		t.Errorf("constraints = %+v", c)
+	}
+}

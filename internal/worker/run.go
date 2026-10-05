@@ -423,7 +423,24 @@ func (r *Runner) execute(ctx context.Context, claim *app.JobClaim, rep *Reporter
 
 	// 5. the engine, stopped early enough that every package's after-checks and the push fit
 	ws.EngineStop = engineStop(deadline, beforeTime(pkgs), hasLint(pkgs))
-	eng, err := newEngine(spec.Constraints.Engine, r.opts, claim)
+	// The engine's model calls go through a proxy on the loopback that keeps the key out of the
+	// sandbox, pins the cache, meters what each call cost and stops the engine at the budget.
+	engCtx, engCancel := context.WithCancelCause(ctx)
+	defer engCancel(nil)
+	engClaim := *claim
+	var proxy *llmProxy
+	if spec.Constraints.Engine != "fake" && claim.Secrets.LLM.BaseURL != "" {
+		proxy = newLLMProxy(claim.Secrets.LLM, claim.Job.ID, spec.Constraints.Providers, claim.Limits.BudgetUSD, rep.Usage, func() { engCancel(errBudget) })
+		if err := proxy.start(); err != nil {
+			rep.Warn("model proxy unavailable, the engine calls the provider directly: " + err.Error())
+			proxy = nil
+		} else {
+			defer proxy.close()
+			engClaim.Secrets.LLM = proxy.Secret(claim.Secrets.LLM.Model)
+			ws.Metered = true
+		}
+	}
+	eng, err := newEngine(spec.Constraints.Engine, r.opts, &engClaim)
 	if err != nil {
 		rep.Phase("engine", "failed", err.Error())
 		failWith(res, err)
@@ -431,9 +448,18 @@ func (r *Runner) execute(ctx context.Context, claim *app.JobClaim, rep *Reporter
 	}
 	rep.Phase("engine", "started", eng.Name()+" on "+spec.Constraints.Model)
 	brief := Brief{JobID: claim.Job.ID, Spec: spec, Recipe: recipe, Baseline: res.Tests.Before, Build: res.Build.Before,
-		Notes: recipe.Why, RepoMap: repoMap(ws.RepoDir, 250), Conv: conventions(ws.RepoDir, 6000),
+		Notes: recipe.Why, RepoMap: repoMap(ws.RepoDir, 250), Conv: conventions(ws.RepoDir, 6000), Located: locateFiles(ws.RepoDir, spec, 15),
 		Primary: primary, Extras: extras, Shims: tc != nil && tc.active}
-	er, err := eng.Run(ctx, ws, brief)
+	er, err := eng.Run(engCtx, ws, brief)
+	if proxy != nil {
+		er.Usage = proxy.Total()
+		if s := proxy.Summary(); s != "" {
+			rep.Log(s)
+		}
+		if errors.Is(context.Cause(engCtx), errBudget) && ctx.Err() == nil {
+			er.Stopped, err = "spend", nil
+		}
+	}
 	res.Summary = er.Summary
 	res.LogTail = er.LogTail
 	res.Usage, res.Turns = er.Usage, er.Rounds // the pull request quotes them; the result's total is settled on the way out
@@ -457,13 +483,16 @@ func (r *Runner) execute(ctx context.Context, claim *app.JobClaim, rep *Reporter
 		rep.Phase("engine", "failed", cut(er.Summary, 300))
 		res.Status, res.Error = app.JobFailed, app.JobError{Code: "engine_error", Message: cut(er.Summary, 1500)}
 		return
-	case "budget", "max_rounds":
+	case "budget", "max_rounds", "spend":
 		// Not a failure: what the engine had changed is committed and opened as a draft. The
 		// caveat travels as a note, so a job that produced a pull request does not read as an
 		// error in the thread and the console.
 		note := "the engine reached its time or tool-call limit before finishing on its own"
-		if er.Stopped == "max_rounds" {
+		switch er.Stopped {
+		case "max_rounds":
 			note = fmt.Sprintf("the engine used all %d turns before finishing on its own", maxRoundsFor(spec))
+		case "spend":
+			note = fmt.Sprintf("the engine was stopped when the job's model spend reached its $%.2f budget", claim.Limits.BudgetUSD)
 		}
 		res.Note = note + "; what it had changed was committed and pushed, so check the pull request for loose ends"
 		rep.Phase("engine", "ok", "stopped early: "+er.Stopped+"; committing what exists")

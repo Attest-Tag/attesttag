@@ -27,6 +27,7 @@ type Options struct {
 	WorkDir  string
 	MaxWall  time.Duration
 	QwenBin  string
+	PiBin    string
 	MiseBin  string
 	KeepWork bool
 	Version  string
@@ -74,6 +75,7 @@ func optionsFromEnv() (Options, error) {
 		}
 	}
 	o.QwenBin = env("WORKER_QWEN_BIN", "qwen")
+	o.PiBin = env("WORKER_PI_BIN", "pi")
 	o.MiseBin = env("WORKER_MISE_BIN", "mise")
 	o.KeepWork = os.Getenv("WORKER_KEEP_WORK") == "1"
 	if v := os.Getenv("WORKER_SANDBOX_UID"); v != "" {

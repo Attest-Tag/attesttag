@@ -1727,6 +1727,8 @@ export type EffectiveSettings = {
   WorkerMaxJobs: number;
   WorkerBranchPrefix: string;
   WorkerBranchSuffix: string;
+  /** OpenRouter providers a fix job's model calls ask for, in order; empty lets OpenRouter choose. */
+  WorkerProviders?: string;
   WorkerEventRetentionDays: number;
   /** Days of turns, tool calls, proxied requests and artifacts to keep; 0 keeps everything. */
   DataRetentionDays: number;

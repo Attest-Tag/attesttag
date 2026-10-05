@@ -113,7 +113,7 @@ func (d *localDispatcher) Name() string { return "local" }
 func allowlistedEnv() []string {
 	var out []string
 	for _, k := range []string{"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "USER", "SHELL", "GOPATH", "GOMODCACHE", "GOCACHE", "SSL_CERT_FILE", "LOG_LEVEL",
-		"WORKER_DIR", "WORKER_MAX_WALL", "WORKER_QWEN_BIN", "WORKER_MISE_BIN", "WORKER_KEEP_WORK",
+		"WORKER_DIR", "WORKER_MAX_WALL", "WORKER_QWEN_BIN", "WORKER_PI_BIN", "WORKER_MISE_BIN", "WORKER_KEEP_WORK",
 		// Local-mode only, and refused by the worker outside it: where to clone from and which
 		// API to open the pull request against. They are how a whole job runs against local
 		// repositories, which is what the end-to-end test does.

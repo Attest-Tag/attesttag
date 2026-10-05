@@ -41,26 +41,59 @@ has what each platform grants the bot and the worker.
 An organisation on its own model key ([plans.md](plans.md#its-own-model-key)) runs its jobs on that
 key and its endpoint: nothing is minted on the deployment's provisioning account, and a job keeps
 the key it was dispatched on — removing the key, or bringing one, between dispatch and claim fails
-the job with the reason. The key sits in the job's environment while the repository's own code
-runs, so it is used for jobs only while the key form's **Fix jobs** switch is on. It cannot be
-capped per job; the worker reports the tokens it used and the bot prices them from the catalogue,
-which is what the 1.25× budget cancel reads. The worker meters a key's spend itself only when the
-key was minted for that job — a shared key's running total is every other caller's spend too.
+the job with the reason. It is used for jobs only while the key form's **Fix jobs** switch is on.
+It cannot be capped per job at the provider; the worker's model proxy stops the engine at the job's
+budget instead, from what each call cost (below), and the bot still cancels a job at 1.25× it.
 
 ### What a job costs
 
 A coding agent sends its whole conversation with every turn, so a job of a hundred turns reads
 millions of input tokens — mostly the same text again. A provider that caches that prefix charges a
-fraction for it, and that is most of the difference between an expensive job and a long one. On
-OpenRouter the worker sends every request of a job with the same `session_id`, so the job stays on
-the provider holding its cache rather than being balanced across every provider of the model.
+fraction for it, and that is most of the difference between an expensive job and a long one.
 
-The engine's count of cached input tokens is recorded beside the totals and priced at the
-catalogue's cache-read rate. The Slack report, the console's job page and the reply on a pull
-request a fix was pushed to show the share ("9.8M in (90% cached) / 74k out"), and a pull request
-the job opens ends with a **Cost** table: turns, input, cached input, output, and an estimate at the
-model's list price. The estimate is the catalogue's, not the bill: the provider that served each
-call may charge differently, and only a key minted for the job reads back exactly what it spent.
+**The model proxy.** The engine never talks to the provider. The worker starts a small proxy on its
+own loopback, and the engine is configured with that address and a token good for that port for the
+life of the job — so the real model key never enters the sandbox where the repository's code and
+the engine's shell commands run. The proxy adds three things to every call on OpenRouter: the job's
+`session_id`, which keeps the job on the provider endpoint holding its cache instead of balancing
+turns across every provider of the model; the providers named in `worker_providers`, in order; and a
+request for usage accounting, so each answer carries what it cost, how much of the prompt came from
+cache and who served it. That is the bill, on any key — the shared one included — and it is reported
+call by call, so the job's cost is current while it runs. When it reaches the job's budget the proxy
+refuses further calls and stops the engine, and what the engine had changed is committed and opened
+as a draft with a note saying why it stopped. The job's log ends the run with one line: calls, the
+share served from cache, the money and the providers (`model calls: 6 · 125,467 in (83% from cache)
+/ 2,452 out · $0.0547 as billed · served by Mistral 6`).
+
+The cached share is recorded on the job and shown wherever its cost is: the Slack report
+("9.8M in (90% cached) / 74k out"), the console's job page, the reply on a pull request a fix was
+pushed to, and the **Cost** table that ends a pull request the job opens — turns, input, cached
+input, output, and an estimate at the model's list price, since the pull request is written before
+the bill is settled. On an endpoint that reports no cost the bot prices the tokens from its
+catalogue, cached ones at the cache-read rate.
+
+### Engines and long jobs
+
+Two coding agents run inside the worker, chosen under Settings → Workers → Coding agent: **Qwen Code**
+and **pi**, a smaller agent with seven tools and a short system prompt. Both get the same brief, the
+same proxy and the same turn cap. Both are told to compact: the conversation is summarised once it
+nears a 160,000-token window, rather than the model's own — on a model with a million-token window
+that would never happen, and every file read early in a long job would ride along in every later
+turn. Qwen Code also runs without its sub-agent, web and memory tools, and cuts a tool's output at
+6,000 characters.
+
+The brief starts the engine where the work is. Files the request names — a path, the tail of one in a
+stack trace, a file name, or a component's name that matches a file — are looked up in the clone and
+listed first, and the engine is told how to spend turns: several reads in one turn, grep before
+whole files, a file read once, and installed dependencies left alone.
+
+A repository's Node processes get a V8 heap of about 60% of the container's memory
+(`NODE_OPTIONS=--max-old-space-size`, unless the worker's own environment sets `NODE_OPTIONS`): Node
+sizes its default from the machine, and a large front end's production build ran out of it with
+most of the container unused.
+
+To compare engines, models or providers on the same work, `evals/fixjobs` holds small repositories
+with a task each and hidden tests the engine never sees; see [evals/README.md](../evals/README.md).
 
 ### A job from claim to draft pull request
 
@@ -119,8 +152,9 @@ Its cost is logged where the review's is, under the pull request.
 
 **The repository's code never runs as the worker.** In every container mode the worker drops to an
 unprivileged sandbox user (`WORKER_SANDBOX_UID`, 10002 in the image) for everything the repository
-decides — its install, build and tests, and the engine — and that user cannot read the job token or
-the environment the repository token travels in. Every git command after the clone is handed over
+decides — its install, build and tests, and the engine — and that user cannot read the job token,
+the environment the repository token travels in, or the model key, which stays with the worker's
+model proxy. Every git command after the clone is handed over
 (stage, diff, commit, push) runs as that same user, with hooks, `core.fsmonitor`, credential
 helpers, commit signing and external diff drivers pinned off on the command line, so a
 `.git/config` the repository's own code rewrote cannot run anything as root. `WORKER_MODE=local`

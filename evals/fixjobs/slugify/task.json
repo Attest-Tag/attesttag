@@ -1,0 +1,5 @@
+{
+  "title": "Add slugify to textutil",
+  "requirement": "We need URL slugs for article titles. Add a function slugify(text, max_length=60) to textutil/strings.py: lower-case, ASCII only (strip accents, so 'Crème brûlée' becomes 'creme-brulee'), every run of characters that are not letters or digits becomes a single hyphen, no hyphen at either end, and the result is cut to max_length without leaving a trailing hyphen. Export it from textutil/__init__.py like the other helpers, and add tests.",
+  "acceptance": ["slugify('Hello, World!') == 'hello-world'", "accents are stripped", "never longer than max_length and never ends in a hyphen"]
+}

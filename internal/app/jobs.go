@@ -245,7 +245,7 @@ func (r *JobRunner) constraints(st Settings, conn *Connection, kind string) JobC
 	// says (internal/worker/run.go). It is recorded so the job's row says what was opened.
 	c := JobConstraints{Engine: st.WorkerEngine, Model: model, BudgetUSD: st.WorkerJobBudgetUSD, TimeoutS: st.WorkerTimeoutMinutes * 60,
 		DraftPR: true, BranchPrefix: pickBranchPrefix(st.WorkerBranchPrefix, kind), BranchSuffix: st.WorkerBranchSuffix,
-		MaxRounds: engineMaxRounds}
+		MaxRounds: engineMaxRounds, Providers: splitProviders(st.WorkerProviders)}
 	if conn != nil {
 		c.TestCmd = conn.TestCmd
 		// Only a recipe somebody set steers the worker. One an earlier job worked out and

@@ -87,6 +87,7 @@ type SettingKey =
   | "web_account_id"
   | "worker_engine"
   | "worker_model"
+  | "worker_providers"
   | "worker_job_budget_usd"
   | "worker_timeout_minutes"
   | "worker_max_jobs"
@@ -99,6 +100,7 @@ type SettingKey =
 
 const ENGINE_LABELS: Record<string, string> = {
   qwen_code: "Qwen Code",
+  pi: "pi — small, compacts its own context",
   fake: "Fake — one placeholder edit, no model (for testing)",
 };
 
@@ -145,6 +147,7 @@ function fromEffective(s: EffectiveSettings): Form {
   return {
     worker_engine: s.WorkerEngine || "qwen_code",
     worker_model: s.WorkerModel ?? "",
+    worker_providers: s.WorkerProviders ?? "",
     worker_job_budget_usd: String(s.WorkerJobBudgetUSD ?? 3),
     worker_timeout_minutes: String(s.WorkerTimeoutMinutes ?? 45),
     worker_max_jobs: String(s.WorkerMaxJobs ?? 2),
@@ -860,6 +863,19 @@ function SettingsForm({ data, onSaved }: { data: SettingsResponse; onSaved: () =
                 value={form.worker_model}
                 onChange={(v) => set("worker_model", v)}
                 emptyLabel="Same as the advanced model"
+              />
+            </SettingsSection>
+            <SettingsSection
+              title="Providers"
+              description="On OpenRouter, the providers a job's model calls ask for, in order, falling back to any other. A job stays on the one that served its first call so its prompt cache keeps paying; the job's log names who served it. Empty lets OpenRouter choose."
+            >
+              <Input
+                id="worker_providers"
+                aria-label="OpenRouter providers"
+                className="w-full max-w-md font-mono"
+                placeholder="deepinfra, novita"
+                value={form.worker_providers}
+                onChange={(e) => set("worker_providers", e.target.value)}
               />
             </SettingsSection>
             <SettingsSection

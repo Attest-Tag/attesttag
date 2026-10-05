@@ -134,6 +134,9 @@ type JobConstraints struct {
 	BranchPrefix string  `json:"branch_prefix,omitempty"`
 	BranchSuffix string  `json:"branch_suffix"`
 	MaxRounds    int     `json:"max_rounds"`
+	// Providers are the OpenRouter providers the job's model calls ask for, in order, with a
+	// fallback to any other. Empty lets OpenRouter choose; the job's session keeps it on one.
+	Providers []string `json:"providers,omitempty"`
 	// Recipe is what the console knows about how to build and test this repository, or nil to
 	// let the worker read the repository's own .attest/recipe.yaml and then fall back to
 	// detection. It is snapshotted at dispatch like everything else here.

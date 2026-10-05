@@ -132,6 +132,7 @@ type Settings struct {
 	// Fix-job worker knobs (jobs.go); WORKER_MODE itself is deploy-time.
 	WorkerEngine             string  // qwen_code | fake (native, claude_code later)
 	WorkerModel              string  // '' = heavy model
+	WorkerProviders          string  // OpenRouter providers a job's calls ask for, in order: "deepinfra, novita"; '' = OpenRouter's choice
 	WorkerJobBudgetUSD       float64 // per-job model spend cap
 	WorkerTimeoutMinutes     int
 	WorkerMaxJobs            int    // concurrent jobs across the workspace
@@ -174,12 +175,27 @@ var settingKeys = []string{"model", "heavy_model", "embed_model", "monthly_budge
 	"investigations", "investigation_rounds", "investigation_minutes", "investigation_max_open",
 	"routine_rounds", "routine_minutes",
 	"web_provider", "web_fetch_provider", "web_account_id",
-	"worker_engine", "worker_model", "worker_job_budget_usd", "worker_timeout_minutes", "worker_max_jobs",
+	"worker_engine", "worker_model", "worker_providers", "worker_job_budget_usd", "worker_timeout_minutes", "worker_max_jobs",
 	"worker_branch_prefix", "worker_branch_suffix", "worker_event_retention_days", "worker_allow_rules",
 	"data_retention_days", "audit_retention_days",
 	"review_monthly_budget_usd", "review_daily_usd"}
 
-var workerEngines = []string{"qwen_code", "fake"}
+var workerEngines = []string{"qwen_code", "pi", "fake"}
+
+// providerSlugRe is an OpenRouter provider slug, with the optional quantisation tag OpenRouter
+// writes after a slash: deepinfra, novita/fp8, z-ai.
+var providerSlugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}(/[a-z0-9._-]{1,32})?$`)
+
+// splitProviders reads the worker_providers setting: comma- or space-separated slugs, in order.
+func splitProviders(v string) []string {
+	var out []string
+	for _, p := range strings.FieldsFunc(strings.ToLower(v), func(r rune) bool { return r == ',' || r == ' ' || r == '\n' }) {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
 
 // ---- sign-in policy ----
 //
@@ -348,6 +364,16 @@ func validateWorkerSetting(k, v string) error {
 	case "worker_model":
 		if len(v) > 200 {
 			return fmt.Errorf("worker_model is too long")
+		}
+	case "worker_providers":
+		ps := splitProviders(v)
+		if len(ps) > 10 {
+			return fmt.Errorf("worker_providers names at most 10 providers")
+		}
+		for _, p := range ps {
+			if !providerSlugRe.MatchString(p) {
+				return fmt.Errorf("worker_providers: %q is not an OpenRouter provider slug (like deepinfra or novita/fp8)", p)
+			}
 		}
 	}
 	return nil
@@ -630,6 +656,7 @@ func (c *settingsCache) load(ctx context.Context, orgID int64) Settings {
 
 		WorkerEngine:             get("worker_engine", "qwen_code"),
 		WorkerModel:              get("worker_model", ""),
+		WorkerProviders:          get("worker_providers", ""),
 		WorkerJobBudgetUSD:       f("worker_job_budget_usd", 3),
 		WorkerTimeoutMinutes:     i("worker_timeout_minutes", 45),
 		WorkerMaxJobs:            i("worker_max_jobs", 2),

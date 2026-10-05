@@ -197,7 +197,7 @@ Slack (signed webhooks)      Microsoft Teams (Bot Framework)      Console, API a
 | `internal/app/jobs_slack.go`, `jobs_reconcile.go`, `jobs_openrouter.go`, `jobs_cache.go` | the checklist and report in the thread, the stale/timeout/cancel reconciler, per-job OpenRouter keys, the dependency cache's signed URLs |
 | `internal/app/recipe_input.go`, `shellwords.go` | a recipe an admin typed, checked before it is stored; a command line split into argv without a shell |
 | `internal/app/jobs_proto.go` | the bot ⇄ worker protocol types, shared with the worker |
-| `internal/worker/` | `attesttag worker`: claim, clone, recipe, tests, engine (Qwen Code or fake), commit, push, draft PR, result — with the repository's code run as a sandbox user |
+| `internal/worker/` | `attesttag worker`: claim, clone, recipe, tests, engine (Qwen Code, pi or fake, its model calls through a metering proxy), commit, push, draft PR, result — with the repository's code run as a sandbox user |
 
 ### Storage
 

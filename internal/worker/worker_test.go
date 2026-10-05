@@ -742,8 +742,12 @@ func TestQwenProviderPinsTheSessionOnOpenRouter(t *testing.T) {
 	if body["session_id"] != "attesttag-job-42" {
 		t.Errorf("openrouter provider = %+v", e.provider())
 	}
+	if gc["contextWindowSize"] != qwenContextWindow {
+		t.Errorf("the compression window is not set: %+v", gc)
+	}
 	e.llm.BaseURL = "https://api.openai.com/v1"
-	if _, ok := e.provider()["generationConfig"]; ok {
+	gc, _ = e.provider()["generationConfig"].(map[string]any)
+	if _, ok := gc["extra_body"]; ok {
 		t.Errorf("a non-OpenRouter endpoint got OpenRouter's session_id: %+v", e.provider())
 	}
 }
