@@ -424,8 +424,10 @@ func (r *reviewRun) detected() []*reviewCandidate {
 		}
 		var lines []int
 		var kinds []string
+		fake := true
 		for _, s := range f.secrets {
 			lines = append(lines, s.Line)
+			fake = fake && s.Fake
 			for _, k := range s.Kinds {
 				if !slices.Contains(kinds, k) {
 					kinds = append(kinds, k)
@@ -436,11 +438,16 @@ func (r *reviewRun) detected() []*reviewCandidate {
 			ReviewType: "security"}
 		kind := reviewKindFinding
 		what := fmt.Sprintf("%s adds what looks like %s at %s.", f.Path, joinWords(kinds), lineList(lines))
-		if reviewFixturePath(f.Path) {
+		switch {
+		case reviewFixturePath(f.Path):
 			// A fake key in a test is how tests of key handling are written. Said, not scored.
 			kind, fd.Severity, fd.Title = reviewKindNote, review.P2, "Credential-shaped value in a test fixture"
 			fd.Scenario = what + " It is in a test fixture, so it is most likely a fake made for the test. If it is a real credential, revoke it and replace it with a fake."
-		} else {
+		case fake:
+			// xoxb-DEMO-FAKE-0001 in sample data names itself. Said, not scored, like a test's.
+			kind, fd.Severity, fd.Title = reviewKindNote, review.P2, "Placeholder credential"
+			fd.Scenario = what + " The value reads as a placeholder (it says fake, example, demo or test, or counts up), so it is most likely not a real one. If it is real, revoke it and replace it with a fake."
+		default:
 			fd.Severity, fd.Title = review.P0, "Credential committed in this change"
 			fd.Scenario = what + " A credential that reaches a repository stays in its history after the line is deleted, and anybody who can read the repository can use it. Revoke it and issue a new one, keep the new one in a secret store, and read it at run time. This review masked the value and showed it to no model."
 		}
