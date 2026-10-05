@@ -138,3 +138,18 @@ func TestListModelsError(t *testing.T) {
 		t.Errorf("error should name the call and status: %v", err)
 	}
 }
+
+// Google's own endpoint lists "models/gemini-…" and answers to the bare name, which is what the
+// console offers; nobody else's ids are touched.
+func TestRequestIDDropsGooglesModelsPrefix(t *testing.T) {
+	for _, c := range []struct{ host, id, want string }{
+		{"generativelanguage.googleapis.com", "models/gemini-3.8-flash", "gemini-3.8-flash"},
+		{"generativelanguage.googleapis.com", "gemini-embedding-001", "gemini-embedding-001"},
+		{"api.deepseek.com", "deepseek-v4-pro", "deepseek-v4-pro"},
+		{"gateway.example", "models/house-model", "models/house-model"},
+	} {
+		if got := requestID(c.host, c.id); got != c.want {
+			t.Errorf("requestID(%q, %q) = %q, want %q", c.host, c.id, got, c.want)
+		}
+	}
+}

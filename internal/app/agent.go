@@ -1294,7 +1294,7 @@ func (a *Agent) turn(ctx context.Context, c *Call) error {
 				"cost_usd", fmt.Sprintf("%.5f", c.usage.CostUSD))
 			return err
 		}
-		params.Messages = append(params.Messages, msg.ToParam())
+		params.Messages = append(params.Messages, assistantTurn(msg))
 		// A call the turn has made before runs at most twice more, each time under a note
 		// saying so, and then is refused; a round that asks for nothing new counts towards
 		// landing the turn. See repeat_guard.go for why.

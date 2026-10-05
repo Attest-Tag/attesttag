@@ -1166,7 +1166,7 @@ func (r *reviewRun) classifyReply(ctx context.Context, model string, spec review
 				}
 			}
 		}
-		msgs = append(msgs, msg.ToParam(), openai.UserMessage("Call classify_reply now, with one of its kinds."))
+		msgs = append(msgs, assistantTurn(*msg), openai.UserMessage("Call classify_reply now, with one of its kinds."))
 	}
 	return nil, cost, reviewFail(review.FailModel, errReviewNoSubmission)
 }
@@ -1227,7 +1227,7 @@ func (r *reviewRun) replyVerdict(ctx context.Context, spec reviewReplySpec, out 
 		if v, ok := replyVerdictFrom(msg); ok {
 			return v, nil
 		}
-		msgs = append(msgs, msg.ToParam())
+		msgs = append(msgs, assistantTurn(*msg))
 		if len(msg.ToolCalls) == 0 {
 			if land {
 				break

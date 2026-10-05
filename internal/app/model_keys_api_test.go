@@ -317,3 +317,35 @@ func TestTheReviewsSwitchIsSavedLikeFixJobs(t *testing.T) {
 		t.Errorf("the audit row does not say where the switch stands: %+v", events)
 	}
 }
+
+// The console offers Google's and DeepSeek's own endpoints by name. Both are plain compatible
+// endpoints — their requests carry none of OpenRouter's fields and none of OpenAI's — and a saved
+// key remembers which form it was saved from.
+func TestModelKeyPresetsOfferGeminiAndDeepSeek(t *testing.T) {
+	want := map[string]string{
+		"gemini":   "https://generativelanguage.googleapis.com/v1beta/openai",
+		"deepseek": "https://api.deepseek.com",
+	}
+	for _, p := range modelKeyPresets {
+		base, ok := want[p.ID]
+		if !ok {
+			continue
+		}
+		delete(want, p.ID)
+		if p.BaseURL != base || p.Hint == "" || p.Name == "" {
+			t.Errorf("preset %s = %+v", p.ID, p)
+		}
+		if d := dialectFor(p.BaseURL); d != dialectCompatible {
+			t.Errorf("preset %s is sent the %s dialect, want compatible", p.ID, d)
+		}
+		if presetOf(p.ID) != p.ID {
+			t.Errorf("presetOf(%q) = %q", p.ID, presetOf(p.ID))
+		}
+	}
+	for id := range want {
+		t.Errorf("no %s preset", id)
+	}
+	if last := modelKeyPresets[len(modelKeyPresets)-1].ID; last != "compatible" {
+		t.Errorf("the last preset is %q; any other endpoint stays last", last)
+	}
+}

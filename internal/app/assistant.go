@@ -1249,7 +1249,7 @@ func (b *Bot) runConsoleTurn(ctx context.Context, c *consoleCall, question strin
 		if len(msg.ToolCalls) == 0 {
 			return strings.TrimSpace(msg.Content), nil
 		}
-		msgs = append(msgs, msg.ToParam())
+		msgs = append(msgs, assistantTurn(msg))
 		for _, tc := range msg.ToolCalls {
 			out := b.runConsoleTool(ctx, c, byName, tc.Function.Name, tc.Function.Arguments)
 			msgs = append(msgs, openai.ToolMessage(out, tc.ID))

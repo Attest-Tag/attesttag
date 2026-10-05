@@ -20,6 +20,7 @@ import (
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
+	"github.com/openai/openai-go/v3/packages/respjson"
 )
 
 // LLM wraps one OpenAI-compatible endpoint (OpenRouter by default) for chat and embeddings.
@@ -790,6 +791,60 @@ func toolChoiceRefused(p openai.ChatCompletionNewParams, err error) bool {
 		return strings.Contains(msg, "toolcompatibility")
 	}
 	return false
+}
+
+// echoMessageFields and echoCallFields are what an endpoint hands out with a tool call and wants
+// back with the conversation that continues from it: OpenRouter's reasoning_details (where
+// Gemini's thought signatures ride), the reasoning_content of DeepSeek's thinking mode, and
+// extra_content, where Google's own endpoint puts each call's thought signature. Gemini 3 refuses
+// the next round without that signature ("Function call is missing a thought_signature"); the
+// others answer without theirs, a step removed from the reasoning that chose the call. The SDK's
+// ToParam keeps none of them.
+var (
+	echoMessageFields = []string{"reasoning_details", "reasoning_content", "extra_content"}
+	echoCallFields    = []string{"extra_content"}
+)
+
+// assistantTurn is msg as the next round sends it back: ToParam, plus the fields above exactly as
+// the endpoint wrote them. They go back only to the endpoint that wrote them — every round of a
+// turn is sent to one — so one that writes none of them, OpenAI's strict API among them, is sent
+// none of them.
+func assistantTurn(msg openai.ChatCompletionMessage) openai.ChatCompletionMessageParamUnion {
+	p := msg.ToParam()
+	a := p.OfAssistant
+	if a == nil {
+		return p
+	}
+	if extra := rawFields(msg.JSON.ExtraFields, echoMessageFields); extra != nil {
+		a.SetExtraFields(extra)
+	}
+	for i := range a.ToolCalls {
+		fn := a.ToolCalls[i].OfFunction
+		if fn == nil || i >= len(msg.ToolCalls) || msg.ToolCalls[i].ID != fn.ID {
+			continue
+		}
+		if extra := rawFields(msg.ToolCalls[i].AsFunction().JSON.ExtraFields, echoCallFields); extra != nil {
+			fn.SetExtraFields(extra)
+		}
+	}
+	return p
+}
+
+// rawFields is the named fields of a response that are present and not null, as raw JSON. It goes
+// by the raw text: the SDK reports a field it has no type for as not Valid even when it is there.
+func rawFields(fields map[string]respjson.Field, names []string) map[string]any {
+	var out map[string]any
+	for _, name := range names {
+		f, ok := fields[name]
+		if raw := strings.TrimSpace(f.Raw()); !ok || raw == "" || raw == "null" {
+			continue
+		}
+		if out == nil {
+			out = map[string]any{}
+		}
+		out[name] = json.RawMessage(f.Raw())
+	}
+	return out
 }
 
 // catalogueComplete says this endpoint's model list names every model it serves, so a model it

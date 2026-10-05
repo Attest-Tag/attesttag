@@ -68,10 +68,11 @@ dropdown of what the model endpoint serves — the organisation's own, when it b
 fetched from the OpenAI-compatible `GET /models` (plus OpenRouter's `GET /embeddings/models` for
 the embedding field) via `GET /api/models`, cached for ten minutes (`?refresh=1` refetches, up to
 six times in ten minutes per organisation). OpenRouter entries show the display name, context
-window and price per million tokens; a plain OpenAI-style endpoint shows ids only. An id the
-list does not carry can still be typed in. Every model call asks for
-at most 32,768 output tokens, which no real answer or round of tool calls needs and which turns
-a runaway generation into a bounded cost; a provider clamps it to a smaller model's own limit.
+window and price per million tokens; a plain OpenAI-style endpoint shows ids only, Google's
+without the `models/` it lists them under. An id the list does not carry can still be typed in.
+Every model call asks for at most 32,768 output tokens, which no real answer or round of tool calls
+needs and which turns a runaway generation into a bounded cost; a provider clamps it to a smaller
+model's own limit.
 The timezone fields (Settings, and a routine's own zone) are the same kind of dropdown over the
 browser's IANA zone list, showing each zone's current UTC offset.
 

@@ -50,6 +50,10 @@ var modelKeyPresets = []modelKeyPreset{
 		Hint: "A key from platform.openai.com/api-keys. A project key keeps this organisation's usage separate from anything else on the account."},
 	{ID: "openrouter", Name: "OpenRouter", BaseURL: "https://openrouter.ai/api/v1",
 		Hint: "A key from openrouter.ai/settings/keys, on your own OpenRouter account."},
+	{ID: "gemini", Name: "Google Gemini", BaseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
+		Hint: "A key from aistudio.google.com/apikey. Test lists its models, the gemini-embedding ones among them for document search."},
+	{ID: "deepseek", Name: "DeepSeek", BaseURL: "https://api.deepseek.com",
+		Hint: "A key from platform.deepseek.com/api_keys. DeepSeek serves no embedding model, so leave that field empty: document search is off while this key is in use."},
 	{ID: "compatible", Name: "Another OpenAI-compatible endpoint",
 		Hint: "Any https endpoint that speaks the Chat Completions API — Azure OpenAI's v1 endpoint is https://<resource>.openai.azure.com/openai/v1, and its models are your deployment names."},
 }

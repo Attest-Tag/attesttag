@@ -21,7 +21,10 @@ import (
 //   - the landing round: the same, told the budget is spent (outOfRoundsNote) with tool_choice
 //     "none" (landingChoice);
 //   - that round again with the tools gone (noToolsNote), which is how the agent repeats a landing
-//     whose provider ignored "none" and wrote nothing alongside the calls.
+//     whose provider ignored "none" and wrote nothing alongside the calls;
+//   - two calls in a row, each round echoing the last as the agent does (assistantTurn).
+//
+// LLM_LIVE_BASE_URL and LLM_LIVE_KEY point it at a vendor's own endpoint instead (see liveLLM).
 //
 // LLM_LIVE_MODELS is a comma-separated list and defaults to the configured model. A request that
 // fails is a failure of the endpoint. A provider that ignores tool_choice is only logged — the
@@ -32,7 +35,7 @@ func TestToolTurnLive(t *testing.T) {
 		t.Skip("set LLM_LIVE=1 (and LLM_LIVE_MODELS=vendor/a,vendor/b) to call real models")
 	}
 	cfg := LoadConfig()
-	l := NewLLM(cfg)
+	l := liveLLM(cfg)
 	for _, model := range liveModels(cfg) {
 		t.Run(model, func(t *testing.T) {
 			t.Parallel()
@@ -56,7 +59,7 @@ func TestAgentLandingLive(t *testing.T) {
 			cfg := base
 			cfg.Model, cfg.MaxToolRounds, cfg.TurnMaxMinutes = model, 2, 12
 			a, _, _, st, sl := diggingFixture(t, cfg)
-			a.llm = NewLLM(cfg)
+			a.llm = liveLLM(cfg)
 			weather := Tool{Name: "get_weather", Desc: "Current weather for one city.",
 				Params: schema(map[string]any{"city": map[string]any{"type": "string"}}, "city"),
 				Run:    func(context.Context, *Call, json.RawMessage) (string, error) { return liveWeather, nil }}
@@ -80,6 +83,19 @@ func TestAgentLandingLive(t *testing.T) {
 			t.Logf("ok  rounds=%d cost=$%.5f in=%d out=%d answer=%q", c.roundsUsed, c.usage.CostUSD, c.usage.In, c.usage.Out, truncate(firstLine(c.FinalText), 120))
 		})
 	}
+}
+
+// liveLLM is the endpoint the live tests call: the deployment's own, or — with LLM_LIVE_BASE_URL
+// and LLM_LIVE_KEY — a vendor's own endpoint built the way an organisation's key is, so Google's
+// and DeepSeek's APIs can be checked directly and not only through OpenRouter.
+func liveLLM(cfg Config) *LLM {
+	base := os.Getenv("LLM_LIVE_BASE_URL")
+	if base == "" {
+		return NewLLM(cfg)
+	}
+	l := newLLM(cfg, endpoint{BaseURL: base, Key: os.Getenv("LLM_LIVE_KEY"), Dialect: dialectFor(base), Model: cfg.Model})
+	l.own, l.pricer = true, NewLLM(cfg).priceOf // priced from the deployment's catalogue, as modelEndpoints.For does
+	return l
 }
 
 // liveModels is LLM_LIVE_MODELS, comma-separated, or the configured model.
@@ -143,7 +159,7 @@ func liveToolTurn(t *testing.T, l *LLM, model string) {
 	if len(turn.ToolCalls) == 0 {
 		t.Fatalf("answer: never called a tool, forced or free; answered %q", truncate(firstLine(stripThinking(free.Content)), 160))
 	}
-	after := append(msgs[:len(msgs):len(msgs)], turn.ToParam())
+	after := append(msgs[:len(msgs):len(msgs)], assistantTurn(turn))
 	for _, tc := range turn.ToolCalls {
 		after = append(after, openai.ToolMessage(liveWeather, tc.ID))
 	}
@@ -169,6 +185,37 @@ func liveToolTurn(t *testing.T, l *LLM, model string) {
 
 	bare := chat("landing without tools", append(landing[:len(landing):len(landing)], openai.UserMessage(noToolsNote)), nil, "")
 	checkAnswer(t, "landing without tools", bare)
+
+	// Two calls in a row, the second chosen from the first one's result: Gemini 3 checks the
+	// thought signature of every call in the turn, so this is where a dropped one shows.
+	homeCity := Tool{Name: "get_home_city", Desc: "The city a colleague lives in.", Params: map[string]any{
+		"type": "object", "properties": map[string]any{"person": str}, "required": []string{"person"},
+	}}.def()
+	seq := []openai.ChatCompletionMessageParamUnion{
+		openai.SystemMessage("You answer questions for a team. Use the tools; never guess. Call one tool at a time."),
+		openai.UserMessage("What is the weather where Priya lives right now?"),
+	}
+	var last openai.ChatCompletionMessage
+	for round := range 4 {
+		last = chat(fmt.Sprintf("two in a row, round %d", round), seq, []openai.ChatCompletionToolUnionParam{homeCity, tools[0]}, "")
+		if len(last.ToolCalls) == 0 {
+			break
+		}
+		seq = append(seq, assistantTurn(last))
+		for _, tc := range last.ToolCalls {
+			out := `{"person":"Priya","city":"Pokhara"}`
+			if tc.Function.Name == "get_weather" {
+				out = `{"city":"Pokhara","temp_c":21.4,"conditions":"clear"}`
+			}
+			seq = append(seq, openai.ToolMessage(out, tc.ID))
+		}
+	}
+	switch text := stripThinking(last.Content); {
+	case len(last.ToolCalls) > 0:
+		t.Errorf("answer: two in a row: still calling tools after four rounds")
+	case !strings.Contains(text, "21"):
+		t.Errorf("answer: two in a row: never used the tool results: %q", truncate(firstLine(text), 160))
+	}
 
 	var refused []string
 	for _, choice := range []string{"get_weather", toolChoiceNone} {
