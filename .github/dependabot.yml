@@ -10,6 +10,14 @@ updates:
     schedule: { interval: weekly }
     groups:
       console: { patterns: ["*"] }
+    # ESLint 10 breaks eslint-plugin-react 7.37 (context.getFilename is gone), and typescript-eslint
+    # supports TypeScript below 6.1 only, so `npm run lint` crashes on either major. Lift these
+    # once both plugins support them.
+    ignore:
+      - dependency-name: eslint
+        update-types: ["version-update:semver-major"]
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly }
