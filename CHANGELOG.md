@@ -39,6 +39,11 @@ the coding agent was told the suite failed before its change, "that may be the b
 the agent's brief — and the headline also says whether a failing check passed before the change,
 fails worse after it, or was failing already. → [Fix jobs](guide/fix-jobs.md)
 
+**The fix-job worker on Google Cloud gets 8 GiB**, up from 4, beside its 2 CPUs: Cloud Run keeps a
+job's files in memory, and a large JavaScript repository's suite and build did not fit. Run
+`deploy/gcp/worker.sh` again to apply it (`MEMORY=4Gi` keeps the old size). The other platforms'
+defaults are unchanged.
+
 Upgrading: nothing to migrate. For the code review check, add *Checks: Read and write* under the
 App's *Permissions & events* at GitHub; each account that installed it is then asked to accept, and
 its next review has a check.

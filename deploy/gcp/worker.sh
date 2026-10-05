@@ -46,10 +46,12 @@ gcloud iam service-accounts describe "$BOT_SA" --project "$PROJECT" >/dev/null 2
 
 # One task, no retries (a retried task would find its job already claimed), an hour ceiling that
 # the per-job timeout (worker_timeout_minutes, at most 60) stays inside. The writable layer is
-# memory-backed on Cloud Run, so a clone plus caches counts against --memory.
+# memory-backed on Cloud Run, so a clone plus caches counts against --memory — and with 4 GiB a
+# large JavaScript repository's test suite and webpack build were killed for want of memory before
+# they finished, the same way before the change as after it. 8 GiB is as much as 2 CPUs allow.
 gcloud run jobs deploy "$JOB" --image "$IMAGE" --region "$REGION" --project "$PROJECT" \
   --service-account "$JOB_SA" --tasks 1 --max-retries 0 --task-timeout "${TASK_TIMEOUT:-3600s}" \
-  --cpu "${CPU:-2}" --memory "${MEMORY:-4Gi}" \
+  --cpu "${CPU:-2}" --memory "${MEMORY:-8Gi}" \
   --set-env-vars "WORKER_MODE=cloudrun,GIT_COMMIT=$COMMIT,WORKER_MAX_WALL=55m" \
   --labels app=attesttag
 
