@@ -50,11 +50,25 @@ const (
 	// How many rounds in a row may consist only of repeated calls before the turn is landed.
 	// Four is one alternating pair asked twice over: the shape of the run that started this.
 	stuckAfterRounds = 4
+	// How many times a routine run that got stuck is told to skip the item it was on and go
+	// on to the next, before it is landed like any other turn. A routine works down a list —
+	// eight leads, each read, scored and written back — and landing the whole run because one
+	// item looped threw away the rest of the list: Routine #1 on 2026-10-05 was landed at
+	// round 19 of 200 with all eight leads researched and none of them written to HubSpot.
+	// Skipping costs the run one item; landing cost it every write. The bound is what still
+	// ends a run that is stuck on everything, at stuckAfterRounds rounds a skip.
+	routineSkipsAllowed = 5
 )
 
 // stuckNote is what the model is told when its tools are withdrawn for repeating itself.
 const stuckNote = "Your last rounds only repeated tool calls you had already made this turn, and a repeated call returns what it already returned. " +
 	"Your tools have been withdrawn. Answer now, from what you already have. " + answerFromWhatYouHave
+
+// skipNote is what a routine run is told instead, while it has skips left: its tools stay, and
+// the item it was stuck on goes into the report as not done rather than taking the run with it.
+const skipNote = "Your last rounds only repeated tool calls you had already made, and a repeated call returns what it already returned. " +
+	"Stop working on the item you were on: record it as skipped (and why) for your final report, and go on to the next item on your list. " +
+	"Do not retry the calls that repeated — they will be refused."
 
 // repeatGuard counts what one turn has asked its tools, so the loop can tell a question from
 // its echo. One per turn; a routine's pinned steps and the console assistant do not use it.
@@ -65,6 +79,7 @@ type repeatGuard struct {
 	answers map[string]int
 	quiet   int // rounds in a row in which every call was a repeat
 	total   int // calls this turn that added nothing, refused ones included, for the log line
+	skips   int // times a routine run has been told to skip the item it was stuck on
 }
 
 func newRepeatGuard() *repeatGuard {
@@ -121,6 +136,18 @@ func (g *repeatGuard) endRound(fresh bool) {
 
 // stuck reports whether the turn should be landed: its last rounds asked for nothing new.
 func (g *repeatGuard) stuck() bool { return g.quiet >= stuckAfterRounds }
+
+// skip moves a stuck routine run on to its next item: the quiet rounds start again from zero,
+// while what it has already asked stays counted, so the calls that looped are still refused.
+func (g *repeatGuard) skip() {
+	g.quiet = 0
+	g.skips++
+}
+
+// canSkip reports whether a stuck turn of this kind is told to skip ahead rather than landed.
+func (g *repeatGuard) canSkip(kind string) bool {
+	return kind == "routine" && g.skips < routineSkipsAllowed
+}
 
 // callFingerprint is a tool call as the guard compares it: the name and the arguments as
 // canonical JSON, so {"b":1,"a":2} and { "a": 2, "b": 1 } are one call. Arguments that are

@@ -140,8 +140,10 @@ func (f *loopingLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // A routine may spend two hundred rounds. One that asks the same thing every round is stopped
-// by what it is doing, not by that number: the call runs three times, is refused twice, and
-// the turn is landed on its answer — six model calls, not two hundred.
+// by what it is doing, not by that number: the call runs three times and is refused after that;
+// each time it goes stuckAfterRounds rounds without anything new it is told to skip to the next
+// item, and once its skips are spent it is landed on its answer — thirty-odd model calls, not
+// two hundred.
 func TestTurnThatRepeatsItselfIsLandedNotBudgeted(t *testing.T) {
 	st := testStore(t)
 	llm := &loopingLLM{}
@@ -176,22 +178,24 @@ func TestTurnThatRepeatsItselfIsLandedNotBudgeted(t *testing.T) {
 	if ran != repeatRunsAllowed {
 		t.Errorf("the tool ran %d times, want %d", ran, repeatRunsAllowed)
 	}
-	// One fresh round, then stuckAfterRounds rounds of repeats, then the landed answer.
-	if want := stuckAfterRounds + 2; llm.calls != want {
+	// One fresh round, then stuckAfterRounds rounds of repeats before each skip and once more
+	// after the last, then the landed answer.
+	repeatRounds := (routineSkipsAllowed + 1) * stuckAfterRounds
+	if want := repeatRounds + 2; llm.calls != want {
 		t.Errorf("model called %d times, want %d", llm.calls, want)
 	}
-	if want := stuckAfterRounds + 1; llm.mayCall != want {
+	if want := repeatRounds + 1; llm.mayCall != want {
 		t.Errorf("a tool call was allowed on %d calls, want %d — the last call must ask for none", llm.mayCall, want)
 	}
 	// And it asks for none without moving the tool array, which sits ahead of the system block
 	// in the cached prefix: the landing call is the largest of the turn and re-reading it at
 	// full price is what taking the definitions away used to cost.
-	if want := stuckAfterRounds + 2; llm.withDefs != want {
+	if want := repeatRounds + 2; llm.withDefs != want {
 		t.Errorf("the tool definitions reached %d of %d calls; the landing call dropped them and moved the cached prefix",
 			llm.withDefs, want)
 	}
 	last := llm.last
-	for _, want := range []string{"Note: this is the 2nd time", "error: refused", "Your tools have been withdrawn"} {
+	for _, want := range []string{"Note: this is the 2nd time", "error: refused", "go on to the next item on your list", "Your tools have been withdrawn"} {
 		if !strings.Contains(last, want) {
 			t.Errorf("the model was never told %q; the transcript it saw:\n%s", want, last)
 		}
@@ -201,7 +205,7 @@ func TestTurnThatRepeatsItselfIsLandedNotBudgeted(t *testing.T) {
 	if err := st.db.QueryRowContext(ctx, `select count(*) from tool_calls where ok = 0 and result like 'error: refused%'`).Scan(&refused); err != nil {
 		t.Fatal(err)
 	}
-	if want := stuckAfterRounds + 1 - repeatRunsAllowed; refused != want {
+	if want := repeatRounds + 1 - repeatRunsAllowed; refused != want {
 		t.Errorf("%d refusals logged, want %d", refused, want)
 	}
 	// And the thread got an answer rather than "I stopped after too many tool calls".
@@ -283,5 +287,27 @@ func TestRepeatGuardLeavesDistinctWritesAlone(t *testing.T) {
 	second := g.progressed("create_task", `{"name":"Fix bug 2"}`, `{"id":"def"}`)
 	if !first || !second {
 		t.Fatal("two tasks created and two ids returned: both are progress")
+	}
+}
+
+// A stuck routine is moved on to its next item, its quiet rounds starting again, until its skips
+// are spent; a reply has no list to move down and is landed the first time.
+func TestRepeatGuardSkipsOnlyForRoutines(t *testing.T) {
+	g := newRepeatGuard()
+	if g.canSkip("channel") || g.canSkip("dm") {
+		t.Fatal("a reply was offered a skip")
+	}
+	for i := 0; i < routineSkipsAllowed; i++ {
+		if !g.canSkip("routine") {
+			t.Fatalf("skip %d refused, want %d allowed", i+1, routineSkipsAllowed)
+		}
+		g.quiet = stuckAfterRounds
+		g.skip()
+		if g.stuck() {
+			t.Fatal("a skip left the run stuck")
+		}
+	}
+	if g.canSkip("routine") {
+		t.Errorf("a skip was allowed past %d", routineSkipsAllowed)
 	}
 }
