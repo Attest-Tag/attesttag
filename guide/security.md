@@ -104,8 +104,9 @@ from a reply is only ever proposed: it does nothing until somebody turns it on i
 `reviews.view` reads reviews and `reviews.manage` tunes them — review types and their rules,
 strictness, instructions, which repositories are reviewed in *Shadow* — and starts one by hand. What
 posts, spends or reaches further needs `connections.manage` as well: *Live*, reviewing every push,
-forks, the context repositories a review may read, the model, what one review may spend, the chat
-channel reviews are announced in — which carries private repositories' findings to whoever reads it
+forks, the context repositories a review may read, the model, what one review may spend, *Fixes*
+turned on — which lets a fix job push to a pull request's branch when somebody who can push asks —
+the chat channel reviews are announced in — which carries private repositories' findings to whoever reads it
 — a branch rule that posts live, reviews every push, names a model or a channel, adding repositories
 to code review, and code review's monthly and daily budgets. It is judged on what a change makes
 effective, branch by branch and at every repository under the level changed, so it cannot be reached
@@ -353,7 +354,11 @@ title, branch and finding in it to one line with mentions, broadcasts and links 
   moment it passes either, so a small file that expands into gigabytes cannot run the shared
   instance out of memory; that PDF is left out of the index.
 - **Fix jobs.** The repository's code, and every git command after the clone, run in the worker
-  as an unprivileged sandbox user ([fix-jobs.md](fix-jobs.md)).
+  as an unprivileged sandbox user ([fix-jobs.md](fix-jobs.md)). A job pushes one new branch of the
+  bot's own, marked by a suffix no setting removes — except one asked for on a pull request, which
+  pushes to that pull request's branch alone: named by the bot, never the branch it merges into,
+  never a fork's, never forced, and only for somebody GitHub says can push to the repository
+  ([fixing a finding](code-review.md#fixing-a-finding-on-the-pull-request)).
 - **Audit.** Every turn, tool call, proxied request, and completion (with tokens and cost) is
   stored and visible on the Activity page, to anyone holding `activity.view` — every built-in
   role. So two kinds of tool call are recorded without their arguments or result, which are

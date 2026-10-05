@@ -364,6 +364,8 @@ func (b *Bot) reviewCommand(ctx context.Context, d *githubDelivery, p *githubIss
 		return c.review(ctx)
 	case review.VerbPause, review.VerbResume:
 		return c.pause(ctx, cmd.Verb == review.VerbPause)
+	case review.VerbFix:
+		return c.fix(ctx)
 	}
 	return nil
 }
@@ -638,9 +640,12 @@ func reviewHelpText(slug string, keys []string) string {
 	fmt.Fprintf(&b, "- `@%s pause` stops the reviews nobody asks for on this pull request, on opening and on a push, "+
 		"and `@%s resume` starts them again: for members of the organisation. They pause by themselves after %d, "+
 		"and a review somebody asks for still runs.\n", slug, slug, reviewAutoPauseAfter)
+	fmt.Fprintf(&b, "- `@%s fix` has attest_tag fix the open findings and push the commit to this pull request's branch; "+
+		"`@%s fix p0 p1` fixes those severities only. For people who can push to the repository, when its review settings allow fixes.\n", slug, slug)
 	fmt.Fprintf(&b, "- `@%s help` is this.\n\n", slug)
 	b.WriteString("Reply in a finding's thread to dispute it or ask about it, and you get a verdict; " +
-		"say it is fixed, and the summary records your claim.\n\n")
+		"say it is fixed, and the summary records your claim.")
+	fmt.Fprintf(&b, " Reply `@%s fix` there, or tick the fix box on the finding, and it is fixed on the pull request.\n\n", slug)
 	b.WriteString("Review types here: " + reviewKeyList(keys) + ".")
 	return b.String()
 }

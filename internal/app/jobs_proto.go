@@ -79,6 +79,40 @@ type JobSpec struct {
 	Channel       string         `json:"channel"`
 	ThreadTS      string         `json:"thread_ts"`
 	Constraints   JobConstraints `json:"constraints"`
+	// Mode is JobModePR for a job that commits onto an open pull request's own branch, and ""
+	// for the usual job, which pushes a new branch and opens a pull request of its own. In
+	// JobModePR, BaseBranch and Branch are both the pull request's head branch — an older worker
+	// that knows nothing of modes then fails at its `checkout -b` of a branch that exists, rather
+	// than pushing anywhere — and HeadSHA is the head the request was made against.
+	Mode    string    `json:"mode,omitempty"`
+	HeadSHA string    `json:"head_sha,omitempty"`
+	PR      *JobPRRef `json:"pr,omitempty"`
+}
+
+// JobModePR is a job asked for on a pull request, from a review finding (review_fix.go): the change
+// is one more commit on the pull request's own branch, fast-forward only, and no pull request is
+// opened.
+const JobModePR = "pr"
+
+// JobPRRef is the pull request a JobModePR job commits to, and where on it the job was asked for:
+// what the bot answers on when the job ends. None of it is a credential — an installation id is
+// named in GitHub's own settings URLs — and the worker reads only Number, Base and URL of it.
+type JobPRRef struct {
+	Number int    `json:"number"`
+	Base   string `json:"base"` // the branch the pull request merges into
+	URL    string `json:"url"`
+	// InstallationID is the GitHub App installation the request came through, whose token the job
+	// pushes with: the App's own identity, as the review that raised the findings has.
+	InstallationID int64 `json:"installation_id"`
+	// Findings are the public ids of the review findings the job fixes.
+	Findings []string `json:"findings,omitempty"`
+	// Thread is the inline comment of the finding whose thread is answered; zero for a fix asked
+	// for on the conversation, which is answered there.
+	Thread int64 `json:"thread,omitempty"`
+	// AskedBy is the GitHub login that asked, and AskedURL the comment it asked in, when there is
+	// one (a ticked box is an edit of the bot's own comment).
+	AskedBy  string `json:"asked_by"`
+	AskedURL string `json:"asked_url,omitempty"`
 }
 
 // ToolEvidence is a tool result the bot gathered earlier in the thread (logs, Sentry, GitHub).

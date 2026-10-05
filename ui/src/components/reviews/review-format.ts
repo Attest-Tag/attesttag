@@ -52,6 +52,15 @@ export const DRAFTS: Choice<"yes" | "no">[] = [
   { value: "yes", label: "Review drafts", hint: "Drafts are reviewed like any other pull request." },
 ];
 
+export const FIXES: Choice<"yes" | "no">[] = [
+  {
+    value: "yes",
+    label: "Fix when asked",
+    hint: "Somebody who can push ticks a finding's fix box, or comments @… fix, and a commit is pushed to the pull request.",
+  },
+  { value: "no", label: "Never", hint: "Findings carry no fix box, and a request to fix one is refused." },
+];
+
 export const NOTIFY_EVENTS: Choice<ReviewNotifyEvent>[] = [
   { value: "started", label: "Started", hint: "The message says a review is under way. No reply." },
   { value: "finished", label: "Finished", hint: "The message shows the result, and a reply says what changed." },
@@ -311,6 +320,7 @@ export function effectiveSummary(e: ReviewEffective, heavy?: string, stopped?: s
     choiceLabel(TRIGGERS, e.trigger).toLowerCase(),
     e.drafts ? "drafts reviewed" : "drafts skipped",
     e.forks === "off" ? "forks never" : "forks when a member asks",
+    e.fixes ? "fixes when asked" : "no fixes",
     `${e.strictness} strictness`,
     `up to ${e.max_comments} comment${e.max_comments === 1 ? "" : "s"}`,
     modelLabel(e.model, heavy),

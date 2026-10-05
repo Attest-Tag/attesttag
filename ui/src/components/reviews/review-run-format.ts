@@ -63,6 +63,7 @@ const TRIGGERS: Record<string, string> = {
   reply: "Reply",
   label: "Label added",
   chat: "Slack or Teams",
+  fix: "Fix pushed",
 };
 
 export function triggerLabel(trigger: string): string {

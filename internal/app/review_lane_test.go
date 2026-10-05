@@ -34,6 +34,7 @@ type laneGitHub struct {
 
 	head      string
 	baseRef   string                          // the branch it merges into; "" is main
+	headRepo  string                          // the repository the head branch is in; "" is acme/web, a fork otherwise
 	labels    []string                        // the labels a read of the pull request says it carries
 	files     map[string][]map[string]any     // head sha → the pull request's files at that head
 	content   map[string]map[string]string    // sha → path → content
@@ -130,8 +131,12 @@ func (rig *laneRig) serve(fx reviewPRFixture) {
 		for _, l := range g.labels {
 			labels = append(labels, map[string]any{"name": l})
 		}
+		head := ref(g.head, "feature")
+		if g.headRepo != "" {
+			head["repo"] = map[string]any{"full_name": g.headRepo, "private": true}
+		}
 		json.NewEncoder(w).Encode(map[string]any{"number": 7, "state": "open", "title": fx.title, "body": fx.body,
-			"user": map[string]any{"login": "octocat", "type": "User"}, "head": ref(g.head, "feature"),
+			"user": map[string]any{"login": "octocat", "type": "User"}, "head": head,
 			"base": ref(reviewBase, cmp.Or(g.baseRef, "main")), "labels": labels})
 	}))
 	f.mux.HandleFunc("GET /repos/acme/web/pulls/7/files", perms(readPerms, func(w http.ResponseWriter, r *http.Request) {

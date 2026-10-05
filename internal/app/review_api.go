@@ -787,6 +787,12 @@ func reviewTierReach(changed []string, before, after review.Effective, byField b
 	if !off && after.Trigger == review.TriggerPush && before.Trigger != review.TriggerPush {
 		add("trigger")
 	}
+	// Fixes on lets the App push commits to the pull request's own branch when somebody with write
+	// access asks: a write to the repository's code, which is the connection's to allow, as posting
+	// live is. Turning them off asks nothing more.
+	if !off && after.Fixes && !before.Fixes {
+		add("fixes")
+	}
 	// Branch by branch. The comparison is of the whole ordered list, since the first match wins: the
 	// same rules in another order, or one fewer above a live one, send pull requests elsewhere. It
 	// errs towards asking — a rule list that still posts live somewhere, changed in any way that

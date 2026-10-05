@@ -1077,6 +1077,7 @@ func TestGuideSearchFindsTheRightSection(t *testing.T) {
 		// section on the assistant, which says only that it can and links there.
 		{"change a review type's rules from the assistant", "code-review.md", "Changing types and rules from the assistant"},
 		{"add a branch rule from the assistant", "code-review.md", "Changing types and rules from the assistant"},
+		{"have a review finding fixed and pushed to the pull request", "code-review.md", "Fixing a finding on the pull request"},
 	} {
 		out := searchGuide(tc.query)
 		if !strings.Contains(out, tc.wantFile) {

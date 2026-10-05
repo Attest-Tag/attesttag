@@ -74,6 +74,32 @@ and pushes nothing further. A job that goes quiet for five minutes is marked sta
 the platform that started it, and given up on after fifteen more; jobs survive a bot restart
 because their rows and the checklist message live in the database.
 
+### Jobs asked for on a pull request
+
+A job can also be asked for on GitHub, from a [code review](code-review.md#fixing-a-finding-on-the-pull-request)
+finding: a ticked box on the finding's comment, or `@<app> fix` in its thread or on the
+conversation, by somebody GitHub says can push to the repository. There is no Confirm card — the
+person asking on the pull request is the one who could have pushed the change themselves — and no
+chat thread: the job answers on the pull request and is followed in the console's *Jobs*, where it
+reads *Asked for on GitHub*. Its brief is the findings as the review stored them: what is wrong,
+where, the code they quote, the change a finding suggested, and the asker's own words.
+
+What it does differently from a job asked for in chat:
+
+- it clones the pull request's own branch, and its change is one more commit on top of it — no new
+  branch, no pull request of its own. It pushes only to that branch, never to the one the pull
+  request merges into, and only with its commit built on the head it started from. It never forces:
+  when somebody pushed to the branch meanwhile, its commit is replayed once onto theirs and pushed
+  again, with a note that its checks ran before the replay; a replay that conflicts pushes nothing.
+- it pushes as the App, through the installation the review came through, whatever stored
+  connection the repository has — that connection still lends its recipe and its worker image.
+- a change that breaks a check that passed before it is not pushed. In chat such a change is still
+  opened as a draft, which waits for somebody to look; on a branch somebody is working on it would
+  be in their way first. The diff goes back with the answer instead.
+- it runs inside the life of an installation token, like any job on an App connection.
+
+Its cost is logged where the review's is, under the pull request.
+
 ### The sandbox user
 
 **The repository's code never runs as the worker.** In every container mode the worker drops to an

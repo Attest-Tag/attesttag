@@ -16,6 +16,7 @@ import {
 } from "@/components/reviews/review-fields";
 import {
   DRAFTS,
+  FIXES,
   FORKS,
   MODES,
   STRICTNESS,
@@ -234,6 +235,21 @@ export function ReviewSettingsForm({
             inherited={inherited.forks}
             reachAll
             onPick={(v) => void save("forks", v)}
+          />
+        </SettingsSection>
+        <SettingsSection
+          title="Fixes"
+          description="Whether somebody who can push to the repository may have a finding fixed from the pull request: a fix job makes the change and pushes it as one more commit on the pull request's own branch. Never on a pull request from a fork."
+        >
+          <ChoiceField
+            env={env}
+            field="fixes"
+            label="Fixes"
+            choices={FIXES}
+            own={own.fixes === undefined ? undefined : own.fixes ? "yes" : "no"}
+            inherited={inherited.fixes ? "yes" : "no"}
+            reach={["yes"]}
+            onPick={(v) => void save("fixes", v === undefined ? undefined : v === "yes")}
           />
         </SettingsSection>
       </SettingsGroup>

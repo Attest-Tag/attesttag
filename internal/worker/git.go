@@ -282,12 +282,19 @@ func (g *Repo) push(ctx context.Context, branch, base, prefix, suffix string) er
 	case g.currentBranch(ctx) != branch:
 		return stepErr("push_failed", "HEAD is not on "+branch)
 	}
+	_, err := g.pushHead(ctx, branch)
+	return err
+}
+
+// pushHead pushes HEAD to branch, never forced, retrying once on a network error. It returns git's
+// output alongside the error, for a caller that needs to tell a refused fast-forward apart.
+func (g *Repo) pushHead(ctx context.Context, branch string) (procOut, error) {
 	var out procOut
 	var err error
 	for attempt := 0; attempt < 2; attempt++ {
 		out, err = g.git(ctx, 3*time.Minute, true, "push", "-q", "origin", "HEAD:refs/heads/"+branch)
 		if err == nil && out.Code == 0 {
-			return nil
+			return out, nil
 		}
 		if ctx.Err() != nil {
 			break
@@ -299,7 +306,73 @@ func (g *Repo) push(ctx context.Context, branch, base, prefix, suffix string) er
 		time.Sleep(3 * time.Second)
 	}
 	if err != nil && out.Output == "" {
-		return stepErr("push_failed", "git push failed: "+err.Error())
+		return out, stepErr("push_failed", "git push failed: "+err.Error())
 	}
-	return stepErr("push_failed", "git push failed: "+lastLines(out.Output, 800))
+	return out, stepErr("push_failed", "git push failed: "+lastLines(out.Output, 800))
+}
+
+// notFastForward reports whether git refused a push because the branch has commits HEAD does not:
+// somebody pushed while the job worked. A protected branch's refusal reads differently and is not
+// one — no replay makes that push acceptable.
+func notFastForward(out procOut) bool {
+	msg := strings.ToLower(out.Output)
+	return strings.Contains(msg, "non-fast-forward") || strings.Contains(msg, "fetch first")
+}
+
+// pushOnto commits the job to an open pull request's own branch (app.JobModePR): HEAD goes to
+// branch as one more commit on top of start, the head the job began from. Where push is held to
+// the bot's own branch names, this is held to the one branch the bot named in the spec — never the
+// branch the pull request merges into — and to HEAD building on start, so nothing the engine did
+// with git in between can send another history there. It never forces.
+//
+// When somebody pushed to the branch while the job worked, the push is refused as not a
+// fast-forward. The job's own commits are then replayed, once, onto what the branch holds now
+// (rebase --onto, which replays exactly start..HEAD and so works after a force-push as well) and
+// pushed again; a replay that conflicts is abandoned and nothing is pushed, rather than the job
+// choosing between its change and somebody else's. moved is the head it was replayed onto, or ""
+// when the first push went through.
+func (g *Repo) pushOnto(ctx context.Context, branch, base, start string) (moved string, err error) {
+	switch {
+	case branch == "" || branch == base:
+		return "", stepErr("push_failed", "refusing to push to the branch the pull request merges into")
+	case g.currentBranch(ctx) != branch:
+		return "", stepErr("push_failed", "HEAD is not on "+branch)
+	case !g.descends(ctx, start):
+		return "", stepErr("push_failed", "HEAD no longer builds on the pull request's head "+cut(start, 12))
+	}
+	out, err := g.pushHead(ctx, branch)
+	if err == nil || !notFastForward(out) {
+		return "", err
+	}
+	remote := "refs/remotes/origin/" + branch
+	if out, _ := g.gitNet(ctx, 2*time.Minute, "fetch", "-q", "--depth", "50", "origin", "+refs/heads/"+branch+":"+remote); out.Code != 0 {
+		return "", stepErr("push_failed", "the branch moved while the job worked, and reading it again failed: "+lastLines(out.Output, 300))
+	}
+	moved = strings.TrimSpace(g.revParse(ctx, remote))
+	if out, _ := g.git(ctx, 2*time.Minute, false, "rebase", "--no-autostash", "--onto", remote, start); out.Code != 0 {
+		g.git(ctx, 30*time.Second, false, "rebase", "--abort")
+		return moved, stepErr("branch_moved", fmt.Sprintf("somebody pushed to %s while the job worked, and the change conflicts with what they pushed; nothing was pushed", branch))
+	}
+	if g.headSHA(ctx) == moved {
+		// Every commit replayed came out empty: what was pushed meanwhile already holds the change.
+		return moved, stepErr("empty_diff", fmt.Sprintf("somebody pushed to %s while the job worked, and what they pushed already holds the same change; nothing was left to push", branch))
+	}
+	if _, err := g.pushHead(ctx, branch); err != nil {
+		return moved, err
+	}
+	return moved, nil
+}
+
+// descends reports whether HEAD has commit as an ancestor (or is it).
+func (g *Repo) descends(ctx context.Context, commit string) bool {
+	if commit == "" {
+		return false
+	}
+	out, err := g.git(ctx, 30*time.Second, false, "merge-base", "--is-ancestor", commit, "HEAD")
+	return err == nil && out.Code == 0
+}
+
+func (g *Repo) revParse(ctx context.Context, ref string) string {
+	out, _ := g.git(ctx, 10*time.Second, false, "rev-parse", "--verify", "-q", ref)
+	return strings.TrimSpace(out.Output)
 }
