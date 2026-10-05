@@ -39,6 +39,10 @@ type JobRunner struct {
 	proxy    *Proxy
 	settings *settingsCache
 	agent    *Agent // alerts and the allow-rule checker; set by Run after NewAgent
+	// onGitHubEnd answers on the pull request when a job asked for there ends (review_fix.go), as
+	// postReport answers in the thread for one asked for in chat. Set by the bot that has a review
+	// engine to answer with; nil leaves such a job to the console.
+	onGitHubEnd func(ctx context.Context, j *Job, res *JobResult)
 
 	mu          sync.Mutex
 	dispatchers map[string]Dispatcher
@@ -352,6 +356,41 @@ func (r *JobRunner) precheck(ctx context.Context, orgID int64, teamID, channel, 
 	return r.budgetRoom(ctx, orgID, teamID, channel, st.WorkerJobBudgetUSD)
 }
 
+// jobConnection is the connection whose settings a job runs under — the recipe, the test command,
+// which worker image — and, for most jobs, whose credential it pushes with. That is the stored
+// repository connection the spec names. A job asked for on a pull request may name none: the
+// repository is reached through the GitHub App installation the review came through, and a
+// repository can be reviewed with no stored connection at all, so the installation narrowed to the
+// repository stands in, as it does for the review (Proxy.reviewConnection).
+func (r *JobRunner) jobConnection(ctx context.Context, orgID int64, spec JobSpec) (*Connection, error) {
+	if spec.ConnectionID != 0 {
+		return r.store.Connection(ctx, orgID, spec.ConnectionID)
+	}
+	if spec.Mode == JobModePR && spec.PR != nil && spec.PR.InstallationID > 0 && r.proxy != nil {
+		return r.proxy.reviewConnection(spec.PR.InstallationID, spec.Repo)
+	}
+	return nil, errors.New("the job names no repository connection")
+}
+
+// jobPushConnection is the connection whose credential the worker clones and pushes with. A job on a
+// pull request pushes as the App, through the installation it was asked for through, whatever stored
+// connection lends it settings: a connection made with a pasted token would push as whoever pasted
+// it, onto a branch the bot was asked to commit to.
+func (r *JobRunner) jobPushConnection(ctx context.Context, orgID int64, spec JobSpec) (*Connection, error) {
+	if spec.Mode == JobModePR {
+		if spec.PR == nil || spec.PR.InstallationID <= 0 || r.proxy == nil {
+			return nil, errors.New("a job on a pull request names no GitHub App installation to push through")
+		}
+		return r.proxy.reviewConnection(spec.PR.InstallationID, spec.Repo)
+	}
+	return r.jobConnection(ctx, orgID, spec)
+}
+
+// jobPRName is the pull request a job asked for on GitHub belongs to, as owner/name#n.
+func jobPRName(j *Job) string {
+	return strings.TrimPrefix(j.Channel, jobGitHubChannel) + "#" + strings.TrimPrefix(j.ThreadTS, "pr:")
+}
+
 // Dispatch creates the job row, posts the checklist and starts the worker. Called after a human
 // confirmed (runPending) or an allow rule approved (the tool).
 func (r *JobRunner) Dispatch(ctx context.Context, req DispatchRequest) (*Job, error) {
@@ -363,7 +402,7 @@ func (r *JobRunner) Dispatch(ctx context.Context, req DispatchRequest) (*Job, er
 	if err := r.precheck(ctx, req.OrgID, req.TeamID, spec.Channel, spec.ThreadTS); err != nil {
 		return nil, err
 	}
-	conn, err := r.store.Connection(ctx, req.OrgID, spec.ConnectionID)
+	conn, err := r.jobConnection(ctx, req.OrgID, spec)
 	if err != nil || conn == nil || conn.Preset != "github" || conn.Repo == "" {
 		return nil, errors.New("the repository connection no longer exists")
 	}
@@ -377,6 +416,11 @@ func (r *JobRunner) Dispatch(ctx context.Context, req DispatchRequest) (*Job, er
 	spec.V = 1
 	spec.Repo = conn.Repo
 	spec.Constraints = r.constraints(st, conn, spec.Kind)
+	if spec.Mode == JobModePR && spec.Constraints.TimeoutS > jobTimeoutCeiling {
+		// It pushes with an installation token whatever connection lent it settings
+		// (jobPushConnection), so it lives inside that token's hour like any app-backed job.
+		spec.Constraints.TimeoutS = jobTimeoutCeiling
+	}
 	if st.OwnKey.Active() != checkedOwn {
 		return nil, errors.New("this organisation's model key changed while the job was being started; start it again")
 	}
@@ -405,24 +449,36 @@ func (r *JobRunner) Dispatch(ctx context.Context, req DispatchRequest) (*Job, er
 		return nil, err
 	}
 	j.ID = id
-	spec.Branch = jobBranch(spec.Constraints.BranchPrefix, spec.Constraints.BranchSuffix, id, spec.Title)
+	if spec.Mode != JobModePR {
+		// A job on a pull request commits to the branch the request named; any other gets its own.
+		spec.Branch = jobBranch(spec.Constraints.BranchPrefix, spec.Constraints.BranchSuffix, id, spec.Title)
+	}
 	j.Branch = spec.Branch
 	raw, _ = json.Marshal(spec)
 	tok := mintJobToken(id)
 	expires := time.Now().Add(time.Duration(j.TimeoutS)*time.Second + 15*time.Minute).UTC().Format(time.DateTime)
-	if err := r.store.SetJobFields(ctx, j.OrgID, id, map[string]any{"branch": spec.Branch, "spec": string(raw), "token_hash": hashJobToken(tok), "token_expires": expires}); err != nil {
+	fields := map[string]any{"branch": spec.Branch, "spec": string(raw), "token_hash": hashJobToken(tok), "token_expires": expires}
+	if spec.Mode == JobModePR && spec.PR != nil {
+		// Its link is the pull request's from the start, rather than one the job opens.
+		fields["pr_url"], j.PRURL = spec.PR.URL, spec.PR.URL
+	}
+	if err := r.store.SetJobFields(ctx, j.OrgID, id, fields); err != nil {
 		return nil, err
 	}
 	j.Spec = string(raw)
-	sl, slErr := r.slacks.For(ctx, j.TeamID)
-	if slErr != nil {
-		return nil, fmt.Errorf("this workspace is no longer connected: %w", slErr)
-	}
-	if ts, err := sl.PostMarkdown(ctx, j.Channel, j.ThreadTS, jobChecklist(j, nil), jobFooter(j)); err == nil {
-		j.StatusTS = ts
-		r.store.SetJobFields(ctx, j.OrgID, id, map[string]any{"status_ts": ts})
-	} else {
-		slog.Warn("job checklist post failed", "job", id, "err", err)
+	if !j.onGitHub() {
+		// A job asked for on a pull request has no thread for a checklist: it is followed on the
+		// pull request, where it answers, and in the console.
+		sl, slErr := r.slacks.For(ctx, j.TeamID)
+		if slErr != nil {
+			return nil, fmt.Errorf("this workspace is no longer connected: %w", slErr)
+		}
+		if ts, err := sl.PostMarkdown(ctx, j.Channel, j.ThreadTS, jobChecklist(j, nil), jobFooter(j)); err == nil {
+			j.StatusTS = ts
+			r.store.SetJobFields(ctx, j.OrgID, id, map[string]any{"status_ts": ts})
+		} else {
+			slog.Warn("job checklist post failed", "job", id, "err", err)
+		}
 	}
 	d, err := r.dispatcher(ctx)
 	if err == nil {
@@ -437,15 +493,17 @@ func (r *JobRunner) Dispatch(ctx context.Context, req DispatchRequest) (*Job, er
 		r.finish(ctx, j.OrgID, id, JobFailed, &JobResult{Status: JobFailed, Error: JobError{Code: "dispatch_failed", Message: err.Error()}})
 		return j, fmt.Errorf("could not start the worker: %w", err)
 	}
-	by := req.ApprovedBy
-	if by == "" {
-		by = "an allow rule"
-	} else {
-		by = "<@" + by + ">"
+	if !j.onGitHub() {
+		by := req.ApprovedBy
+		if by == "" {
+			by = "an allow rule"
+		} else {
+			by = "<@" + by + ">"
+		}
+		r.store.AddTurn(ctx, j.TeamID, j.Channel, j.ThreadTS, "note", spec.Requester,
+			fmt.Sprintf("Fix job #%d dispatched to the worker for %s (branch %s), approved by %s. Its checklist message in this thread shows progress; the result is posted when it finishes.", id, j.Repo, j.Branch, by), "", 0, 0)
 	}
-	r.store.AddTurn(ctx, j.TeamID, j.Channel, j.ThreadTS, "note", spec.Requester,
-		fmt.Sprintf("Fix job #%d dispatched to the worker for %s (branch %s), approved by %s. Its checklist message in this thread shows progress; the result is posted when it finishes.", id, j.Repo, j.Branch, by), "", 0, 0)
-	slog.Info("job dispatched", "job", id, "repo", j.Repo, "branch", j.Branch, "dispatcher", j.Dispatcher, "execution", j.ExecutionRef, "channel", j.Channel)
+	slog.Info("job dispatched", "job", id, "repo", j.Repo, "branch", j.Branch, "mode", spec.Mode, "dispatcher", j.Dispatcher, "execution", j.ExecutionRef, "channel", j.Channel)
 	r.refresh(j.OrgID, id)
 	return j, nil
 }
@@ -546,11 +604,19 @@ func (r *JobRunner) finish(ctx context.Context, orgID, id int64, status string, 
 		r.store.LogUsageBy(ctx, j.OrgID, j.TeamID, j.Channel, j.ThreadTS, j.Requester, "worker:"+j.Engine+"/"+j.Model, delta.usageOn(j))
 	}
 	r.rememberRecipe(ctx, j, res)
-	r.renderChecklist(ctx, j)
-	note := r.postReport(ctx, j, res)
-	r.store.AddTurn(ctx, j.TeamID, j.Channel, j.ThreadTS, "note", j.Requester, truncate(oneLine(note), 1500), "", 0, 0)
+	where := fmt.Sprintf("in <#%s>", j.Channel)
+	if j.onGitHub() {
+		where = "asked for on " + jobPRName(j)
+		if r.onGitHubEnd != nil {
+			r.onGitHubEnd(ctx, j, res)
+		}
+	} else {
+		r.renderChecklist(ctx, j)
+		note := r.postReport(ctx, j, res)
+		r.store.AddTurn(ctx, j.TeamID, j.Channel, j.ThreadTS, "note", j.Requester, truncate(oneLine(note), 1500), "", 0, 0)
+	}
 	if status != JobSucceeded && r.agent != nil {
-		r.agent.alert(ctx, j.OrgID, fmt.Sprintf("job:%d:%s", id, status), fmt.Sprintf(":warning: Fix job #%d on %s in <#%s> %s: %s", id, j.Repo, j.Channel, status, truncate(j.Error, 200)))
+		r.agent.alert(ctx, j.OrgID, fmt.Sprintf("job:%d:%s", id, status), fmt.Sprintf(":warning: Fix job #%d on %s %s %s: %s", id, j.Repo, where, status, truncate(j.Error, 200)))
 	}
 	slog.Info("job finished", "job", id, "status", status, "repo", j.Repo, "pr", j.PRURL, "cost_usd", fmt.Sprintf("%.4f", j.CostUSD),
 		"in", j.TokensIn, "out", j.TokensOut, "error", j.Error)

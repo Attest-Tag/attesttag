@@ -94,6 +94,10 @@ func (b *Bot) reviewRenderContext(ctx context.Context, r *ReviewRun, pr *ReviewP
 	if !private && ck.Private {
 		rctx.DefaultSHAs, rctx.AllowedRepos = nil, nil
 	}
+	// The fix box goes where a tick can be acted on (review_fix.go): fixes allowed for the
+	// repository, a worker that can run for the organisation, and a branch of this repository, which
+	// a fork's is not.
+	rctx.FixBox = eff.Fixes && !pr.IsFork && b.reviewFixAvailable(ctx, r.OrgID) == nil
 	return rctx
 }
 

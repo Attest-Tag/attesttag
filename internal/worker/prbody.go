@@ -23,7 +23,12 @@ func commitMessage(spec app.JobSpec, summary string, jobID int64) string {
 	if body == "" {
 		body = strings.TrimSpace(spec.Requirement)
 	}
-	return fmt.Sprintf("%s\n\n%s\n\nattest_tag fix job #%d", prTitle(spec), cut(body, 1500), jobID)
+	trailer := fmt.Sprintf("attest_tag fix job #%d", jobID)
+	if spec.Mode == app.JobModePR && spec.PR != nil && spec.PR.AskedBy != "" {
+		// A commit on somebody's own branch says who asked for it, so the branch's history does.
+		trailer += ", asked for by @" + spec.PR.AskedBy
+	}
+	return fmt.Sprintf("%s\n\n%s\n\n%s", prTitle(spec), cut(body, 1500), trailer)
 }
 
 func fence(s string) string {

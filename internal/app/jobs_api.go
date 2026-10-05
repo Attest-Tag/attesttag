@@ -205,7 +205,7 @@ func (b *Bot) handleJobClaim(w http.ResponseWriter, r *http.Request, j *Job) {
 	}
 	var spec JobSpec
 	json.Unmarshal([]byte(j2.Spec), &spec)
-	conn, err := b.store.Connection(ctx, j2.OrgID, j2.ConnectionID)
+	conn, err := b.jobs.jobPushConnection(ctx, j2.OrgID, spec)
 	if err != nil || conn == nil {
 		b.jobs.finish(ctx, j2.OrgID, j2.ID, JobFailed, &JobResult{Error: JobError{Code: "dispatch_failed", Message: "the repository connection is gone"}})
 		writeJSON(w, http.StatusGone, map[string]any{"error": "connection gone"})
@@ -429,6 +429,14 @@ func (b *Bot) jobJSON(ctx context.Context, j Job) map[string]any {
 	m["thread_link"] = ""
 	if j.ThreadTS != "" && sl != nil {
 		m["thread_link"] = sl.Permalink(ctx, j.Channel, j.ThreadTS)
+	}
+	if j.onGitHub() {
+		// Asked for on a pull request: the pull request is where it lives and where it answers, and
+		// the person is a GitHub login.
+		m["origin"] = "github"
+		m["channel_name"] = jobPRName(&j)
+		m["requester_name"] = "@" + strings.TrimPrefix(j.Requester, "github:")
+		m["thread_link"] = "" // no chat thread; pr_url is the pull request it commits to
 	}
 	return m
 }

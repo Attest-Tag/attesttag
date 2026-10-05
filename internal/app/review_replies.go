@@ -172,17 +172,31 @@ type githubReviewCommentPayload struct {
 }
 
 // reviewCommentReplyEvent routes a pull_request_review_comment delivery: a new comment that replies
-// to one of our findings is queued to be answered; anything else is finished with nothing done.
+// to one of our findings is queued to be answered, or, when it is `@slug fix`, fixes the finding;
+// an edit that ticked a finding's fix box fixes it too (review_fix.go). Anything else is finished
+// with nothing done.
 func (b *Bot) reviewCommentReplyEvent(ctx context.Context, d *githubDelivery, raw []byte) error {
 	var p githubReviewCommentPayload
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return err
 	}
-	if p.Action != "created" || !validGitHubRepo(p.Repository.FullName) || p.PullRequest.Number <= 0 || b.reviewFromBot(p.Sender) {
+	if !validGitHubRepo(p.Repository.FullName) || p.PullRequest.Number <= 0 || b.reviewFromBot(p.Sender) {
 		return nil
 	}
-	_, err := b.queueReviewReply(ctx, d, p.Repository.FullName, &p.PullRequest, p.Comment)
-	return err
+	switch p.Action {
+	case "edited":
+		return b.reviewFixBoxEvent(ctx, d, raw)
+	case "created":
+		if b.reviewFromBot(p.Comment.User) {
+			return nil
+		}
+		if done, err := b.reviewFixThreadCommand(ctx, d, &p); done || err != nil {
+			return err
+		}
+		_, err := b.queueReviewReply(ctx, d, p.Repository.FullName, &p.PullRequest, p.Comment)
+		return err
+	}
+	return nil
 }
 
 // queueReviewReply queues the answer to c if it replies to one of this organisation's findings on

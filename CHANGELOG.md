@@ -54,6 +54,17 @@ the files it touched, the linter on just those files. It runs a whole command on
 in under two minutes, and spends no turns making a command run that the sandbox stops.
 → [Fix jobs](guide/fix-jobs.md)
 
+**A review finding can be fixed on the pull request.** Somebody who can push to the repository
+ticks the box on a finding's comment, replies `@<app> fix` in its thread, or comments `@<app> fix`
+(or `@<app> fix p1`) on the conversation, and a fix job commits the change to the pull request's own
+branch — one more commit, pushed as the App, never forced, no new pull request — then answers with
+the commit and what the checks said, and the review of the new head closes what it fixed. A change
+that breaks a check that passed before it is not pushed; its diff comes back with the answer. Pull
+requests from forks are refused, and so are people GitHub says cannot push. *Fixes* is a new review
+setting, on by default; turning it back on needs Manage connections. A reaction cannot ask for a
+fix: GitHub never delivers reactions to an App.
+→ [Fixing a finding](guide/code-review.md#fixing-a-finding-on-the-pull-request)
+
 **The fix-job worker on Google Cloud gets 8 GiB**, up from 4, beside its 2 CPUs: Cloud Run keeps a
 job's files in memory, and a large JavaScript repository's suite and build did not fit. Run
 `deploy/gcp/worker.sh` again to apply it (`MEMORY=4Gi` keeps the old size). The other platforms'
@@ -61,7 +72,9 @@ defaults are unchanged.
 
 Upgrading: nothing to migrate. For the code review check, add *Checks: Read and write* under the
 App's *Permissions & events* at GitHub; each account that installed it is then asked to accept, and
-its next review has a check.
+its next review has a check. Fixes on the pull request need the worker image rebuilt from this
+release (`deploy/<platform>/worker.sh`): an older worker refuses such a job at its clone and pushes
+nothing.
 
 ## 0.2.0 (2026-10-04)
 

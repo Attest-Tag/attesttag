@@ -215,6 +215,9 @@ var reviewRoutes = []reviewRoute{
 	{"POST", "pulls/comments/{id}/reactions", nil, "inline"},
 	{"POST", "issues/{n}/reactions", nil, ""},
 	{"DELETE", "issues/{n}/reactions/{id}", nil, "reaction"},
+	// Whether somebody may have a fix pushed to the pull request's branch (review_fix.go): their
+	// permission on this repository, a read every installation token may make (Metadata).
+	{"GET", "collaborators/{login}/permission", nil, ""},
 }
 
 // reviewCheckRoutes are the review's check run, and go out under the token for checks alone
@@ -228,6 +231,11 @@ var reviewCheckRoutes = []reviewRoute{
 }
 
 var commitSHA = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
+
+// githubUserLogin is a GitHub user's login as GitHub allows one: letters, digits and single
+// hyphens, starting with a letter or digit, at most 39 characters. Nothing else may be a path
+// segment of a request about a user — no "..", no slash, no "[bot]".
+var githubUserLogin = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9]|-[A-Za-z0-9]){0,38}$`)
 
 // allow reports why u may not be requested with method, or nil when it may.
 func (c *reviewGitHub) allow(method string, u *url.URL) error {
@@ -325,6 +333,10 @@ func (c *reviewGitHub) matchRoute(pattern string, segs []string) (int64, bool) {
 			id = n
 		case "{sha}":
 			if !commitSHA.MatchString(s) {
+				return 0, false
+			}
+		case "{login}":
+			if !githubUserLogin.MatchString(s) {
 				return 0, false
 			}
 		default:
@@ -534,8 +546,9 @@ type githubPullRef struct {
 	SHA  string `json:"sha"`
 	Ref  string `json:"ref"`
 	Repo *struct {
-		FullName string `json:"full_name"`
-		Private  bool   `json:"private"`
+		FullName      string `json:"full_name"`
+		Private       bool   `json:"private"`
+		DefaultBranch string `json:"default_branch"`
 	} `json:"repo"` // nil when the fork it came from has been deleted
 }
 
@@ -543,6 +556,26 @@ type githubPullRef struct {
 // is gone counts as one: it was not this repository's branch.
 func (p *githubPull) IsFork() bool {
 	return p.Head.Repo == nil || p.Base.Repo == nil || !strings.EqualFold(p.Head.Repo.FullName, p.Base.Repo.FullName)
+}
+
+// WritePermission reports whether login may push to this repository: GitHub's own answer, its
+// legacy base permission admin or write — what maintain is read as too — counting every grant, the
+// organisation's and the teams' included. A comment's author_association says none of that: an
+// organisation member may only read, and a member whose membership is private reads as NONE.
+func (c *reviewGitHub) WritePermission(ctx context.Context, login string) (bool, error) {
+	if !githubUserLogin.MatchString(login) {
+		return false, nil
+	}
+	var p struct {
+		Permission string `json:"permission"`
+	}
+	if err := c.getJSON(ctx, "collaborators/"+login+"/permission", nil, 64<<10, &p); err != nil {
+		if isGitHubStatus(err, 404) {
+			return false, nil // not somebody GitHub knows on this repository
+		}
+		return false, err
+	}
+	return p.Permission == "admin" || p.Permission == "write", nil
 }
 
 // Pull reads the pull request itself.

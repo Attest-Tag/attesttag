@@ -83,6 +83,18 @@ type Job struct {
 	FinishedAt      string `json:"finished_at"`
 }
 
+// jobGitHubChannel marks a job asked for on a GitHub pull request (review_fix.go) rather than in a
+// chat thread. Such a job has no workspace; its channel is "github:owner/name" and its thread
+// "pr:<n>", the pair a review's own spend is logged under, so its cost sits beside the review's
+// and "one job a thread" is one job a pull request.
+const jobGitHubChannel = "github:"
+
+// onGitHub reports whether the job was asked for on a pull request, and so answers there: it has no
+// thread to post a checklist or a report in.
+func (j *Job) onGitHub() bool {
+	return j.TeamID == "" && strings.HasPrefix(j.Channel, jobGitHubChannel)
+}
+
 func jobCols(full bool) string {
 	spec, result := "''", "''"
 	if full {
@@ -238,6 +250,15 @@ func (s *Store) ActiveJobsInThread(ctx context.Context, orgID int64, teamID, cha
 	return s.queryJobs(ctx, orgID, `and team_id=? and channel=? and thread_ts=? and status in (`+placeholders(len(jobActiveStatuses))+`)`, args, 50)
 }
 
+// JobsInThreadSince counts the jobs a thread started since a moment, whatever became of them: for a
+// pull request (jobGitHubChannel), how many fix jobs it has started in a day.
+func (s *Store) JobsInThreadSince(ctx context.Context, orgID int64, teamID, channel, threadTS string, since time.Time) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `select count(*) from jobs where org_id=? and team_id=? and channel=? and thread_ts=? and created_at>=?`,
+		orgID, teamID, channel, threadTS, since.UTC().Format(time.DateTime)).Scan(&n)
+	return n, err
+}
+
 // ActiveJobsFor is everything one organisation still has in flight, whatever thread it came
 // from. Used when the account is being deleted, which is the one moment the question is asked
 // about the whole account rather than about one conversation in it.
@@ -292,7 +313,7 @@ func placeholders(n int) string {
 // jobFields are the columns SetJobFields and SetJobStatus may write.
 var jobFields = map[string]bool{"status_ts": true, "execution_ref": true, "dispatcher": true, "phase": true, "llm_key_hash": true,
 	"llm_key_enc": true, "error": true, "branch": true, "spec": true, "token_hash": true, "token_expires": true, "finished_at": true,
-	"started_at": true, "worker_info": true, "last_event_at": true, "cost_usd": true}
+	"started_at": true, "worker_info": true, "last_event_at": true, "cost_usd": true, "pr_url": true}
 
 func (s *Store) SetJobFields(ctx context.Context, orgID, id int64, set map[string]any) error {
 	if len(set) == 0 {

@@ -241,8 +241,11 @@ func (r *JobRunner) cancelUpdater(id int64) {
 }
 
 func (r *JobRunner) renderChecklist(ctx context.Context, j *Job) {
+	if j.StatusTS == "" {
+		return // never posted: a job asked for on a pull request has no checklist message
+	}
 	sl, err := r.slacks.For(ctx, j.TeamID)
-	if j.StatusTS == "" || err != nil {
+	if err != nil {
 		return
 	}
 	events, _ := r.store.JobEvents(ctx, j.OrgID, j.ID, 500)

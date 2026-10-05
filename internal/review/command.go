@@ -18,6 +18,7 @@ const (
 	VerbHelp       Verb = "help"
 	VerbPause      Verb = "pause"    // stop the reviews nobody asks for on this pull request
 	VerbResume     Verb = "resume"   // start them again, with a fresh allowance before the next pause
+	VerbFix        Verb = "fix"      // fix open findings with a commit pushed to the pull request's branch
 	VerbQuestion   Verb = "question" // anything else: free text for the bot to answer
 )
 
@@ -28,6 +29,10 @@ type Command struct {
 	// "@bot review security tests". Empty means the matching branch rule's types. They are
 	// only shaped like keys; whether the organisation has such a type is for the caller.
 	Types []string
+	// Severities are the severities named right after "fix", e.g. "@bot fix p0 p1": which of the
+	// open findings a fix on the conversation is for. Empty means all of them. In a finding's
+	// thread the finding is the one fixed, whatever they say.
+	Severities []Severity
 	// Text is the comment from just after the mention to its end, as written. For a question
 	// it is the question, and it may run on past the first line.
 	Text string
@@ -137,9 +142,40 @@ func classify(rest string) Command {
 		return withTypes(VerbReview, words[1:])
 	case verb(0) == "please" && reviewWord(verb(1)):
 		return withTypes(VerbReview, words[2:])
+	case verb(0) == "fix":
+		return withSeverities(words[1:])
+	case verb(0) == "please" && verb(1) == "fix":
+		return withSeverities(words[2:])
 	}
 	return Command{Verb: VerbQuestion}
 }
+
+// withSeverities reads the severities named at the start of the words after "fix": "fix p0 p1",
+// "fix all". Unlike a review's types, anything else that follows does not turn the line into a
+// question — "fix this, keep the old name" is a fix, and the rest of the comment travels to the
+// worker as the asker's own words (Command.Text) — so only the leading words are read, and the
+// first that is neither a severity nor filler ends them.
+func withSeverities(words []string) Command {
+	cmd := Command{Verb: VerbFix}
+	for _, w := range words {
+		w = strings.TrimRight(w, ".!,:")
+		switch sev := Severity(strings.ToUpper(w)); {
+		case w == "" || commandFiller[w] || fixFiller[w]:
+		case sev.Valid():
+			if !slices.Contains(cmd.Severities, sev) {
+				cmd.Severities = append(cmd.Severities, sev)
+			}
+		default:
+			return cmd
+		}
+	}
+	return cmd
+}
+
+// fixFiller are words around "fix" that name no severity and change nothing: "fix all findings",
+// "fix everything".
+var fixFiller = map[string]bool{"all": true, "everything": true, "findings": true, "finding": true, "these": true, "them": true,
+	"that": true, "open": true, "issues": true, "issue": true}
 
 func reviewWord(w string) bool { return w == "review" || w == "rereview" || w == "re-review" }
 

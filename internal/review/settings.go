@@ -173,6 +173,10 @@ type Settings struct {
 	// channel hear less than its connection's. An empty one tells the channel nothing, the channel
 	// kept. Which news a channel gets is review's noise, not its reach: reviews.manage may change it.
 	NotifyOn *[]NotifyEvent `json:"notify_on,omitempty"`
+	// Fixes is whether somebody with write access may ask, on the pull request, for open findings
+	// to be fixed by a commit pushed to its branch (a fix box ticked, `@bot fix`). Off, the
+	// comments carry no box and the command is answered with a refusal.
+	Fixes *bool `json:"fixes,omitempty"`
 
 	Instructions   []string `json:"instructions,omitempty"`    // what the team wants checked, one per entry
 	ExcludeAuthors []string `json:"exclude_authors,omitempty"` // login globs never reviewed automatically
@@ -213,6 +217,7 @@ func Defaults() Settings {
 		MaxUSD:        ptr(1.00),
 		Notify:        ptr(NotifyChannel{}),
 		NotifyOn:      ptr(NotifyEvents()),
+		Fixes:         ptr(true),
 		BranchRules:   []BranchRule{{Types: []string{DefaultType}}},
 	}
 }
@@ -245,6 +250,10 @@ type Effective struct {
 	// Never nil once resolved — empty is "nothing" — and omitzero for Hash's sake, as Notify: Hash
 	// sets it nil, so the bytes hashed are what they were before there was a list to leave out.
 	NotifyOn []NotifyEvent `json:"notify_on,omitzero"`
+	// Fixes is omitzero and left out of Hash for the same reason: whether a fix may be asked for
+	// changes a comment's last lines, not what a review finds, and switching it must not make every
+	// cached review a stranger. The console reads it left out as off.
+	Fixes bool `json:"fixes,omitzero"`
 
 	Instructions   []string `json:"instructions"`
 	ExcludeAuthors []string `json:"exclude_authors"`
@@ -292,6 +301,7 @@ func Resolve(chain []LevelSettings) Effective {
 		pick(&e.Model, s.Model, "model", lv, e.Source)
 		pick(&e.MaxUSD, s.MaxUSD, "max_usd", lv, e.Source)
 		pick(&e.Notify, s.Notify, "notify", lv, e.Source)
+		pick(&e.Fixes, s.Fixes, "fixes", lv, e.Source)
 		if s.NotifyOn != nil {
 			// A copy, and never nil: an empty set is "nothing", where nil would read as every event.
 			e.NotifyOn, e.Source["notify_on"] = append([]NotifyEvent{}, *s.NotifyOn...), lv
@@ -455,7 +465,7 @@ func (e Effective) IgnoresPath(path string) bool { return MatchAny(e.IgnorePaths
 // the bots let through, which decide whether a review runs, not what it finds.
 func (e Effective) Hash() string {
 	e.Source = nil
-	e.Notify, e.NotifyOn = NotifyChannel{}, nil
+	e.Notify, e.NotifyOn, e.Fixes = NotifyChannel{}, nil, false
 	e.ReviewBots = nil
 	e.BranchRules = cloneRules(e.BranchRules)
 	for i := range e.BranchRules {
@@ -475,7 +485,7 @@ func (e Effective) Hash() string {
 // SettingFields lists every setting by its JSON name, in declaration order.
 func SettingFields() []string {
 	return []string{"mode", "trigger", "drafts", "forks", "strictness", "max_comments",
-		"comment_header", "model", "max_usd", "notify", "notify_on", "instructions", "exclude_authors",
+		"comment_header", "model", "max_usd", "notify", "notify_on", "fixes", "instructions", "exclude_authors",
 		"review_bots", "ignore_paths", "context_repos", "branch_rules"}
 }
 

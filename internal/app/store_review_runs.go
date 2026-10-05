@@ -60,9 +60,10 @@ var (
 var (
 	// A reply run, and a resync after a finding changed in its thread, have the trigger reply: a
 	// person answering one of the review's findings (review_replies.go). A try is a run of an unsaved
-	// review type from the console, never the pull request's review (reviewTry).
+	// review type from the console, never the pull request's review (reviewTry). A fix is the review
+	// of the commit a fix job pushed to the pull request (review_fix.go).
 	reviewRunKinds    = []string{"review", "reply", "answer", "resync", "try"}
-	reviewRunTriggers = []string{"open", "push", "command", "catchup", "console", "api", "reply", "label", "chat"}
+	reviewRunTriggers = []string{"open", "push", "command", "catchup", "console", "api", "reply", "label", "chat", "fix"}
 	// The statuses a run ends in; queued and running are the lane's own.
 	reviewRunEnds  = []string{"posted", "shadow", "noop", "skipped", "superseded", "failed", "cancelled"}
 	reviewPRStates = []string{"open", "closed", "merged"}

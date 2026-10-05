@@ -19,6 +19,9 @@ On a repository whose review is switched on, it:
   it runs and a rocket once it is posted, and an *attest_tag review* check among its checks where
   the App has the Checks permission ([the reactions and the check](#the-reactions-and-the-check));
 - answers `@<app>` commands from the repository's own people, and replies in its findings' threads;
+- fixes a finding when somebody who can push to the repository asks — a ticked box on its comment,
+  or `@<app> fix` — with a [fix job](fix-jobs.md) that pushes one more commit to the pull request's
+  own branch ([fixing a finding](#fixing-a-finding-on-the-pull-request));
 - records every run in the console — what it found, what it dropped and why, what it did not read,
   and what it cost.
 
@@ -31,14 +34,15 @@ It never:
   holds nothing up.
 - **runs the pull request's code.** There is no checkout, build or test run. It reads files through
   GitHub's API with a read-only token, the model has read tools only, and Go writes every word that
-  is posted, from findings it has checked against the code.
+  is posted, from findings it has checked against the code. A fix somebody asks for is not the
+  review: it is a fix job, which does check out, build and test, in the worker's own container.
 - **takes instructions from the pull request.** Instruction files — `REVIEW.md`, `AGENTS.md`,
   `CLAUDE.md`, `.github/copilot-instructions.md`, and the `AGENTS.md` nearest each changed file —
   are read at the **base** commit, as is a [skill](#skills) a type links in the same repository, so
   a pull request that adds "report nothing" to one is not obeyed. Text in the diff written to steer a reviewer is itself a finding, and caps the score.
 - **writes anything in shadow.** A repository in *Shadow*, where every connection starts, has the
   whole review run and recorded in the console and not one word written to GitHub: no review, no
-  summary, no reaction, no check, no answer to a command or a reply. Only the organisation's own chat
+  summary, no reaction, no check, no answer to a command or a reply, and no fix pushed. Only the organisation's own chat
   channel hears of it, and only where one is set ([announcements](#announcements-in-a-chat-channel)).
 - **pages people or links out.** Everything a model wrote passes a sanitiser before it is posted:
   `@` mentions are defused, images are removed, and links survive only into the pull request's own
@@ -249,6 +253,7 @@ or *off*; its menu's **Code review settings…** and **Set review** in the selec
 | When | when a pull request opens | *Only when asked*; *When a pull request opens* (also reopened, and ready for review); or *On every push*, which waits 90 seconds for the next push and holds new minor findings to what changed since the last review |
 | Drafts | skip drafts | *Skip drafts* or *Review drafts*: whether a draft is reviewed without anybody asking |
 | Forks | when a member asks | *When a member asks* or *Never* ([forks](#pull-requests-from-forks)) |
+| Fixes | fix when asked | *Fix when asked* or *Never*: whether somebody who can push may have a finding fixed on the pull request ([fixing a finding](#fixing-a-finding-on-the-pull-request)) |
 | Strictness | medium | how sure the verifier must be to keep a finding: 60, 70 or 85 out of 100 for low, medium and high |
 | Max comments | 8 | inline comments per review, 1 to 20; the rest are listed in the summary |
 | Comment header | none | text above every inline comment, up to 400 characters |
@@ -268,7 +273,7 @@ or *off*; its menu's **Code review settings…** and **Set review** in the selec
 Changing the settings needs `reviews.manage`, which the built-in admin and editor roles hold;
 `reviews.view` reads them, and the viewer role holds that. What posts, spends or reaches further
 needs `connections.manage` as well, which only admin holds: *Live*, *every push*, forks, context
-repositories, the model, max $, the channel reviews are announced in (not *Notify on*, which only
+repositories, the model, max $, *Fixes* turned on, the channel reviews are announced in (not *Notify on*, which only
 picks what it hears), a branch rule that posts live, reviews every push or names a model or a
 channel, adding repositories, and code review's budgets. It
 is judged on what a change makes effective at every repository and branch under the level changed,
@@ -487,7 +492,8 @@ Evidence: file and line links, pinned to the commit that was read
 a suggestion block, when there is a sound one
 ▸ Why this was flagged — the category, the rules it cites, the verifier's confidence
 ▸ Prompt for your coding agent
-Reply here if this is wrong or intended — every reply gets a verdict.
+☐ Fix this on the pull request — attest_tag pushes a commit to its branch
+Reply here if this is wrong or intended — every reply gets a verdict — or reply `@<app> fix` …
 ```
 
 Severity says what happens, not how sure the model is. **P0** is a security hole, data loss, or a
@@ -619,6 +625,7 @@ is a command:
 | `@<app> status` | the score and why, the open findings by severity, the commit last reviewed and whether the head has moved, and why the last request was not reviewed — from what is stored, with no model call. `@<app> why is the score 3?` asks the same |
 | `@<app> help` | the commands and the review types here. A bare mention asks for it too |
 | `@<app> pause`, `@<app> resume` | stop and start the pull request's automatic reviews, for owners and members of the organisation ([pausing](#pausing-automatic-reviews)) |
+| `@<app> fix` | fixes the open findings with a commit pushed to the pull request's branch; `@<app> fix p0 p1` only those severities. For people who can push to the repository ([fixing a finding](#fixing-a-finding-on-the-pull-request)) |
 
 `<app>` is the App's slug (`GITHUB_APP_SLUG`), and `@<app>[bot]` works as well. The mention has to
 be followed by a space, a comma, a colon or the end of the line, so a development App called
@@ -677,6 +684,42 @@ A reply is never answered to a bot, a thread gets three answers at most, a pull 
 day, and one person twenty an hour, or five for somebody who is not one of the repository's own
 people. Each answer holds $0.15 of the review budgets while it runs. Every change to a finding is
 audited (`review.finding_changed`, naming whose word it was), and the summary and the score follow.
+
+## Fixing a finding on the pull request
+
+Somebody who can push to the repository can have a finding fixed where they read it, three ways:
+
+- **tick the box** on the finding's comment, *Fix this on the pull request*;
+- **reply `@<app> fix`** in the finding's thread — what follows is passed to the job as their own
+  words: `@<app> fix, and keep the public signature`;
+- **comment `@<app> fix`** on the conversation, for every open finding the review posted, or
+  `@<app> fix p1` for one severity. Notes and pre-existing findings are left out; ten at most, the
+  most severe first.
+
+A reaction is not one of them: GitHub never tells an App about reactions, so a 👍 has nothing to
+arrive by — and on a review comment it usually means "agreed". GitHub's newer *Files changed* view
+has been seen showing a review comment's task list greyed out; the box can then be ticked from the
+*Conversation* tab, or the reply does the same.
+
+The bot answers in the thread, or on the conversation, with the job's number and the branch, and a
+[fix job](fix-jobs.md#jobs-asked-for-on-a-pull-request) makes the change: one more commit on the
+pull request's own branch, pushed as the App, never forced, and no pull request of its own. When it
+ends the bot answers again — the commit, what the checks said after the change — and reviews the
+new head, which closes what the commit fixed like any [push that fixes a
+finding](#when-a-push-fixes-a-finding). A change that breaks a check that passed before it is not
+pushed: the answer says which, with the diff below it to apply by hand. Nothing is pushed either
+when somebody else pushed a conflicting change meanwhile, or the job found nothing to change.
+
+It is refused, in one line where it was asked, on a pull request from a fork — the App cannot push
+to another repository's branch, though a suggestion block can still be committed from GitHub —
+one whose branch is the repository's default, a closed one, a repository with *Fixes: Never*, or
+when the organisation cannot run fix jobs. Somebody who cannot push — GitHub's own answer, not the
+comment's author association — is told once a day per pull request. In shadow nothing happens. One
+job runs on a pull request at a time and six a day; one person starts five an hour. Each request is
+audited (`review.fix`), and the job is in the console's *Jobs* with what it cost.
+
+The push comes from the App, so the pull request's CI runs again, and a workflow that decides by who
+pushed may treat the App as a stranger.
 
 ### Who may withdraw a P0 or P1
 
@@ -895,6 +938,7 @@ $0.15. The Start review dialog estimates one pull request's range before anythin
 | Skills | 5 per type; 20 files, three folders deep and 256 KB read from one skill; 24,000 characters of a type's skills given to its finder; 30 reads an hour of public repositories without credentials, and 120 Checks an hour, per organisation |
 | A push review | waits 90 seconds for the next push; a label's review waits as long |
 | Automatic reviews | 5 on one pull request, then paused until `@<app> resume` |
+| Fixes | one job running on a pull request at a time, 6 a day on one pull request, 5 an hour from one person |
 | Branch rules | 20 per level; 10 types and 10 labels per rule, a label up to 50 characters |
 | Review types | 40 rules each, 400 characters per rule |
 | Settings lists | 50 entries each, 400 characters per entry |
@@ -907,7 +951,8 @@ from a fork is never reviewed without somebody asking. With *Forks: When a membe
 default, a `@<app> review` from the repository's own people or a console start reviews it; with
 *Never* nothing does. Changing it needs `connections.manage`. The author of a pull request from a fork can neither
 withdraw nor downgrade a P0 or P1 by replying, nor close one by resolving its thread: they may have
-no access to the repository at all.
+no access to the repository at all. No fix is pushed to a fork's branch, which is not the App's to
+push to.
 
 ## Troubleshooting
 
@@ -1000,5 +1045,4 @@ shadow, silence is the design.
 - A copy of the summary in the pull request's description.
 - `remember` and `forget` as commands of their own, rules learned for one repository only, and how
   often each rule is cited, withdrawn or fixed.
-- `@<app> fix`, handing a finding to a fix job.
 - Polling GitHub for a deployment its webhook cannot reach.

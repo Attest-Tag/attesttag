@@ -61,6 +61,10 @@ type RenderContext struct {
 	// when the caller has it. An invisible character in a suggestion is let through only when
 	// these already hold it; without them, a suggestion holding one is not offered.
 	ReplacedLines string
+	// FixBox offers the fix checkbox (FixBoxText) on every finding's comment: a fix can be asked
+	// for on this pull request — the repository allows it, a fix worker runs here, and the branch
+	// is the repository's own rather than a fork's, which the App could not push to.
+	FixBox bool
 }
 
 func (ctx RenderContext) markerScope() MarkerScope {
@@ -141,6 +145,7 @@ func (ctx RenderContext) lookupType(key string) (Type, bool) {
 //	```suggestion block, when there is a sound one
 //	<details> Why this was flagged </details>
 //	<details> Prompt for your coding agent </details>
+//	- [ ] Fix this on the pull request …, when a fix can be asked for (FixBox)
 //	<sub>Reply here …</sub>
 //	<!-- attest_tag:finding=<id>.<mac> -->
 func RenderFinding(f Finding, ctx RenderContext) string {
@@ -159,8 +164,18 @@ func RenderFinding(f Finding, ctx RenderContext) string {
 	if s := suggestionBlock(f, ctx.ReplacedLines); s != "" {
 		blocks = append(blocks, s)
 	}
-	blocks = append(blocks, ctx.whyFlagged(f, p), agentPrompt(f),
-		"<sub>Reply here if this is wrong or intended — every reply gets a verdict.</sub>")
+	blocks = append(blocks, ctx.whyFlagged(f, p), agentPrompt(f))
+	hint := "<sub>Reply here if this is wrong or intended — every reply gets a verdict.</sub>"
+	if ctx.FixBox {
+		blocks = append(blocks, "- [ ] "+FixBoxText)
+		if ctx.Slug != "" {
+			// Where the box cannot be ticked — GitHub's newer "Files changed" view has shown task
+			// lists in review comments greyed out — the command does the same.
+			hint = "<sub>Reply here if this is wrong or intended — every reply gets a verdict — or reply <code>@" + ctx.Slug +
+				" fix</code> to have it fixed on this pull request.</sub>"
+		}
+	}
+	blocks = append(blocks, hint)
 	if m := Marker(ctx.MarkerKey, ctx.markerScope(), MarkerFinding, ctx.FindingID); m != "" {
 		blocks = append(blocks, m)
 	}

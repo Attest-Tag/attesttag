@@ -81,6 +81,7 @@ const ACTION_LABELS: Record<string, string> = {
   "review.posted": "Code review posted",
   "review.skipped": "Code review skipped",
   "review.command": "Code review command",
+  "review.fix": "Code review fix asked for",
   "review.replied": "Code review replied in a thread",
   "review.finding_changed": "Code review finding changed",
   "review.finding_kept": "Code review finding kept open",

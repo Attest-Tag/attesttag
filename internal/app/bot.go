@@ -299,6 +299,7 @@ func Run() {
 	}
 	b.jobs = NewJobRunner(cfg, store, slacks, proxy, settings)
 	b.jobs.agent = b.agent
+	b.jobs.onGitHubEnd = b.reviewFixEnded
 	b.agent.jobs = b.jobs
 	b.review = newReviewEngine(b.agent)
 	ix.scopes = func(ctx context.Context, orgID int64) map[string]string {
