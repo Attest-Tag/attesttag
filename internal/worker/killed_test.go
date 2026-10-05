@@ -122,7 +122,7 @@ func TestPRBodySaysAKilledCheckDidNotFinish(t *testing.T) {
 	res := &app.JobResult{Recipe: recipe, PR: &app.JobPR{URL: "https://github.com/acme/web/pull/9"},
 		Tests: app.JobCheck{Command: "npm run test", Before: killed, After: killed},
 		Build: app.JobCheck{Command: "npm run build", Before: pass, After: pass}}
-	body := prBody(spec, res, "Removed it.", recipe, 3, nil, nil)
+	body := prBody(spec, res, "Removed it.", recipe, 3, nil, nil, nil)
 	for _, want := range []string{
 		"> **The tests did not finish: they were killed (" + likelyOOM + "), so they did not check this change.** Please run them before merging; see the output below.",
 		"| test before | `npm run test` | **did not finish** (killed: " + likelyOOM + ", after 95s) |",
@@ -143,14 +143,14 @@ func TestPRBodySaysAKilledCheckDidNotFinish(t *testing.T) {
 
 	// The build failing after the change says more than the tests being killed, and leads.
 	res.Build.After = app.JobTestRun{Ran: true, Failed: 1, Output: "error TS2304"}
-	if body := prBody(spec, res, "Removed it.", recipe, 3, nil, nil); !strings.Contains(body,
+	if body := prBody(spec, res, "Removed it.", recipe, 3, nil, nil, nil); !strings.Contains(body,
 		"> **The build fails after this change, and passed before it.** Opened as a draft so a person can pick it up; see the output below.") {
 		t.Errorf("a broken build behind killed tests:\n%s", body)
 	}
 	// A suite failing as it did before the change is said to have been failing.
 	res.Build.After = pass
 	res.Tests = app.JobCheck{Command: "npm run test", Before: app.JobTestRun{Ran: true, Failed: 2, Passed: 40}, After: app.JobTestRun{Ran: true, Failed: 2, Passed: 41}}
-	if body := prBody(spec, res, "Removed it.", recipe, 3, nil, nil); !strings.Contains(body, "> **Tests failed before this change and still fail after it.**") {
+	if body := prBody(spec, res, "Removed it.", recipe, 3, nil, nil, nil); !strings.Contains(body, "> **Tests failed before this change and still fail after it.**") {
 		t.Errorf("a suite failing as before:\n%s", body)
 	}
 	if got := verdictSentence("tests", app.CheckWorse, " in `web/`", ""); got != "More tests in `web/` fail after this change than before it" {

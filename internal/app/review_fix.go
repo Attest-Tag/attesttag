@@ -578,7 +578,11 @@ func reviewFixReport(j *Job, res *JobResult, spec JobSpec, slug, diff string) st
 			b.WriteString("\n\n<details><summary>The change it made, not pushed</summary>\n\n```diff\n" + d + "\n```\n\n</details>")
 		}
 	}
-	fmt.Fprintf(&b, "\n\n<sub>attest_tag fix job #%d, asked for by @%s.</sub>", j.ID, spec.PR.AskedBy)
+	spend := ""
+	if t := jobTokensWords(j.TokensIn, j.TokensCached, j.TokensOut); t != "" {
+		spend = " " + jobCostWords(j) + t + "."
+	}
+	fmt.Fprintf(&b, "\n\n<sub>attest_tag fix job #%d, asked for by @%s.%s</sub>", j.ID, spec.PR.AskedBy, spend)
 	return b.String()
 }
 

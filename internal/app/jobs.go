@@ -765,8 +765,22 @@ func (r *JobRunner) priceJobUsage(ctx context.Context, j *Job, u *JobUsage) {
 		return
 	}
 	if p, ok := r.agent.endpoints.platform.priceOf(ctx, j.Model); ok {
-		u.CostUSD = p.cost(Usage{In: u.In, Out: u.Out})
+		u.CostUSD = p.cost(u.usage())
 	}
+}
+
+// listPrice is the job model's list price, for the worker to put an estimate in the pull request
+// it writes. Nil when the catalogue has no price for the model, and the pull request then shows
+// tokens only.
+func (r *JobRunner) listPrice(ctx context.Context, j *Job) *JobPrice {
+	if r.agent == nil || r.agent.endpoints == nil {
+		return nil
+	}
+	p, ok := r.agent.endpoints.platform.priceOf(ctx, j.Model)
+	if !ok {
+		return nil
+	}
+	return &JobPrice{InPerM: p.In * 1e6, CachedPerM: p.CachedIn * 1e6, OutPerM: p.Out * 1e6}
 }
 
 // settleKey reads the exact spend off the per-job key, deletes the key, and returns any cost the

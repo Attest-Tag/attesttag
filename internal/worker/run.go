@@ -436,6 +436,7 @@ func (r *Runner) execute(ctx context.Context, claim *app.JobClaim, rep *Reporter
 	er, err := eng.Run(ctx, ws, brief)
 	res.Summary = er.Summary
 	res.LogTail = er.LogTail
+	res.Usage, res.Turns = er.Usage, er.Rounds // the pull request quotes them; the result's total is settled on the way out
 	if err != nil {
 		rep.Phase("engine", "failed", err.Error())
 		if !stopped(ctx, res) {
@@ -553,7 +554,7 @@ func (r *Runner) execute(ctx context.Context, claim *app.JobClaim, rep *Reporter
 	}
 	r.fillPackages(res)
 	pr, err := gh.createPR(ctx, spec.Repo, prInput{Title: prTitle(spec), Head: spec.Branch, Base: spec.BaseBranch, Draft: true,
-		Body: r.scrub.Clean(prBody(spec, res, er.Summary, recipe, claim.Job.ID, skipped, pkgs))})
+		Body: r.scrub.Clean(prBody(spec, res, er.Summary, recipe, claim.Job.ID, skipped, pkgs, claim.Price))})
 	if pr != nil {
 		res.PR = pr
 	}

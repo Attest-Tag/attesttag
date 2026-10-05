@@ -82,7 +82,19 @@ job's files in memory, and a large JavaScript repository's suite and build did n
 `deploy/gcp/worker.sh` again to apply it (`MEMORY=4Gi` keeps the old size). The other platforms'
 defaults are unchanged.
 
-Upgrading: nothing to migrate. For the code review check, add *Checks: Read and write* under the
+**Fix jobs keep their prompt cache, and say how much of it they used.** A coding agent re-sends its
+whole conversation every turn, so a long job reads millions of input tokens, nearly all of them the
+same prefix again. On OpenRouter every request of a job now carries one `session_id`, which keeps the
+job on the provider that cached its conversation instead of spreading turns across every provider
+that serves the model. The cached part of the input is recorded on the job, priced at the cache-read
+rate, and shown wherever the job's cost is: the Slack report ("9.8M in (90% cached) / 74k out"), the
+console's job page, the reply on a pull request a fix was pushed to, and a new **Cost** section in
+the pull request a job opens (turns, tokens, cache share and an estimate at the list price).
+→ [What a job costs](guide/fix-jobs.md#what-a-job-costs)
+
+Upgrading: migration `0032_job_cached_tokens` adds the columns and applies itself at startup. The
+session pin and the cached count need the worker image rebuilt from this release
+(`deploy/<platform>/worker.sh`); an older worker's jobs record no cached tokens. For the code review check, add *Checks: Read and write* under the
 App's *Permissions & events* at GitHub; each account that installed it is then asked to accept, and
 its next review has a check. Fixes on the pull request need the worker image rebuilt from this
 release (`deploy/<platform>/worker.sh`): an older worker refuses such a job at its clone and pushes

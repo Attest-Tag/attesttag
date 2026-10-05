@@ -717,3 +717,51 @@ func TestPostHandoverGitRunsAsTheSandboxUser(t *testing.T) {
 		}
 	}
 }
+
+// Qwen Code 0.22 puts the cached part of the prompt in the result's usage as
+// cache_read_input_tokens (from OpenRouter's prompt_tokens_details.cached_tokens).
+func TestQwenStreamReadsCachedTokens(t *testing.T) {
+	st := &qwenStream{maxRounds: 10}
+	st.line(`{"type":"result","subtype":"success","num_turns":179,"result":"SUMMARY: done","usage":{"input_tokens":9842872,"output_tokens":74103,"cache_read_input_tokens":8900000,"total_tokens":9916975}}`)
+	if st.usage.In != 9842872 || st.usage.Out != 74103 || st.usage.Cached != 8900000 {
+		t.Errorf("usage = %+v", st.usage)
+	}
+	st = &qwenStream{maxRounds: 10}
+	st.line(`{"type":"usage","usage":{"prompt_tokens":1000,"completion_tokens":10,"prompt_tokens_details":{"cached_tokens":900}}}`)
+	if st.usage.Cached != 900 {
+		t.Errorf("OpenAI-shaped usage: %+v", st.usage)
+	}
+}
+
+// Every request of a job on OpenRouter carries one session_id, so the job stays on the provider
+// whose cache holds its conversation; another endpoint gets nothing it would not understand.
+func TestQwenProviderPinsTheSessionOnOpenRouter(t *testing.T) {
+	e := &qwenEngine{llm: app.JobLLMSecret{BaseURL: "https://openrouter.ai/api/v1", Model: "z-ai/glm-5.3"}, jobID: 42}
+	gc, _ := e.provider()["generationConfig"].(map[string]any)
+	body, _ := gc["extra_body"].(map[string]any)
+	if body["session_id"] != "attesttag-job-42" {
+		t.Errorf("openrouter provider = %+v", e.provider())
+	}
+	e.llm.BaseURL = "https://api.openai.com/v1"
+	if _, ok := e.provider()["generationConfig"]; ok {
+		t.Errorf("a non-OpenRouter endpoint got OpenRouter's session_id: %+v", e.provider())
+	}
+}
+
+// The pull request says what the run took, with the cache share and, given a list price, an
+// estimate; without usage it says nothing.
+func TestPRBodyCostSection(t *testing.T) {
+	res := &app.JobResult{Usage: app.JobUsage{In: 9842872, Cached: 8900000, Out: 74103}, Turns: 179}
+	got := spendSection(res, &app.JobPrice{InPerM: 0.3, CachedPerM: 0.06, OutPerM: 3.2})
+	for _, want := range []string{"| 179 | 9,842,872 | 8,900,000 (90%) | 74,103 | $1.05 |", "$0.3 in, $0.06 cached, $3.2 out"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("cost section lacks %q:\n%s", want, got)
+		}
+	}
+	if got := spendSection(res, nil); strings.Contains(got, "Estimated") || !strings.Contains(got, "9,842,872") {
+		t.Errorf("without a price: %s", got)
+	}
+	if got := spendSection(&app.JobResult{}, nil); got != "" {
+		t.Errorf("no usage: %q", got)
+	}
+}

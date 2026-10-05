@@ -71,7 +71,7 @@ func newEngine(name string, o Options, claim *app.JobClaim) (Engine, error) {
 	case "fake", "":
 		return fakeEngine{}, nil
 	case "qwen_code":
-		return &qwenEngine{bin: o.QwenBin, llm: claim.Secrets.LLM, maxRounds: maxRoundsFor(claim.Job.Spec)}, nil
+		return &qwenEngine{bin: o.QwenBin, llm: claim.Secrets.LLM, maxRounds: maxRoundsFor(claim.Job.Spec), jobID: claim.Job.ID}, nil
 	}
 	return nil, stepErr("engine_error", "unknown engine "+name)
 }

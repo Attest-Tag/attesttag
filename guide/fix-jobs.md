@@ -47,6 +47,21 @@ capped per job; the worker reports the tokens it used and the bot prices them fr
 which is what the 1.25× budget cancel reads. The worker meters a key's spend itself only when the
 key was minted for that job — a shared key's running total is every other caller's spend too.
 
+### What a job costs
+
+A coding agent sends its whole conversation with every turn, so a job of a hundred turns reads
+millions of input tokens — mostly the same text again. A provider that caches that prefix charges a
+fraction for it, and that is most of the difference between an expensive job and a long one. On
+OpenRouter the worker sends every request of a job with the same `session_id`, so the job stays on
+the provider holding its cache rather than being balanced across every provider of the model.
+
+The engine's count of cached input tokens is recorded beside the totals and priced at the
+catalogue's cache-read rate. The Slack report, the console's job page and the reply on a pull
+request a fix was pushed to show the share ("9.8M in (90% cached) / 74k out"), and a pull request
+the job opens ends with a **Cost** table: turns, input, cached input, output, and an estimate at the
+model's list price. The estimate is the catalogue's, not the bill: the provider that served each
+call may charge differently, and only a key minted for the job reads back exactly what it spent.
+
 ### A job from claim to draft pull request
 
 The container's environment holds only the job id, the bot's URL, the mode, and a token good for

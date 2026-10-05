@@ -234,7 +234,7 @@ func TestPRBodyShowsEveryPackage(t *testing.T) {
 		},
 		Unchecked: []string{"docs-site", "."}, PR: &app.JobPR{URL: "https://github.com/acme/app/pull/3"}}
 	pkgs := []*pkgRun{{Dir: "services/api"}, {Dir: "web", Tools: []string{"node 22.23.2 (the job's default)"}}, {Dir: "tools"}}
-	body := prBody(spec, res, "Fixed it.", res.Recipe, 1, nil, pkgs)
+	body := prBody(spec, res, "Fixed it.", res.Recipe, 1, nil, pkgs, nil)
 	for _, want := range []string{
 		"> **Tests in `web/` fail after this change, and passed before it.** Opened as a draft so a person can pick it up; see its checks below.",
 		"> **This change also touches `docs-site/` and the repository root, which this job did not check.**",
@@ -251,7 +251,7 @@ func TestPRBodyShowsEveryPackage(t *testing.T) {
 		t.Errorf("ticket comment: %q", got)
 	}
 	one := &app.JobResult{Recipe: res.Recipe, Tests: res.Tests, PR: res.PR}
-	if b := prBody(spec, one, "Fixed it.", one.Recipe, 1, nil, nil); strings.Contains(b, "###") || strings.Contains(b, "also touches") {
+	if b := prBody(spec, one, "Fixed it.", one.Recipe, 1, nil, nil, nil); strings.Contains(b, "###") || strings.Contains(b, "also touches") {
 		t.Errorf("a single package's body grew sections:\n%s", b)
 	}
 	if got := ticketComment(spec, one); !strings.Contains(got, "(checks pass)") {

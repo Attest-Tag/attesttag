@@ -24,6 +24,7 @@ type qwenEngine struct {
 	bin       string
 	llm       app.JobLLMSecret
 	maxRounds int
+	jobID     int64
 }
 
 func (e *qwenEngine) Name() string { return "qwen_code" }
@@ -73,15 +74,27 @@ func (e *qwenEngine) writeSettings(home string) error {
 		return err
 	}
 	settings := map[string]any{
-		"general":   map[string]any{"enableAutoUpdate": false, "checkpointing": map[string]any{"enabled": false}},
-		"privacy":   map[string]any{"usageStatisticsEnabled": false},
-		"telemetry": map[string]any{"enabled": false},
-		"modelProviders": map[string]any{"openai": []map[string]any{{
-			"id": e.llm.Model, "name": e.llm.Model, "baseUrl": e.llm.BaseURL, "envKey": "OPENAI_API_KEY",
-		}}},
+		"general":        map[string]any{"enableAutoUpdate": false, "checkpointing": map[string]any{"enabled": false}},
+		"privacy":        map[string]any{"usageStatisticsEnabled": false},
+		"telemetry":      map[string]any{"enabled": false},
+		"modelProviders": map[string]any{"openai": []map[string]any{e.provider()}},
 	}
 	raw, _ := json.MarshalIndent(settings, "", "  ")
 	return os.WriteFile(filepath.Join(dir, "settings.json"), raw, 0o600)
+}
+
+// provider is the one model the CLI may use. On OpenRouter every request of the job carries the
+// same session_id, which keeps the job on the provider endpoint that served its first turn: an
+// agent re-sends its whole conversation every turn, a provider's prompt cache only helps when the
+// next turn reaches the same provider, and a model served by dozens of providers is otherwise
+// load-balanced across them call by call — each miss pays full price for the whole prefix again.
+// Qwen Code merges generationConfig.extra_body into every request body.
+func (e *qwenEngine) provider() map[string]any {
+	p := map[string]any{"id": e.llm.Model, "name": e.llm.Model, "baseUrl": e.llm.BaseURL, "envKey": "OPENAI_API_KEY"}
+	if strings.Contains(e.llm.BaseURL, "openrouter.ai") && e.jobID > 0 {
+		p["generationConfig"] = map[string]any{"extra_body": map[string]any{"session_id": fmt.Sprintf("attesttag-job-%d", e.jobID)}}
+	}
+	return p
 }
 
 func (e *qwenEngine) Run(ctx context.Context, ws *Workspace, b Brief) (EngineResult, error) {
@@ -244,7 +257,15 @@ func (s *qwenStream) readUsage(v any) {
 	in := num("input_tokens", "prompt_tokens", "inputTokens", "promptTokens", "input")
 	out := num("output_tokens", "completion_tokens", "outputTokens", "candidatesTokens", "output")
 	if in > 0 || out > 0 {
-		s.usage.In, s.usage.Out, s.seenUsage = in, out, true
+		// The cached count sits beside the totals it is part of: cache_read_input_tokens in the
+		// result's usage (Qwen Code 0.22), prompt_tokens_details.cached_tokens in OpenAI's shape.
+		cached := num("cache_read_input_tokens", "cached_tokens", "cachedContentTokenCount", "cachedTokens")
+		if d, ok := m["prompt_tokens_details"].(map[string]any); ok {
+			if f, ok := d["cached_tokens"].(float64); ok {
+				cached = int(f)
+			}
+		}
+		s.usage.In, s.usage.Out, s.usage.Cached, s.seenUsage = in, out, min(cached, in), true
 	}
 	for _, k := range []string{"models", "stats", "usage", "metadata"} {
 		if sub, ok := m[k]; ok {
