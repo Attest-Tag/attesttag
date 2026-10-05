@@ -948,55 +948,6 @@ func jsonString(s string) []byte {
 	return bytes.TrimRight(b.Bytes(), "\n")
 }
 
-// secretRes find credentials by their prefix and shape. Each prefix starts at a word boundary: a
-// key is pasted after a quote, a space, an = or a colon, never in the middle of a word, and without
-// one sk- matches inside names such as --clr-ask-ai-gradient-start. A hit is a credential only
-// when secretShaped agrees.
-var secretRes = []*regexp.Regexp{
-	regexp.MustCompile(`\bxox[abpers]-[A-Za-z0-9-]{10,}`),
-	regexp.MustCompile(`\bxapp-[A-Za-z0-9-]{10,}`),
-	regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{16,}`),
-	regexp.MustCompile(`\bAKIA[0-9A-Z]{16}`),
-	regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9]{20,}`),
-	regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{22,}`),     // fine-grained GitHub tokens
-	regexp.MustCompile(`\batj1\.[0-9]+\.[A-Za-z0-9_-]{40,}`), // fix-job worker tokens (jobs.go)
-	regexp.MustCompile(`\batk1\.[A-Za-z0-9_-]{40,}`),         // developer API keys (api_keys.go): 32 random bytes, base64url
-	regexp.MustCompile(`(?i)-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----`),
-	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}`), // JWT
-}
-
-// secretShaped says whether a pattern's hit reads as random rather than as a name. A key's body
-// past its prefix is random characters, so it holds a digit or a capital; a body of lowercase
-// words joined by - or _ (sk-ai-gradient-start, sk-learn-model-selection) is an identifier.
-func secretShaped(hit string) bool {
-	if strings.HasPrefix(hit, "-----") {
-		return true
-	}
-	body := hit[strings.IndexAny(hit, "-_.")+1:]
-	return strings.ContainsFunc(body, func(r rune) bool { return r >= '0' && r <= '9' || r >= 'A' && r <= 'Z' })
-}
-
-// redactWith replaces every credential in s with mask and returns the hits it replaced.
-func redactWith(s, mask string) (string, []string) {
-	var hits []string
-	for _, re := range secretRes {
-		s = re.ReplaceAllStringFunc(s, func(m string) string {
-			if !secretShaped(m) {
-				return m
-			}
-			hits = append(hits, m)
-			return mask
-		})
-	}
-	return s, hits
-}
-
-// redact masks obvious credentials before anything leaves for the model provider.
-func redact(s string) string {
-	s, _ = redactWith(s, "[redacted-secret]")
-	return s
-}
-
 // Redact and StripThinking are the same helpers for the worker binary (internal/worker), which
 // shares this package's secret patterns so both ends scrub the same things.
 func Redact(s string) string        { return redact(s) }

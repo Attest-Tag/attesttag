@@ -108,10 +108,10 @@ func (m *reviewMasker) line(s string) (out string, kinds []string, fake bool) {
 	s, hits := redactWith(s, reviewMask)
 	fake = len(hits) > 0
 	for _, hit := range hits {
-		if k := secretKind(hit); !slices.Contains(kinds, k) {
+		if k := hit.kind(); !slices.Contains(kinds, k) {
 			kinds = append(kinds, k)
 		}
-		fake = fake && secretPlaceholder(hit)
+		fake = fake && secretPlaceholder(hit.Value)
 	}
 	return s, kinds, fake
 }
@@ -121,34 +121,10 @@ func (m *reviewMasker) line(s string) (out string, kinds []string, fake bool) {
 // abcdefghij). A random key holds none of these by chance often enough to matter.
 var secretPlaceholderRe = regexp.MustCompile(`(?i)fake|example|dummy|placeholder|sample|redacted|changeme|your|xxxx|test|demo|0123456|1234567|abcdefg`)
 
-// secretPlaceholder says whether one hit of secretRes is plainly not a real credential. It is
+// secretPlaceholder says whether one credential found is plainly not a real credential. It is
 // masked all the same; it is reported as a note rather than as a committed credential.
 func secretPlaceholder(hit string) bool {
 	return !strings.HasPrefix(hit, "-----") && secretPlaceholderRe.MatchString(hit)
-}
-
-// secretKind names what a credential is from its shape alone, for a finding that must say what was
-// committed without saying what it was.
-func secretKind(hit string) string {
-	switch {
-	case strings.HasPrefix(hit, "xapp-"):
-		return "a Slack app token"
-	case strings.HasPrefix(hit, "xox"):
-		return "a Slack token"
-	case strings.HasPrefix(hit, "sk-"):
-		return "an API key"
-	case strings.HasPrefix(hit, "AKIA"):
-		return "an AWS access key"
-	case strings.HasPrefix(hit, "github_pat_"), strings.HasPrefix(hit, "gh"):
-		return "a GitHub token"
-	case strings.HasPrefix(hit, "atj1."):
-		return "an attest_tag worker token"
-	case strings.HasPrefix(hit, "atk1."):
-		return "an attest_tag API key"
-	case strings.HasPrefix(hit, "eyJ"):
-		return "a JWT"
-	}
-	return "a private key"
 }
 
 // maskText masks a whole file's content, line for line, and returns the lines it masked (1-based).
