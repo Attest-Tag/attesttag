@@ -53,6 +53,14 @@ Worth knowing before you touch things:
   the console assistant, so a change to behaviour a page describes changes that page too.
 - **House style for comments and commits** is in [`CONTRIBUTING.md`](CONTRIBUTING.md) — comments
   say *why*, and commit subjects are sentences about behaviour, not labels.
+- **This repository is public, so everything you write into it is too** — commit messages, PR
+  titles and descriptions, PR and review comments, issues, code comments, log and error
+  strings, tests and fixtures, `guide/` pages, the README and the CHANGELOG.
+  Never include personal data (names, emails, user or workspace ids) or anything about a
+  particular company or deployment (organisation or channel names, internal URLs, message
+  contents, usage numbers), and never link a Slack thread, chat message or internal ticket.
+  Describe the problem generically — the mechanism, how to reproduce it, and the fix — and use
+  placeholders such as `user@example.com` or `T0000000` in examples.
 
 ## Where things are
 
