@@ -72,7 +72,8 @@ almost certainly found something real; read what it says before working around i
 The code is commented more heavily than most, and in a particular way: comments say **why**,
 not what. A comment that restates the line below it is noise, but the reason a timeout is 9
 seconds, or why a lease is released before a shutdown completes, is the thing a reader cannot
-recover from the code. Match the surrounding density.
+recover from the code. Match the surrounding density. Keep comments generic as well: explain
+the case a line handles, never the person, company or chat thread where it first came up.
 
 The same goes for commit messages. They are prose — a sentence saying what changed, then a
 paragraph or two on what was wrong before and why this is the fix. The subject is a sentence
@@ -103,6 +104,9 @@ Small and single-purpose travels fastest. Please:
   `.git/info/public-denylist` (your own cloud project, service URL and the like)
 - add a test when you fix a bug — the test is how the fix stays fixed
 - say in the description what you saw go wrong, not only what you changed
+- keep it generic: commits, descriptions and comments are public, so describe the problem and
+  its reproduction without personal data, company or customer details, or links to chat
+  threads and internal tickets
 
 For anything large, open an issue first and let's agree on the shape before you spend a weekend
 on it. That is for your benefit, not the project's.
