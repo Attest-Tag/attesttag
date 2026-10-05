@@ -222,12 +222,13 @@ export function sourceLabel(level: ReviewLevel | undefined, ancestors: Ancestor[
   return a ? `from ${a.name}` : `from the ${level}`;
 }
 
-export type ListField = "instructions" | "exclude_authors" | "ignore_paths" | "context_repos";
+export type ListField = "instructions" | "exclude_authors" | "review_bots" | "ignore_paths" | "context_repos";
 
 /** Whether a list compares entries without case, as the server's addUp does: logins and repository names. */
 export const FOLD_CASE: Record<ListField, boolean> = {
   instructions: false,
   exclude_authors: true,
+  review_bots: true,
   ignore_paths: false,
   context_repos: true,
 };

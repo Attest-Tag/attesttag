@@ -31,6 +31,12 @@ Versions follow [semantic versioning](https://semver.org). Before 1.0 that means
 - **A fix job's pull request is reviewed.** A pull request the App opened itself is no longer skipped
   as a bot's: it is reviewed once somebody marks it ready, as anybody's draft is.
 
+**Code review reviews the bots you name.** A pull request a bot opened was always skipped. *Bots to
+review*, a new list in the review settings, names the bots whose pull requests are reviewed without
+anybody asking — by login, with or without `[bot]`, or a glob, and `*` for every bot — and adds up
+from the connection down like the other lists. Any other bot's pull request is still skipped, and
+the authors to skip still apply. → [Settings and their defaults](guide/code-review.md#settings-and-their-defaults)
+
 **Fix jobs say a check did not finish, not that it failed.** A suite or a build the worker's sandbox
 killed partway — most often out of memory, on a large repository — was reported as failing: the
 pull request opened with "Tests still fail after this change", its table counted one failure, and

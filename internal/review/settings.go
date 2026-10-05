@@ -148,7 +148,7 @@ const (
 // the console resets a field.
 //
 // Two kinds of field inherit differently. A single value is taken from the nearest level that
-// sets it, so a repository can override its group. The four lists add up instead, broadest
+// sets it, so a repository can override its group. The lists add up instead, broadest
 // first: a connection's "skip these authors" still applies to a repository that adds one more,
 // since a list that replaced its parent's would make every repository restate the
 // organisation's basics, and the first one to forget would quietly lose them. An empty list
@@ -176,6 +176,7 @@ type Settings struct {
 
 	Instructions   []string `json:"instructions,omitempty"`    // what the team wants checked, one per entry
 	ExcludeAuthors []string `json:"exclude_authors,omitempty"` // login globs never reviewed automatically
+	ReviewBots     []string `json:"review_bots,omitempty"`     // bot login globs reviewed automatically all the same; other bots are skipped
 	IgnorePaths    []string `json:"ignore_paths,omitempty"`    // path globs left out of every review
 	ContextRepos   []string `json:"context_repos,omitempty"`   // owner/name of the organisation's own repositories the reviewer may read
 
@@ -247,6 +248,7 @@ type Effective struct {
 
 	Instructions   []string `json:"instructions"`
 	ExcludeAuthors []string `json:"exclude_authors"`
+	ReviewBots     []string `json:"review_bots,omitzero"` // omitzero for Hash's sake, as Notify: adding it missed no cached review
 	IgnorePaths    []string `json:"ignore_paths"`
 	ContextRepos   []string `json:"context_repos"`
 
@@ -269,11 +271,12 @@ func Resolve(chain []LevelSettings) Effective {
 	e := Effective{
 		Instructions:   []string{},
 		ExcludeAuthors: []string{},
+		ReviewBots:     []string{},
 		IgnorePaths:    []string{},
 		ContextRepos:   []string{},
 		Source:         map[string]Level{},
 	}
-	for _, name := range []string{"instructions", "exclude_authors", "ignore_paths", "context_repos"} {
+	for _, name := range []string{"instructions", "exclude_authors", "review_bots", "ignore_paths", "context_repos"} {
 		e.Source[name] = LevelDefault
 	}
 	levels := append([]LevelSettings{{Level: LevelDefault, Settings: Defaults()}}, chain...)
@@ -298,6 +301,7 @@ func Resolve(chain []LevelSettings) Effective {
 		// GitHub logins and repository names are case-insensitive, so "Octocat" added below
 		// "octocat" is not a second entry.
 		addUp(&e.ExcludeAuthors, s.ExcludeAuthors, true, "exclude_authors", lv, e.Source)
+		addUp(&e.ReviewBots, s.ReviewBots, true, "review_bots", lv, e.Source)
 		addUp(&e.IgnorePaths, s.IgnorePaths, false, "ignore_paths", lv, e.Source)
 		addUp(&e.ContextRepos, s.ContextRepos, true, "context_repos", lv, e.Source)
 
@@ -365,6 +369,7 @@ func (e Effective) WithRule(r BranchRule) Effective {
 	out := e
 	out.Instructions = slices.Clone(e.Instructions)
 	out.ExcludeAuthors = slices.Clone(e.ExcludeAuthors)
+	out.ReviewBots = slices.Clone(e.ReviewBots)
 	out.IgnorePaths = slices.Clone(e.IgnorePaths)
 	out.ContextRepos = slices.Clone(e.ContextRepos)
 	out.NotifyOn = slices.Clone(e.NotifyOn)
@@ -424,6 +429,20 @@ func (e Effective) ExcludesAuthor(login string) bool {
 	return false
 }
 
+// ReviewsBot reports whether a bot's pull requests are reviewed automatically: whether login matches
+// one of the bot globs, case-insensitively. An App's account is "name[bot]", the login its pull
+// requests carry, and people write it either way, so the suffix is optional on both sides —
+// "dependabot" lets dependabot[bot] through, as "dependabot[bot]" does — and "*" lets every bot.
+func (e Effective) ReviewsBot(login string) bool {
+	name := strings.TrimSuffix(strings.ToLower(login), "[bot]")
+	for _, p := range e.ReviewBots {
+		if p = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(p)), "[bot]"); p != "" && Match(p, name) {
+			return true
+		}
+	}
+	return false
+}
+
 // IgnoresPath reports whether a changed file is left out of the review.
 func (e Effective) IgnoresPath(path string) bool { return MatchAny(e.IgnorePaths, path) }
 
@@ -432,10 +451,12 @@ func (e Effective) IgnoresPath(path string) bool { return MatchAny(e.IgnorePaths
 // same hash can be answered from the first one's result. Source is left out — where a value
 // came from does not change what it does — and so is the channel told about it, and what it is
 // told, at every level and in every rule: pointing the announcements somewhere else changes no
-// review, and must not make the next request on a reviewed head pay for that review again.
+// review, and must not make the next request on a reviewed head pay for that review again. So are
+// the bots let through, which decide whether a review runs, not what it finds.
 func (e Effective) Hash() string {
 	e.Source = nil
 	e.Notify, e.NotifyOn = NotifyChannel{}, nil
+	e.ReviewBots = nil
 	e.BranchRules = cloneRules(e.BranchRules)
 	for i := range e.BranchRules {
 		e.BranchRules[i].Notify = nil
@@ -455,7 +476,7 @@ func (e Effective) Hash() string {
 func SettingFields() []string {
 	return []string{"mode", "trigger", "drafts", "forks", "strictness", "max_comments",
 		"comment_header", "model", "max_usd", "notify", "notify_on", "instructions", "exclude_authors",
-		"ignore_paths", "context_repos", "branch_rules"}
+		"review_bots", "ignore_paths", "context_repos", "branch_rules"}
 }
 
 // ChangedFields lists the JSON names of the settings that differ between two versions of one
@@ -568,6 +589,7 @@ func (s Settings) Validate() error {
 	}
 	checkList("instructions", s.Instructions, nil, "")
 	checkList("exclude_authors", s.ExcludeAuthors, loginGlob.MatchString, "a GitHub login or a glob of one")
+	checkList("review_bots", s.ReviewBots, loginGlob.MatchString, "a GitHub login or a glob of one")
 	checkList("ignore_paths", s.IgnorePaths, validPathGlob, "a path glob")
 	checkList("context_repos", s.ContextRepos, validRepoName, "owner/name")
 

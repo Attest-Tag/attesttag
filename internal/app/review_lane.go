@@ -687,7 +687,9 @@ func (b *Bot) enqueueReview(ctx context.Context, orgID int64, repo string, pr in
 // ownApp is a pull request this App opened — a fix job's — which is not passed over as a bot's: a
 // bot's pull request is skipped because it is a dependency bump nobody needs read, and a fix job's is
 // code a model wrote, which is what most needs a review. It opens as a draft, so it is reviewed once
-// somebody marks it ready, as anybody's draft is; the authors' list still applies to it.
+// somebody marks it ready, as anybody's draft is; the authors' list still applies to it. So is a bot
+// the settings name (review_bots): one team's bots open dependency bumps, another's a coding agent's
+// changes, and only the team knows which of its bots are which.
 func reviewFilterSkip(req reviewRequest, plan reviewPlan, pull *githubPull, ownApp bool) (s *reviewSkip, record bool) {
 	automatic := automaticTrigger(req.Trigger) && !req.BypassFilters
 	if automatic {
@@ -704,8 +706,8 @@ func reviewFilterSkip(req reviewRequest, plan reviewPlan, pull *githubPull, ownA
 			return &reviewSkip{"trigger", "this repository is reviewed only when somebody asks"}, true
 		case pull.Draft && !plan.eff.Drafts:
 			return &reviewSkip{"draft", "draft pull requests are not reviewed automatically here"}, true
-		case strings.EqualFold(pull.User.Type, "Bot") && !ownApp:
-			return &reviewSkip{"bot", pull.User.Login + " is a bot"}, true
+		case strings.EqualFold(pull.User.Type, "Bot") && !ownApp && !plan.eff.ReviewsBot(pull.User.Login):
+			return &reviewSkip{"bot", pull.User.Login + " is a bot, and not on this repository's list of bots to review"}, true
 		case plan.eff.ExcludesAuthor(pull.User.Login):
 			return &reviewSkip{"excluded_author", pull.User.Login + " is on this repository's list of authors not reviewed automatically"}, true
 		}
