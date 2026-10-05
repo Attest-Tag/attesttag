@@ -37,6 +37,9 @@ type procOut struct {
 	Output   string // combined stdout+stderr, head+tail
 	TimedOut bool
 	Duration time.Duration
+	// Signal is the signal that ended the command itself, 0 when it exited. A timeout or a cancel
+	// is the worker's own doing and says so above; anything else is somebody else's (killedBy).
+	Signal int
 }
 
 var errTimeout = errors.New("timed out")
@@ -98,6 +101,7 @@ func runCmd(ctx context.Context, spec cmdSpec) (procOut, error) {
 	out.Output = buf.String()
 	if cmd.ProcessState != nil {
 		out.Code = cmd.ProcessState.ExitCode()
+		out.Signal = exitSignal(cmd.ProcessState)
 	}
 	if cctx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
 		out.TimedOut = true

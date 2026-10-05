@@ -382,10 +382,16 @@ type JobStepRun struct {
 	Output  string  `json:"output,omitempty"` // tail
 }
 
-// JobTestRun: Ran=false means no test suite was found or it never got to run.
+// JobTestRun: Ran=false means no test suite was found or it never got to run. Killed says why a
+// run was stopped from outside before it could finish — "out of memory", most often: the worker's
+// sandbox ran out — which says nothing about the code either way, so it is reported as a check that
+// did not finish, never as one that failed. OK is false for one, as it was before Killed existed,
+// so a reader that does not know the field still never takes it for a pass. A run the job's own
+// time cap ended is not killed: its output says it timed out.
 type JobTestRun struct {
 	Ran     bool    `json:"ran"`
 	OK      bool    `json:"ok"`
+	Killed  string  `json:"killed,omitempty"`
 	Passed  int     `json:"passed,omitempty"`
 	Failed  int     `json:"failed,omitempty"`
 	Seconds float64 `json:"seconds,omitempty"`
@@ -419,15 +425,67 @@ type JobPackage struct {
 	Skipped string     `json:"skipped,omitempty"` // why nothing ran here at all
 }
 
-// StillFailing names the gate that fails after the change — "tests", then "build" — or "".
-func (p *JobPackage) StillFailing() string {
+// Failing reports whether a run got to its end and did not pass: the one kind of result that
+// says something about the code. A run that was killed before it finished says nothing either way.
+func (t JobTestRun) Failing() bool { return t.Ran && !t.OK && t.Killed == "" }
+
+// How a gate stands after a job's change, against how it stood before it (JobCheck.Outcome): what
+// the pull request's headline and the thread say of it.
+const (
+	CheckFine       = ""            // passes after the change, or did not run after it
+	CheckUnfinished = "unfinished"  // killed after the change before it finished: unchecked, not failing
+	CheckBroken     = "broken"      // passed before the change, and fails after it
+	CheckWorse      = "worse"       // failed before the change, and more of it fails after it
+	CheckStillFails = "still_fails" // failed before the change as well, and no worse after it
+	CheckFails      = "fails"       // fails after the change, with no finished run before it to compare
+)
+
+// Outcome is how the gate stands after the change against how it stood before. A run before the
+// change that failed is the comparison only when it finished: one killed before it could has no
+// count to hold the run after to. More failures, or fewer passes, after the change is worse — a
+// change that stops a suite compiling can fail fewer tests than the bug did, by running none.
+func (c JobCheck) Outcome() string {
+	a, b := c.After, c.Before
 	switch {
-	case p.Tests.After.Ran && !p.Tests.After.OK:
-		return "tests"
-	case p.Build.After.Ran && !p.Build.After.OK:
-		return "build"
+	case !a.Ran || a.OK:
+		return CheckFine
+	case a.Killed != "":
+		return CheckUnfinished
+	case !b.Ran || b.Killed != "":
+		return CheckFails
+	case b.OK:
+		return CheckBroken
+	case a.Failed > b.Failed || a.Passed < b.Passed:
+		return CheckWorse
 	}
-	return ""
+	return CheckStillFails
+}
+
+// Verdict is a package's headline: the gate ("tests" or "build") and its Outcome, or two empty
+// strings when both are fine. A failure that finished comes first, the tests' before the build's —
+// it says something about the change, where a check that did not finish says only that it went
+// unchecked.
+func (p *JobPackage) Verdict() (gate, outcome string) {
+	t, b := p.Tests.Outcome(), p.Build.Outcome()
+	switch {
+	case t != CheckFine && t != CheckUnfinished:
+		return "tests", t
+	case b != CheckFine && b != CheckUnfinished:
+		return "build", b
+	case t == CheckUnfinished:
+		return "tests", t
+	case b == CheckUnfinished:
+		return "build", b
+	}
+	return "", ""
+}
+
+// Killed is why the gate named by Verdict was stopped after the change, for an unfinished one.
+func (p *JobPackage) Killed(gate string) string {
+	if gate == "build" {
+		return p.Build.After.Killed
+	}
+	return p.Tests.After.Killed
 }
 
 // Checked is every package the job checked, the primary first, in one shape.

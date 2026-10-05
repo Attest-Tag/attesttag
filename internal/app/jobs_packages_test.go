@@ -140,12 +140,17 @@ func TestJobReportNamesEveryPackage(t *testing.T) {
 			{Workdir: "legacy", Build: JobCheck{Before: JobTestRun{Ran: true, OK: true}, After: JobTestRun{Ran: true, OK: true}},
 				Note: "pins Python 3.5, which the worker cannot provide; ran on 3.8"},
 			{Workdir: "a<b`c", Skipped: "not enough time left in the job"},
+			// Tests the sandbox killed are not a failure, and a build failing as it did before is
+			// still failing, not broken.
+			{Workdir: "mobile", Tests: JobTests{Before: JobTestRun{Ran: true, OK: true}, After: JobTestRun{Ran: true, Killed: "out of memory"}},
+				Build: JobCheck{Before: JobTestRun{Ran: true, Failed: 1}, After: JobTestRun{Ran: true, Failed: 1}}},
 		},
 		Unchecked: []string{".", "docs-site"}}
 	got := jobReport(j, res)
 	for _, want := range []string{
 		"*Tests* (`services/api`): before pass / after pass",
-		"*`web`:* tests before pass / after pass · build still fails",
+		"*`web`:* tests before pass / after pass · build fails",
+		"*`mobile`:* tests before pass / after did not finish (out of memory) · build still fails",
 		"*`legacy`:* build before pass / after pass — pins Python 3.5, which the worker cannot provide; ran on 3.8",
 		"*`a&lt;b'c`:* not checked (not enough time left in the job)",
 		"*Also changed, not checked:* the root, `docs-site`",

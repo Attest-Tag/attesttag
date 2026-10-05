@@ -31,9 +31,17 @@ Versions follow [semantic versioning](https://semver.org). Before 1.0 that means
 - **A fix job's pull request is reviewed.** A pull request the App opened itself is no longer skipped
   as a bot's: it is reviewed once somebody marks it ready, as anybody's draft is.
 
-Upgrading: nothing to migrate. For the check, add *Checks: Read and write* under the App's
-*Permissions & events* at GitHub; each account that installed it is then asked to accept, and its
-next review has a check.
+**Fix jobs say a check did not finish, not that it failed.** A suite or a build the worker's sandbox
+killed partway — most often out of memory, on a large repository — was reported as failing: the
+pull request opened with "Tests still fail after this change", its table counted one failure, and
+the coding agent was told the suite failed before its change, "that may be the bug". It is now
+*did not finish (killed: out of memory)* everywhere — the pull request, the thread, the console and
+the agent's brief — and the headline also says whether a failing check passed before the change,
+fails worse after it, or was failing already. → [Fix jobs](guide/fix-jobs.md)
+
+Upgrading: nothing to migrate. For the code review check, add *Checks: Read and write* under the
+App's *Permissions & events* at GitHub; each account that installed it is then asked to accept, and
+its next review has a check.
 
 ## 0.2.0 (2026-10-04)
 

@@ -1456,7 +1456,9 @@ export type JobSpec = {
 
 export type JobPR = { url: string; number: number; branch: string; base: string; head_sha?: string; draft: boolean };
 
-export type JobTestRun = { ran: boolean; ok: boolean; passed?: number; failed?: number; seconds?: number; output?: string };
+/** One run of a check. `killed` says why the worker's sandbox stopped it before it finished — "out of memory", most
+ * often — which is a check that did not finish, not one that failed. */
+export type JobTestRun = { ran: boolean; ok: boolean; killed?: string; passed?: number; failed?: number; seconds?: number; output?: string };
 
 /** A gate run before the change and after it: the build, the suite, the linter. */
 export type JobCheck = {

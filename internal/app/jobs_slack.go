@@ -109,9 +109,10 @@ func jobChecklist(j *Job, events []JobEvent) string {
 				}
 			}
 		}
-		// A step whose last phase is done is done; one with any failure failed.
+		// A step whose last phase is done is done — passed, or skipped: a check with nothing to run,
+		// or one the sandbox stopped before it finished — and one with any failure failed.
 		if agg == "ok" {
-			if state[st.phases[len(st.phases)-1]] != "ok" {
+			if last := state[st.phases[len(st.phases)-1]]; last != "ok" && last != "skipped" {
 				agg = "started"
 			}
 		}
@@ -370,8 +371,14 @@ func packageLine(p JobPackage) string {
 	switch {
 	case p.Tests.Before.Ran || p.Tests.After.Ran:
 		parts = append(parts, "tests before "+testWord(p.Tests.Before)+" / after "+testWord(p.Tests.After))
-		if p.Build.After.Ran && !p.Build.After.OK {
+		switch p.Build.Outcome() {
+		case CheckFine:
+		case CheckUnfinished:
+			parts = append(parts, "build did not finish")
+		case CheckStillFails:
 			parts = append(parts, "build still fails")
+		default:
+			parts = append(parts, "build fails")
 		}
 	case p.Build.Before.Ran || p.Build.After.Ran:
 		parts = append(parts, "build before "+passWord(p.Build.Before)+" / after "+passWord(p.Build.After))
@@ -396,6 +403,8 @@ func passWord(t JobTestRun) string {
 		return "not run"
 	case t.OK:
 		return "pass"
+	case t.Killed != "":
+		return "did not finish (" + t.Killed + ")"
 	}
 	return "fail"
 }
@@ -427,6 +436,8 @@ func testWord(t JobTestRun) string {
 		return "not run"
 	case t.OK:
 		return "pass"
+	case t.Killed != "":
+		return "did not finish (" + t.Killed + ")"
 	case t.Failed > 0:
 		return fmt.Sprintf("%d failed", t.Failed)
 	}
