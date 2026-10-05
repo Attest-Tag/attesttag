@@ -61,9 +61,12 @@ organisation's convention — `bugfix/fix-12-retry-storm-attest_tag` by default:
 the kind of change, `fix-<id>-<slug>`, then the suffix that marks it as the bot's (see
 `worker_branch_prefix` in [configuration](configuration.md#console-settings)) — and opens a
 **draft** pull request whose body carries the brief, the evidence, the files changed and every gate
-before and after, with an honest note on top when one still fails or none could be found. Every
-pull request is a draft, and no setting changes that. Build output and lockfiles the install step
-generated are never committed. Progress comes back as events; one checklist message in the thread
+before and after, with an honest note on top when one fails or did not finish, or none could be
+found — and whether a failing one passed before the change, failed worse after it, or was failing
+already. Every pull request is a draft, and no setting changes that; on a repository under
+[code review](code-review.md) it is reviewed like anybody's once somebody marks it ready for review.
+Build output and lockfiles the install step generated are never committed. Progress comes back as
+events; one checklist message in the thread
 (`○ clone → ○ set up and check → ○ fix → ○ build and test → ○ pull request`) is edited as they
 arrive, and the result is posted with the PR link, the diff and the log as files. *stop* in the
 thread, `!job cancel <id>` or the console's Cancel end a job; the worker learns on its next event
@@ -158,7 +161,12 @@ without permission to sign, jobs simply install from cold.
 A gate that cannot run is never reported as a gate that failed. A missing toolchain, a suite that
 needs a database the worker cannot start, a monorepo where nothing said which package, a package
 the change touched outside the brief — each comes back as itself, in the pull request and in the
-thread, together with what would fix it.
+thread, together with what would fix it. Nor is a gate that could not finish: a suite or a build
+the worker's sandbox stopped partway — killed, most often for want of memory, which the container's
+own count of out-of-memory kills says when it can be read — is reported as *did not finish
+(killed: out of memory)*, never as a failure, and the pull request says it did not check the
+change. The coding agent is told the same of a check that was killed before its change, and to
+check the change with a narrower run, such as only the tests for the files it touches.
 
 #### The coding agent and its model key
 

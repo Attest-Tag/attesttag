@@ -79,14 +79,19 @@ func runStep(ctx context.Context, ws *Workspace, s *app.RecipeStep, cap time.Dur
 	if s.TimeoutS > 0 && time.Duration(s.TimeoutS)*time.Second < cap {
 		cap = time.Duration(s.TimeoutS) * time.Second
 	}
+	oom := oomKills()
 	out, err := runCmd(ctx, cmdSpec{Dir: stepDir(ws.RepoDir, ws.Recipe, s), Argv: s.Argv, Env: ws.Env, Timeout: cap, Sandbox: true})
 	tr := app.JobTestRun{Ran: true, OK: err == nil && out.Code == 0, Seconds: out.Duration.Seconds(), Output: lastLines(ws.Scrub.Clean(out.Output), 4000)}
 	tr.Passed, tr.Failed = parseTestCounts(out.Output)
-	if out.TimedOut {
+	switch {
+	case out.TimedOut:
 		tr.OK = false
 		tr.Output = "timed out after " + cap.String() + "\n" + tr.Output
+	case !tr.OK && ctx.Err() == nil:
+		// Not for a job that was cancelled: the worker stopped that one itself.
+		tr.Killed = killedBy(out, oom, oomKills())
 	}
-	if !tr.OK && tr.Failed == 0 {
+	if !tr.OK && tr.Failed == 0 && tr.Killed == "" {
 		tr.Failed = 1 // a non-zero exit without a count is still a failure
 	}
 	if tr.OK {
@@ -179,6 +184,8 @@ func stepLine(name string, t app.JobTestRun) string {
 	switch {
 	case !t.Ran:
 		return name + ": not run"
+	case t.Killed != "":
+		return fmt.Sprintf("%s: did not finish (killed: %s, after %.0fs)", name, t.Killed, t.Seconds)
 	case t.OK:
 		if t.Passed > 0 {
 			return fmt.Sprintf("%s: pass (%d passed, %.0fs)", name, t.Passed, t.Seconds)

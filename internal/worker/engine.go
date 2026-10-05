@@ -148,9 +148,9 @@ func recipeBlock(b Brief) string {
 		packageNotes(&w, b.Primary)
 		w.WriteString("The harness runs these again after you stop and reports the result, so run them yourself first.\n")
 		if out := strings.TrimSpace(b.Baseline.Output); out != "" && !b.Baseline.OK {
-			w.WriteString("\nTest output before your change:\n" + cut(out, 4000) + "\n")
+			w.WriteString("\n" + beforeOutputLabel("Test", b.Baseline) + ":\n" + cut(out, 4000) + "\n")
 		} else if out := strings.TrimSpace(b.Build.Output); out != "" && !b.Build.OK {
-			w.WriteString("\nBuild output before your change:\n" + cut(out, 4000) + "\n")
+			w.WriteString("\n" + beforeOutputLabel("Build", b.Build) + ":\n" + cut(out, 4000) + "\n")
 		}
 	}
 	for _, p := range b.Extras {
@@ -183,14 +183,29 @@ func commandLines(w *strings.Builder, r *app.Recipe, p *pkgRun, build, tests app
 		}
 		fmt.Fprintf(w, "- %s: %s%s", s.label, prefix, s.step.String())
 		if s.res.Ran {
-			if s.res.OK {
+			switch {
+			case s.res.OK:
 				w.WriteString("  (passed before your change)")
-			} else {
+			case s.res.Killed != "":
+				// Not "FAILED — that may be the bug": the sandbox stopped it, and an agent told a
+				// suite fails goes looking for a failure in the code that is not there.
+				w.WriteString("  (did not finish before your change: it was killed — " + s.res.Killed + " — not failed. " +
+					"The harness runs it again after you stop and it may be killed again; check your change with a narrower run, " +
+					"such as only the tests for the files you change)")
+			default:
 				w.WriteString("  (FAILED before your change — that may be the bug)")
 			}
 		}
 		w.WriteString("\n")
 	}
+}
+
+// beforeOutputLabel introduces a check's output from before the change: Kind is "Test" or "Build".
+func beforeOutputLabel(kind string, run app.JobTestRun) string {
+	if run.Killed != "" {
+		return kind + " output before your change, up to where it was killed (" + run.Killed + ")"
+	}
+	return kind + " output before your change"
 }
 
 // packageNotes are the toolchains a package runs on and the caveats about them.
@@ -221,9 +236,9 @@ func extraBlock(w *strings.Builder, p *pkgRun) {
 	commandLines(w, r, p, p.Build.Before, p.Tests.Before)
 	packageNotes(w, p)
 	if out := strings.TrimSpace(p.Tests.Before.Output); out != "" && p.Tests.Before.Ran && !p.Tests.Before.OK {
-		w.WriteString("Its test output before your change:\n" + cut(out, 1500) + "\n")
+		w.WriteString("Its " + strings.ToLower(beforeOutputLabel("Test", p.Tests.Before)) + ":\n" + cut(out, 1500) + "\n")
 	} else if out := strings.TrimSpace(p.Build.Before.Output); out != "" && p.Build.Before.Ran && !p.Build.Before.OK {
-		w.WriteString("Its build output before your change:\n" + cut(out, 1500) + "\n")
+		w.WriteString("Its " + strings.ToLower(beforeOutputLabel("Build", p.Build.Before)) + ":\n" + cut(out, 1500) + "\n")
 	}
 }
 

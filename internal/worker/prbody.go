@@ -44,6 +44,9 @@ func checkRow(name, cmd string, t app.JobTestRun) string {
 		return ""
 	case !t.Ran:
 		return fmt.Sprintf("| %s | `%s` | not run |", name, cmd)
+	case t.Killed != "":
+		// No counts: a run killed partway has counted only what it got through.
+		return fmt.Sprintf("| %s | `%s` | **did not finish** (killed: %s, after %.0fs) |", name, cmd, t.Killed, t.Seconds)
 	case t.OK && t.Passed > 0:
 		return fmt.Sprintf("| %s | `%s` | pass (%d passed, %.0fs) |", name, cmd, t.Passed, t.Seconds)
 	case t.OK:
@@ -86,12 +89,64 @@ func checkRows(build, tests, lint app.JobCheck) string {
 	return "| | command | result |\n|---|---|---|\n" + strings.Join(rows, "\n") + "\n"
 }
 
+// verdictSentence says how a gate stands after the change (app.JobCheck.Outcome), as a sentence
+// without its full stop: where names the package — " in `web/`" — for a job that checked several,
+// and killed is why a run that did not finish was stopped. One that did not finish is said to have
+// checked nothing, never to have failed: the sandbox stopping a suite says nothing about the code,
+// and a headline saying the tests fail sends a reviewer looking for a bug the change did not make.
+func verdictSentence(gate, outcome, where, killed string) string {
+	if gate == "build" {
+		switch outcome {
+		case app.CheckUnfinished:
+			return "The build" + where + " did not finish: it was killed (" + killed + "), so it did not check this change"
+		case app.CheckBroken:
+			return "The build" + where + " fails after this change, and passed before it"
+		case app.CheckWorse:
+			return "The build" + where + " fails with more errors after this change than before it"
+		case app.CheckStillFails:
+			return "The build" + where + " failed before this change and still fails after it"
+		}
+		return "The build" + where + " fails after this change"
+	}
+	switch outcome {
+	case app.CheckUnfinished:
+		return "The tests" + where + " did not finish: they were killed (" + killed + "), so they did not check this change"
+	case app.CheckBroken:
+		return "Tests" + where + " fail after this change, and passed before it"
+	case app.CheckWorse:
+		return "More tests" + where + " fail after this change than before it"
+	case app.CheckStillFails:
+		return "Tests" + where + " failed before this change and still fail after it"
+	}
+	return "Tests" + where + " fail after this change"
+}
+
+// verdictHeadline is verdictSentence at the top of a pull request, with what to do about it.
+func verdictHeadline(gate, outcome, where, killed, more string) string {
+	next := "Opened as a draft so a person can pick it up; " + more + "."
+	if outcome == app.CheckUnfinished {
+		next = "Please run it before merging; " + more + "."
+		if gate == "tests" {
+			next = "Please run them before merging; " + more + "."
+		}
+	}
+	return "> **" + verdictSentence(gate, outcome, where, killed) + ".** " + next + "\n\n"
+}
+
+// primaryVerdict is the primary package's Verdict, which the result keeps apart from the others'.
+func primaryVerdict(res *app.JobResult) (gate, outcome, killed string) {
+	p := app.JobPackage{Build: res.Build, Tests: res.Tests}
+	gate, outcome = p.Verdict()
+	return gate, outcome, p.Killed(gate)
+}
+
 // prBody is the pull request description: the brief, the evidence, what changed, and every gate
-// that ran, with an honest note up top when one still fails or none could be found. pkgs are the
-// packages the job checked, the primary first, for the toolchains each ran on.
+// that ran, with an honest note up top when one fails, did not finish, or none could be found.
+// pkgs are the packages the job checked, the primary first, for the toolchains each ran on.
 func prBody(spec app.JobSpec, res *app.JobResult, summary string, recipe *app.Recipe, jobID int64, skipped []string, pkgs []*pkgRun) string {
 	var b strings.Builder
 	multi := len(res.Packages) > 0
+	gate, outcome, killed := primaryVerdict(res)
 	if res.Note != "" {
 		b.WriteString("> **Note:** " + res.Note + ".\n\n")
 	}
@@ -106,21 +161,16 @@ func prBody(spec app.JobSpec, res *app.JobResult, summary string, recipe *app.Re
 		}
 		b.WriteString("> **Nothing here was checked automatically: " + why + ".** Please build and test by hand before merging.\n")
 		b.WriteString("> You can tell attest_tag how this repository is built by committing `.attest/recipe.yaml`.\n\n")
-	case res.Tests.After.Ran && !res.Tests.After.OK:
-		b.WriteString("> **Tests still fail after this change.** Opened as a draft so a person can pick it up; see the output below.\n\n")
-	case res.Build.After.Ran && !res.Build.After.OK:
-		b.WriteString("> **The build still fails after this change.** Opened as a draft so a person can pick it up; see the output below.\n\n")
+	case outcome != app.CheckFine:
+		b.WriteString(verdictHeadline(gate, outcome, "", killed, "see the output below"))
 	case res.Setup.Ran && !res.Setup.OK:
 		b.WriteString("> **Dependencies did not install cleanly**, so the checks below may not mean much. Please run them before merging.\n\n")
 	case !res.Tests.After.Ran && !res.Build.After.Ran:
 		b.WriteString("> **The checks could not be run after the change.** Please run them before merging.\n\n")
 	}
 	for _, p := range res.Packages {
-		switch p.StillFailing() {
-		case "tests":
-			b.WriteString("> **Tests in " + folderMD(p.Workdir) + " still fail after this change.** See its checks below.\n\n")
-		case "build":
-			b.WriteString("> **The build in " + folderMD(p.Workdir) + " still fails after this change.** See its checks below.\n\n")
+		if g, o := p.Verdict(); o != app.CheckFine {
+			b.WriteString(verdictHeadline(g, o, " in "+folderMD(p.Workdir), p.Killed(g), "see its checks below"))
 		}
 	}
 	if len(res.Unchecked) > 0 {
@@ -276,11 +326,10 @@ func ticketComment(spec app.JobSpec, res *app.JobResult) string {
 		return ""
 	}
 	state := "checks pass"
+	gate, outcome, killed := primaryVerdict(res)
 	switch {
-	case res.Tests.After.Ran && !res.Tests.After.OK:
-		state = "tests still failing"
-	case res.Build.After.Ran && !res.Build.After.OK:
-		state = "build still failing"
+	case outcome != app.CheckFine:
+		state = verdictState(gate, "", outcome, killed)
 	case !res.Tests.After.Ran && !res.Build.After.Ran:
 		state = "nothing could be checked"
 	case !res.Tests.After.Ran:
@@ -289,8 +338,8 @@ func ticketComment(spec app.JobSpec, res *app.JobResult) string {
 	if len(res.Packages) > 0 {
 		var failing []string
 		for _, p := range res.Checked() {
-			if f := p.StillFailing(); f != "" {
-				failing = append(failing, f+" still failing in "+folderName(p.Workdir))
+			if g, o := p.Verdict(); o != app.CheckFine {
+				failing = append(failing, verdictState(g, " in "+folderName(p.Workdir), o, p.Killed(g)))
 			}
 		}
 		if len(failing) > 0 {
@@ -305,4 +354,21 @@ func ticketComment(spec app.JobSpec, res *app.JobResult) string {
 		state += fmt.Sprintf("; %d other changed packages not checked", n)
 	}
 	return fmt.Sprintf("attest_tag opened a draft pull request for this: %s (%s). Review before merging.", res.PR.URL, state)
+}
+
+// verdictState is a gate's outcome in the few words a ticket comment has room for: where names the
+// package — " in web/" — for a job that checked several.
+func verdictState(gate, where, outcome, killed string) string {
+	g := gate + where
+	switch outcome {
+	case app.CheckUnfinished:
+		return g + " did not finish, killed: " + killed
+	case app.CheckBroken:
+		return g + " failing (passed before)"
+	case app.CheckWorse:
+		return g + " failing worse than before"
+	case app.CheckStillFails:
+		return g + " still failing, as before"
+	}
+	return g + " failing"
 }

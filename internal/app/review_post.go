@@ -19,8 +19,11 @@ import (
 //
 //   - one review object per run, posted against the commit the run reviewed (commit_id), as a
 //     COMMENT, its body nothing but the run's signed marker and its inline comments rendered by
-//     review.RenderFinding from the stored findings. A run with nothing to say inline posts no
-//     review object at all: an empty review is a notification about nothing.
+//     review.RenderFinding from the stored findings. A run with nothing to say inline posts a review
+//     object only when the pull request has none of the App's yet (postPlainReview), its body one
+//     line on how the review came out: GitHub lists as a pull request's reviewers those who left a
+//     review, and the App belongs there once it has reviewed — but a review on every push saying
+//     there is nothing new inline would be a notification about nothing.
 //   - the sticky summary: one conversation comment per pull request, created at the first result
 //     and edited in place after that, rendered by review.RenderSummary from what the database
 //     holds — every finding in every status, so the score moves the moment a finding does.
@@ -281,6 +284,26 @@ func (b *Bot) publishReview(work, lane context.Context, h *reviewHold, pr *Revie
 		b.reviewPostFailed(work, lane, h, err)
 		return
 	}
+	summaryURL := reviewSummaryURL(pr.Repo, pr.Number, summaryID)
+	if reviewID == 0 {
+		// Best effort past what has to wait: the summary is up, and a review that is up must not fail
+		// over the one line that lists the App among the pull request's reviewers.
+		plain, err := b.postPlainReview(work, h, gh, rctx, reviewPlainNote(state, summaryURL))
+		var wait *githubRetryError
+		switch {
+		case errors.As(err, &wait), errors.Is(err, errLeaseLost):
+			b.reviewPostFailed(work, lane, h, err)
+			return
+		case err != nil:
+			slog.Warn("code review: no review object posted to list the App among the reviewers", "run", r.PublicID, "err", err)
+		default:
+			reviewID = plain
+		}
+	}
+	if s := h.signals; s != nil {
+		title, text := review.RenderCheck(state, rctx, summaryURL)
+		s.end = &reviewCheckEnd{conclusion: "success", title: title, summary: text, details: summaryURL}
+	}
 	// After the summary, so the score that moved is on the pull request before anybody is told why;
 	// only a wait GitHub asked for, or the run no longer being this lane's, holds the run up here.
 	if err := b.postResolutionReplies(work, lane, h, gh, pr, ck); err != nil {
@@ -440,14 +463,6 @@ func reviewInlineComments(rctx review.RenderContext, fs []*ReviewFinding, replac
 func (b *Bot) postInlineReview(ctx context.Context, h *reviewHold, gh *reviewGitHub, rctx review.RenderContext,
 	inline []*ReviewFinding, replaced map[string]string) (int64, error) {
 	r := h.run
-	record := func(id int64) (int64, error) {
-		// Not on ctx: the review is on GitHub and paid for, and a cancel heard a moment after the post
-		// must not lose the one record that stops the next attempt posting it again.
-		wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), reviewWriteTimeout)
-		defer cancel()
-		err := h.write(func(r *ReviewRun) error { return b.store.setReviewRunGitHubReview(wctx, r, id) })
-		return id, err
-	}
 	body := review.Marker(rctx.MarkerKey, reviewMarkerScope(rctx), review.MarkerRun, r.PublicID)
 	post := func(fs []*ReviewFinding) (int64, error) {
 		// The marker check and the lease check both come immediately before the post: this is the
@@ -497,7 +512,80 @@ func (b *Bot) postInlineReview(ctx context.Context, h *reviewHold, gh *reviewGit
 	if err != nil || id == 0 {
 		return id, err
 	}
-	return record(id)
+	return b.recordReviewID(ctx, h, id)
+}
+
+// postPlainReview posts a review with no inline comments, its body a line on how the review came
+// out, when the pull request has no review of the App's yet: GitHub lists as reviewers only those who
+// left one, and a run whose findings all went to the summary leaves none otherwise. A review of this
+// run's already there — an attempt that died before recording it — is adopted; one of another run's
+// means the App is listed already, and nothing is posted. It returns the review's id, 0 for none.
+func (b *Bot) postPlainReview(ctx context.Context, h *reviewHold, gh *reviewGitHub, rctx review.RenderContext, note string) (int64, error) {
+	r := h.run
+	if err := h.touch(ctx); err != nil {
+		return 0, err
+	}
+	reviews, _, err := gh.Reviews(ctx)
+	if err != nil {
+		return 0, err
+	}
+	listed := false
+	for _, rv := range reviews {
+		if !b.reviewByUs(rv.User) {
+			continue
+		}
+		if id, ok := review.VerifiedMarker(rctx.MarkerKey, reviewMarkerScope(rctx), rv.Body, review.MarkerRun); ok && id == r.PublicID {
+			slog.Info("code review: adopted a review an earlier attempt posted", "run", r.PublicID, "review", rv.ID)
+			return b.recordReviewID(ctx, h, rv.ID)
+		}
+		listed = true
+	}
+	if listed {
+		return 0, nil
+	}
+	body := review.Marker(rctx.MarkerKey, reviewMarkerScope(rctx), review.MarkerRun, r.PublicID) + "\n" + note
+	rv, err := gh.PostReview(ctx, r.HeadSHA, body, nil)
+	if err != nil {
+		return 0, err
+	}
+	return b.recordReviewID(ctx, h, rv.ID)
+}
+
+// recordReviewID records the run's review object the moment GitHub gives its id. Not on ctx: the
+// review is on GitHub and paid for, and a cancel heard a moment after the post must not lose the one
+// record that stops the next attempt posting it again.
+func (b *Bot) recordReviewID(ctx context.Context, h *reviewHold, id int64) (int64, error) {
+	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), reviewWriteTimeout)
+	defer cancel()
+	err := h.write(func(r *ReviewRun) error { return b.store.setReviewRunGitHubReview(wctx, r, id) })
+	return id, err
+}
+
+// reviewPlainNote is the one line of a review with no inline comments: the commit reviewed, the score
+// the summary shows, and where the findings are, linked when the summary comment is known.
+func reviewPlainNote(st review.SummaryState, summaryURL string) string {
+	var open []review.Finding
+	for _, f := range st.Findings {
+		if (f.Status == "" || f.Status == review.FindingOpen || f.Status == review.FindingDisputed) && !f.Note && !f.PreExisting {
+			open = append(open, f.Finding)
+		}
+	}
+	where := "the summary comment"
+	if summaryURL != "" {
+		where = "the [summary comment](" + summaryURL + ")"
+	}
+	line := "Reviewed"
+	if sha := shortSHA(st.ReviewedSHA); sha != "" {
+		line += " `" + sha + "`"
+	}
+	line += fmt.Sprintf(" · Confidence %d/5 (advisory). ", review.Score(open, st.FullCoverage, st.InjectionDetected))
+	switch len(open) {
+	case 0:
+		return line + "Nothing to comment on in the diff; " + where + " has the review."
+	case 1:
+		return line + "No comment on the diff: its one open finding is in " + where + "."
+	}
+	return line + fmt.Sprintf("No comments on the diff: its %d open findings are in %s.", len(open), where)
 }
 
 // adoptReview finds a review the App posted for this run, by its marker; 0 when there is none.

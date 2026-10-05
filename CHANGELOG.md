@@ -14,6 +14,40 @@ Versions follow [semantic versioning](https://semver.org). Before 1.0 that means
   down migrations, so back the database up before a minor upgrade: going back means restoring
   that backup.
 
+## Unreleased
+
+**Code review shows on the pull request while it works.** → [The reactions and the check](guide/code-review.md#the-reactions-and-the-check)
+
+- **Eyes, then a rocket.** A live review puts an eyes reaction on the pull request as it starts and
+  swaps it for a rocket once it is posted; a review that fails or is cancelled only takes the eyes
+  off.
+- **An *attest_tag review* check.** In progress while the review runs, then a success with the score
+  and the open findings — or neutral, skipped or cancelled when it was not posted, never a failure,
+  so requiring it blocks nothing. It needs the App's **Checks: Read and write** permission, which is
+  optional: an installation without it gets the reactions alone.
+- **Listed among the reviewers.** A first review with nothing to say inline now posts a review of
+  one line — the commit, the score and where the findings are — so the App appears under the pull
+  request's reviewers; later runs with nothing new inline still post none.
+- **A fix job's pull request is reviewed.** A pull request the App opened itself is no longer skipped
+  as a bot's: it is reviewed once somebody marks it ready, as anybody's draft is.
+
+**Fix jobs say a check did not finish, not that it failed.** A suite or a build the worker's sandbox
+killed partway — most often out of memory, on a large repository — was reported as failing: the
+pull request opened with "Tests still fail after this change", its table counted one failure, and
+the coding agent was told the suite failed before its change, "that may be the bug". It is now
+*did not finish (killed: out of memory)* everywhere — the pull request, the thread, the console and
+the agent's brief — and the headline also says whether a failing check passed before the change,
+fails worse after it, or was failing already. → [Fix jobs](guide/fix-jobs.md)
+
+**The fix-job worker on Google Cloud gets 8 GiB**, up from 4, beside its 2 CPUs: Cloud Run keeps a
+job's files in memory, and a large JavaScript repository's suite and build did not fit. Run
+`deploy/gcp/worker.sh` again to apply it (`MEMORY=4Gi` keeps the old size). The other platforms'
+defaults are unchanged.
+
+Upgrading: nothing to migrate. For the code review check, add *Checks: Read and write* under the
+App's *Permissions & events* at GitHub; each account that installed it is then asked to accept, and
+its next review has a check.
+
 ## 0.2.0 (2026-10-04)
 
 Like 0.1.0, the source alone: no images, Helm chart or binaries are published for it, so build from

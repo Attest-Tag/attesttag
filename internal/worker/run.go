@@ -548,18 +548,12 @@ func (r *Runner) execute(ctx context.Context, claim *app.JobClaim, rep *Reporter
 	res.Status = app.JobSucceeded
 	res.TicketComment = ticketComment(spec, res)
 	for _, p := range res.Packages {
-		switch p.StillFailing() {
-		case "tests":
-			res.Summary = "Tests in " + folderName(p.Workdir) + " still fail after the change. " + res.Summary
-		case "build":
-			res.Summary = "The build in " + folderName(p.Workdir) + " still fails after the change. " + res.Summary
+		if g, o := p.Verdict(); o != app.CheckFine {
+			res.Summary = verdictSentence(g, o, " in "+folderName(p.Workdir), p.Killed(g)) + ". " + res.Summary
 		}
 	}
-	switch {
-	case res.Tests.After.Ran && !res.Tests.After.OK:
-		res.Summary = "Tests still fail after the change. " + res.Summary
-	case res.Build.After.Ran && !res.Build.After.OK:
-		res.Summary = "The build still fails after the change. " + res.Summary
+	if g, o, killed := primaryVerdict(res); o != app.CheckFine {
+		res.Summary = verdictSentence(g, o, "", killed) + ". " + res.Summary
 	}
 }
 
@@ -667,11 +661,23 @@ func (r *Runner) gate(ctx context.Context, ws *Workspace, rep *Reporter, res *ap
 	rep.Phase(phase, "started", s.String())
 	out := runStep(ctx, ws, s, cap)
 	rep.Tests(stepLine(strings.ReplaceAll(phase, "_", " "), out))
-	if out.OK {
+	before := strings.HasSuffix(phase, "_before")
+	switch {
+	case out.OK:
 		rep.Phase(phase, "ok", "")
-	} else if strings.HasSuffix(phase, "_before") {
+	case out.Killed != "":
+		// Skipped, not failed: the thread's checklist must not mark the change as failing a check
+		// that never got to the end.
+		when := "after the change; opening a draft anyway"
+		if before {
+			when = "before the change"
+		}
+		rep.Phase(phase, "skipped", name+" did not finish "+when+" (killed: "+out.Killed+")")
+	case before:
 		rep.Phase(phase, "failed", name+" fails before the change (that may be the bug)")
-	} else {
+	case phase == "build_after" && res.Build.Before.OK, phase == "test_after" && res.Tests.Before.OK:
+		rep.Phase(phase, "failed", name+" fails after the change, and passed before it; opening a draft anyway")
+	default:
 		rep.Phase(phase, "failed", name+" still fails; opening a draft anyway")
 	}
 	return out

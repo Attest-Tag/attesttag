@@ -25,6 +25,14 @@ func killProcessGroup(cmd *exec.Cmd, force bool) {
 	}
 }
 
+// exitSignal is the signal that ended a process, 0 when it exited by itself.
+func exitSignal(ps *os.ProcessState) int {
+	if ws, ok := ps.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+		return int(ws.Signal())
+	}
+	return 0
+}
+
 func lookupEnv(k string) (string, bool) { return os.LookupEnv(k) }
 
 func environ() []string { return os.Environ() }

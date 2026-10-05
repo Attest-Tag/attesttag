@@ -1,0 +1,13 @@
+Confidence 1/5 · 5 open findings
+
+**Confidence 1/5** (advisory). Do not merge yet: **Session token logged on every request** (P0, `api/log.go:L12`) and 4 more.
+
+- **P0** · Security · Session token logged on every request · [`api/log.go:L12`](https://github.com/acme/web/blob/ab12cd3ef45678901234567890abcdef12345678/api/log.go#L12)
+- **P1** · General · Stale closure keeps the first account · [`src/account.ts:L50-52`](https://github.com/acme/web/blob/c03ddb1a2b3c4d5e6f708192a3b4c5d6e7f80912/src/account.ts#L50-L52)
+- **P1** · Security · [Tenant check missing on list query](https://github.com/acme/web/pull/7#discussion_r101) · [`src/totals.ts:L50-52`](https://github.com/acme/web/blob/ab12cd3ef45678901234567890abcdef12345678/src/totals.ts#L50-L52)
+- **P2** · General · Magic number for the page size · [`src/page.ts:L50-52`](https://github.com/acme/web/blob/c03ddb1a2b3c4d5e6f708192a3b4c5d6e7f80912/src/page.ts#L50-L52)
+- **P2** · General · No test for the empty totals case · [`src/totals.ts:L50-52`](https://github.com/acme/web/blob/c03ddb1a2b3c4d5e6f708192a3b4c5d6e7f80912/src/totals.ts#L50-L52)
+
+The [summary comment](https://github.com/acme/web/pull/7#issuecomment-555) has the code each finding is about, and what was not reviewed.
+
+<sub>Reviewed `c03ddb1` as General and Security · Rule: `any → testing`</sub>

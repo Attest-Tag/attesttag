@@ -500,18 +500,18 @@ function RunRow({
   /** Quieter detail after the result: the command an install ran, why a suite did not run. */
   children?: React.ReactNode;
 }) {
+  // A run the sandbox killed did not finish: it is not a failure, and the count of the part it got through is no count.
   const chip = !run.ran ? (
     <StatusChip variant="neutral">not run</StatusChip>
   ) : run.ok ? (
     <StatusChip variant="success">{okLabel}</StatusChip>
+  ) : run.killed ? (
+    <StatusChip variant="warning">did not finish</StatusChip>
   ) : (
     <StatusChip variant="danger">failed</StatusChip>
   );
-  const facts = run.ran
-    ? [counts ? `${run.passed ?? 0} passed, ${run.failed ?? 0} failed` : "", run.seconds ? `${run.seconds.toFixed(1)} s` : ""]
-        .filter(Boolean)
-        .join(" · ")
-    : "";
+  const result = run.killed ? `killed: ${run.killed}` : counts ? `${run.passed ?? 0} passed, ${run.failed ?? 0} failed` : "";
+  const facts = run.ran ? [result, run.seconds ? `${run.seconds.toFixed(1)} s` : ""].filter(Boolean).join(" · ") : "";
   return (
     <div>
       <div className="flex flex-wrap items-center gap-2 text-sm">

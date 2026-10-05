@@ -53,6 +53,17 @@ func TestJobChecklist(t *testing.T) {
 	if got := jobStateLine(&Job{Status: JobCancelled, CancelBy: "U2", CancelReason: "user"}); !strings.Contains(got, "<@U2>") {
 		t.Errorf("cancel state line: %q", got)
 	}
+
+	// Tests the sandbox killed are skipped, not failed: the step is done, never "✕", and never left
+	// looking in progress once the job has moved on.
+	j.Status, j.Error = JobSucceeded, ""
+	events = append(events[:4], JobEvent{Kind: JobKindPhase, Phase: "engine", Status: "ok"},
+		JobEvent{Kind: JobKindPhase, Phase: "build_after", Status: "ok"},
+		JobEvent{Kind: JobKindPhase, Phase: "test_after", Status: "skipped", Message: "test did not finish after the change; opening a draft anyway (killed: out of memory)"},
+		JobEvent{Kind: JobKindPhase, Phase: "commit", Status: "ok"}, JobEvent{Kind: JobKindPhase, Phase: "push", Status: "ok"}, JobEvent{Kind: JobKindPhase, Phase: "pr", Status: "ok"})
+	if md = jobChecklist(j, events); !strings.Contains(md, "● build and test → ● pull request") {
+		t.Errorf("a step whose last check was skipped is not done:\n%s", md)
+	}
 }
 
 func TestJobConfirmSummaryAndDescribe(t *testing.T) {

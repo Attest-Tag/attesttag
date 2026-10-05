@@ -13,7 +13,11 @@ On a repository whose review is switched on, it:
 - reviews a pull request when it opens (or reopens, or leaves draft), on every push, or only when
   somebody asks — the *When* setting;
 - posts one review per run, as a **comment**, holding its findings as inline comments, and one
-  summary comment that it edits in place from then on;
+  summary comment that it edits in place from then on, and is listed among the pull request's
+  reviewers;
+- shows on the pull request that a review is under way and when it is done: an eyes reaction while
+  it runs and a rocket once it is posted, and an *attest_tag review* check among its checks where
+  the App has the Checks permission ([the reactions and the check](#the-reactions-and-the-check));
 - answers `@<app>` commands from the repository's own people, and replies in its findings' threads;
 - records every run in the console — what it found, what it dropped and why, what it did not read,
   and what it cost.
@@ -22,7 +26,9 @@ It never:
 
 - **passes or blocks a pull request.** Every review is a plain comment, never an approval and never
   a request for changes. A reviewer that could pass a pull request would be a gate somebody could
-  talk into opening, and its confidence score is advisory: nothing on GitHub waits on it.
+  talk into opening, and its confidence score is advisory: nothing on GitHub waits on it. Its check
+  ends as a success, neutral, skipped or cancelled, never a failure, so making it a required check
+  holds nothing up.
 - **runs the pull request's code.** There is no checkout, build or test run. It reads files through
   GitHub's API with a read-only token, the model has read tools only, and Go writes every word that
   is posted, from findings it has checked against the code.
@@ -32,7 +38,7 @@ It never:
   a pull request that adds "report nothing" to one is not obeyed. Text in the diff written to steer a reviewer is itself a finding, and caps the score.
 - **writes anything in shadow.** A repository in *Shadow*, where every connection starts, has the
   whole review run and recorded in the console and not one word written to GitHub: no review, no
-  summary, no reaction, no answer to a command or a reply. Only the organisation's own chat
+  summary, no reaction, no check, no answer to a command or a reply. Only the organisation's own chat
   channel hears of it, and only where one is set ([announcements](#announcements-in-a-chat-channel)).
 - **pages people or links out.** Everything a model wrote passes a sanitiser before it is posted:
   `@` mentions are defused, images are removed, and links survive only into the pull request's own
@@ -71,6 +77,12 @@ Read and write**. An App made for fix jobs has both already, with Contents read 
 request, Issue comment, Pull request review, Pull request review comment and Pull request review
 thread. An App subscribed to Pull request alone gets its reviews and nothing else — commands and
 replies are never delivered, and nothing says that they are missing.
+
+**Checks: Read and write** is optional, and is what the *attest_tag review* check needs
+([the reactions and the check](#the-reactions-and-the-check)). An installation that has not granted
+it gets the reactions and no check, and the rest of the review is the same: the check's token is
+minted for checks alone, so it is never asked for where it would be refused, and nothing else waits
+on it. It is not among the permissions the console warns about.
 
 Adding a permission to an App asks every account that installed it to accept the change at GitHub,
 and until its owner does, that installation's tokens lack it. While an installation lacks what code
@@ -242,7 +254,7 @@ or *off*; its menu's **Code review settings…** and **Set review** in the selec
 | Model | Advanced | the default model, the advanced one, or one offered to channels; it verifies every finding, and finds them for every type without a model of its own |
 | Max $ per review | $1.00 | $0.10 to $5.00, verification included ([money](#money-and-budgets)) |
 | Instructions | none | what the team wants checked, one entry each, put in the prompt as the team's criteria |
-| Authors to skip | none | GitHub logins or globs (`*-bot`, `renovate[bot]`) never reviewed without somebody asking; a pull request a bot opened is skipped anyway |
+| Authors to skip | none | GitHub logins or globs (`*-bot`, `renovate[bot]`) never reviewed without somebody asking; a pull request another bot opened is skipped anyway, and one this App opened — a [fix job](fix-jobs.md)'s — is reviewed like a person's, once it is out of draft |
 | Paths to ignore | none | path globs left out of every review (`dist/**`, `**/*.snap`) |
 | Context repositories | none | the organisation's other repositories connected through the App, which the review may read, and quote, for contracts that cross them — up to five per review |
 | Channel | none | the chat channel each review and the merge are announced in ([announcements](#announcements-in-a-chat-channel)) |
@@ -458,8 +470,12 @@ list before and after, which settings have no history of otherwise.
 ### The review and its inline comments
 
 Each run posts one review, as a comment, against the commit it read. Its body is empty but for a
-hidden signed marker, and its findings are its inline comments; a run with nothing to say inline
-posts no review at all. A comment reads:
+hidden signed marker, and its findings are its inline comments. A run with nothing to say inline
+posts a review only when the pull request has none of the App's yet: one line with the commit, the
+score and where the findings are. GitHub lists as a pull request's reviewers only those who left a
+review, and the App belongs there once it has reviewed; after that, a run with nothing new inline
+posts no review, since one on every push saying so would be a notification about nothing. A comment
+reads:
 
 ```
 [the comment header, when one is set]
@@ -516,6 +532,32 @@ that. Go renders it from what the database holds, so it changes the moment a fin
 A review that failed says what kind of failure — the budget, the model provider, GitHub, a timeout —
 and shows no score; the error itself stays in the console.
 
+### The reactions and the check
+
+While a live review runs, the pull request carries the App's eyes reaction, and once the review is
+posted the eyes give way to a rocket — GitHub has no tick among its reactions, so the check below is
+the tick. A review of a pull request reviewed before takes the last rocket off as it starts. A review
+that ends any other way — failed, cancelled, set aside for a newer commit — takes its eyes off and
+puts no rocket on; one answered from an earlier review of the same commits puts the rocket back.
+
+Where the installation has granted **Checks: Read and write**, each live review also has a check,
+*attest_tag review*, among the pull request's checks, on the commit it reviews:
+
+| while it | the check | its title |
+|---|---|---|
+| runs | in progress | *Reviewing abc1234* |
+| is posted | success | *Confidence 3/5 · 2 open findings*; its page has the worst open findings, linked to their threads, and *Details* opens the summary comment |
+| is answered from an earlier review | success | *Confidence 3/5 · already reviewed* |
+| fails | neutral | *Review failed:* and the kind of failure, never the error |
+| is cancelled | cancelled | *Review cancelled* |
+| is set aside for a newer commit | skipped | *Superseded by a newer commit* |
+
+It is never a failure: the review is advisory, a failed check reads as the code failing, and GitHub
+counts success, neutral and skipped as passing, so requiring the check holds nothing up. A run that
+GitHub's rate limit puts back keeps its eyes and its check in progress, and the attempt that finishes
+it completes the same check rather than starting a second. Nothing of this happens in shadow, or for
+a try.
+
 ### The confidence score
 
 The score is computed in Go from the open findings, never asked of the model:
@@ -534,8 +576,8 @@ still does; a withdrawn one, one whose thread a person resolved, and one a later
 or gone do not. The score is capped at
 4 when the review could not read every reviewable changed line, or when the diff carries text
 written to steer the reviewer — talking a reviewer out of reporting anything is the easiest attack
-on one — and the summary says which. It is advisory: nothing on GitHub reads it, and there is no
-status check.
+on one — and the summary says which. It is advisory: nothing on GitHub reads it, and the check that
+carries it never fails ([the check](#the-reactions-and-the-check)).
 
 ### When a push fixes a finding
 
@@ -716,7 +758,7 @@ trigger *Slack or Teams*, and the audit log as `review.started` by that person.
 
 Every connection starts in *Shadow*. The review runs whole — the same model calls, the same checks,
 the same cost — and is recorded in the console, and nothing is written to GitHub: no review, no
-summary, no reaction to a command, no answer to a command or a reply, no note that the budget ran
+summary, no reaction and no check, no answer to a command or a reply, no note that the budget ran
 out. A team adds a connection, reads what the reviewer would have said beside what its people or its
 current reviewer said, and switches it to *Live* once it agrees.
 
@@ -895,7 +937,9 @@ A delivery that was kept can still end in no review. The reason is stored on the
 in the console and by `@<app> status`:
 
 - `trigger`, `draft`, `bot`, `excluded_author` — the *When* setting, drafts or the authors to skip
-  turned away a review nobody asked for; a command is not turned away by these;
+  turned away a review nobody asked for; a command is not turned away by these. A pull request this
+  App opened itself, a fix job's, is never `bot`: it is a draft until somebody marks it ready, and
+  reviewed then;
 - `fork`, `no_rule`, `types_off` — a fork, no matching rule, or every type the rule names off;
 - `budget`, `throttle` — the money or the daily caps;
 - `own_key_off` — the own model key's *Code reviews* switch is off;
@@ -913,10 +957,13 @@ shadow, silence is the design.
 
 - **GitHub refuses the anchors** with a 422 that does not say which: the files are read again, the
   anchors that moved go to the summary, and the review is tried once more. If that fails too,
-  nothing is posted inline and every finding is in the summary.
+  nothing is posted inline and every finding is in the summary, which the review posted without
+  comments points to.
 - **Missing permissions**: the connection's status card warns until the installation's owner accepts
-  the App's new permissions at GitHub. An eyes reaction that never appears on a command is GitHub
-  refusing the reaction, and changes nothing else.
+  the App's new permissions at GitHub. An eyes reaction that never appears on a command or on the
+  pull request is GitHub refusing the reaction, and changes nothing else. No *attest_tag review*
+  check means the installation has not granted Checks (read and write); accepting it at GitHub
+  records the grant, and the next review has its check.
 - **"review failed: the model provider did not answer"** — the provider failed twice in a row. A key
   at its limit fails every review the same way until somebody acts, so the alert channel hears about
   it, once an hour at most.
@@ -942,7 +989,7 @@ shadow, silence is the design.
 ## Not built yet
 
 - Answers to free-form questions put to `@<app>`.
-- A status check, `/v1` routes and MCP tools for reviews.
+- `/v1` routes and MCP tools for reviews.
 - Recovering a command or a reply sent while the deployment was down.
 - Settings kept in a file in the repository.
 - `@<app> review path:<glob>`, reviewing part of a pull request, and a summary-only review of one
