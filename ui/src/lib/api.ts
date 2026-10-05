@@ -2045,6 +2045,8 @@ export type ReviewSettingsValues = {
   notify_on?: ReviewNotifyEvent[];
   instructions?: string[];
   exclude_authors?: string[];
+  /** Bots whose pull requests are reviewed automatically all the same, as login globs; every other bot's are skipped. */
+  review_bots?: string[];
   ignore_paths?: string[];
   context_repos?: string[];
   branch_rules?: ReviewBranchRule[];
@@ -2070,6 +2072,7 @@ export type ReviewEffective = {
   notify_on?: ReviewNotifyEvent[];
   instructions: string[];
   exclude_authors: string[];
+  review_bots: string[];
   ignore_paths: string[];
   context_repos: string[];
   branch_rules: ReviewBranchRule[] | null;

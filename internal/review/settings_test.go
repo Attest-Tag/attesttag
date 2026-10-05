@@ -38,6 +38,7 @@ func TestEveryFieldHasOneNameEverywhere(t *testing.T) {
 	json.Unmarshal(raw, &set)
 	full := Defaults()
 	full.Instructions, full.ExcludeAuthors, full.IgnorePaths, full.ContextRepos = []string{"x"}, []string{"x"}, []string{"x"}, []string{"x/y"}
+	full.ReviewBots = []string{"x"}
 	raw, _ = json.Marshal(full)
 	json.Unmarshal(raw, &set)
 
@@ -94,11 +95,13 @@ func TestResolveAddsListsUpBroadestFirst(t *testing.T) {
 	chain := []LevelSettings{
 		{LevelConnection, Settings{
 			ExcludeAuthors: []string{"release-bot", "Octocat"},
+			ReviewBots:     []string{"renovate[bot]"},
 			IgnorePaths:    []string{"**/*.snap"},
 			Instructions:   []string{"Money is integer cents."},
 		}},
 		{LevelGroup, Settings{
 			ExcludeAuthors: []string{"octocat"}, // the same login, differently cased
+			ReviewBots:     []string{"Renovate[bot]", "dependabot"},
 			ContextRepos:   []string{"acme/api"},
 		}},
 		{LevelRepo, Settings{
@@ -115,6 +118,7 @@ func TestResolveAddsListsUpBroadestFirst(t *testing.T) {
 		from  Level
 	}{
 		{"exclude_authors", e.ExcludeAuthors, []string{"release-bot", "Octocat"}, LevelConnection},
+		{"review_bots", e.ReviewBots, []string{"renovate[bot]", "dependabot"}, LevelGroup},
 		{"ignore_paths", e.IgnorePaths, []string{"**/*.snap", "dist/**"}, LevelRepo},
 		{"instructions", e.Instructions, []string{"Money is integer cents.", "Prefer early returns."}, LevelRepo},
 		{"context_repos", e.ContextRepos, []string{"acme/api", "acme/shared"}, LevelRepo},
@@ -187,6 +191,7 @@ func TestSettingsValidate(t *testing.T) {
 		Model: ptr("z-ai/glm-5.3"), MaxUSD: ptr(0.10),
 		Instructions:   []string{"Money is integer cents."},
 		ExcludeAuthors: []string{"octocat", "renovate[bot]", "*-bot"},
+		ReviewBots:     []string{"dependabot", "renovate[bot]", "*"},
 		IgnorePaths:    []string{"**/*.snap", "/vendor/**"},
 		ContextRepos:   []string{"acme/api", "octo-org/shared.lib"},
 		BranchRules:    sampleRules,
@@ -222,6 +227,7 @@ func TestSettingsValidate(t *testing.T) {
 		{"an entry too long", Settings{Instructions: []string{long}}, "instructions:"},
 		{"too many entries", Settings{IgnorePaths: many}, "at most 50 entries"},
 		{"not a login", Settings{ExcludeAuthors: []string{"not a login"}}, "exclude_authors"},
+		{"a suffix with no bot", Settings{ReviewBots: []string{"[bot]"}}, `review_bots: "[bot]" is not a GitHub login`},
 		{"not a repository", Settings{ContextRepos: []string{"api"}}, "context_repos: \"api\" is not owner/name"},
 		{"a dot repository", Settings{ContextRepos: []string{"acme/.."}}, "context_repos"},
 		{"a bad branch rule", Settings{BranchRules: []BranchRule{{}, {Base: "main"}}}, "branch_rules: branch rule 1"},
@@ -388,6 +394,29 @@ func TestEffectiveMatchesAuthorsAndPaths(t *testing.T) {
 		if e.IgnoresPath(path) != want {
 			t.Errorf("IgnoresPath(%q) = %v, want %v", path, !want, want)
 		}
+	}
+}
+
+// A bot is let through by its login with or without "[bot]", in any case, or by a glob of it; "*" lets
+// every bot through, and none listed lets none. Which bots are let through changes no review's hash.
+func TestEffectiveReviewsOnlyTheBotsListed(t *testing.T) {
+	e := Resolve([]LevelSettings{{LevelConnection, Settings{ReviewBots: []string{"dependabot", "Renovate[bot]", "github-*"}}}})
+	for login, want := range map[string]bool{
+		"dependabot[bot]": true, "DEPENDABOT[bot]": true, "dependabot": true, "renovate[bot]": true, "renovate": true,
+		"github-actions[bot]": true, "snyk-bot": false, "dependabot-preview[bot]": false, "": false,
+	} {
+		if e.ReviewsBot(login) != want {
+			t.Errorf("ReviewsBot(%q) = %v, want %v", login, !want, want)
+		}
+	}
+	if every := Resolve([]LevelSettings{{LevelRepo, Settings{ReviewBots: []string{"*"}}}}); !every.ReviewsBot("copilot-swe-agent[bot]") {
+		t.Error(`"*" did not let a bot through`)
+	}
+	if Resolve(nil).ReviewsBot("dependabot[bot]") {
+		t.Error("a bot was let through with none listed")
+	}
+	if e.Hash() != Resolve(nil).Hash() {
+		t.Error("the bots let through changed the hash: every cached review would be missed")
 	}
 }
 
