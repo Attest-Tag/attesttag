@@ -88,8 +88,12 @@ make evals                                      # live evals from evals/cases.js
   you can drive it with curl or the evals without a second Slack account.
 - **Opt-in live tests** stay skipped unless you give them a key: `ALLOW_LIVE=1` runs the
   allow-rule checker against the configured model, `LLM_LIVE=1` sends one real completion
-  (`LLM_LIVE_MODEL` to check the heavy model too), and `GITHUB_LIVE_TOKEN=…` walks the real
-  repository listing.
+  (`LLM_LIVE_MODEL` to check the heavy model too) and puts each model in `LLM_LIVE_MODELS`
+  (comma-separated; the configured model by default) through every request a tool-using turn
+  makes — a forced tool, a free choice, the round after a tool result, the landing round, and the
+  agent's own loop landing on an answer — and `GITHUB_LIVE_TOKEN=…` walks the real repository
+  listing. Run the model check before offering a new model:
+  `LLM_LIVE=1 LLM_LIVE_MODELS=vendor/model go test -run 'TestToolTurnLive|TestAgentLandingLive' ./internal/app`.
 - **Live evals** post each case in `evals/cases.json` to the eval channel, wait for the reply,
   then check the `tool_calls` table and the reply text against the expected tools and regex.
   The `connection_*` cases need a bundle with a bearer connection for `httpbin.org` attached

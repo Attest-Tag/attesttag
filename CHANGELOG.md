@@ -118,6 +118,21 @@ its next review has a check. Fixes on the pull request need the worker image reb
 release (`deploy/<platform>/worker.sh`): an older worker refuses such a job at its clone and pushes
 nothing.
 
+**Models that will not be told which tool to use still answer.** Some endpoints refuse a
+`tool_choice` other than `auto`. Meta's Muse models refuse both `none` and a named tool. Claude
+Sonnet and Opus 5.5 and Qwen 3.8 Flash refuse a named tool while they reason, and OpenRouter answers
+a 404 when no endpoint of a model takes `none` (Llama 4 Maverick). A run on one of them failed at
+the step that asked: the first round of "check our docs" or "search the web", the landing round of
+a routine or reply that had spent its budget, and the last round of a code review. The request is
+now sent again without the choice, which every caller already handles: a tool the model skipped is
+run for it, and a call made while landing is dropped. The refusal is remembered per model and per
+kind, so a model that takes `none` keeps it.
+
+**A provider that fails partway through is retried, not reported as "no choices".** When an
+upstream times out after OpenRouter has started its reply, the failure arrives as a 200 with an
+error in the body. That turned into "model returned no choices" and was never retried. It is now an
+error carrying what the provider said, and a timeout, a rate limit or a 5xx is tried once more.
+
 ## 0.2.0 (2026-10-04)
 
 Like 0.1.0, the source alone: no images, Helm chart or binaries are published for it, so build from

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -56,6 +57,9 @@ type LLM struct {
 	modelsAt    time.Time
 	modelsFetch chan struct{}
 	modelsErr   error
+
+	// autoOnly holds the tool_choice values a model's endpoint refused (autoOnlyKey); see Chat.
+	autoOnly sync.Map
 }
 
 // NewLLM is the deployment's own endpoint: LLM_BASE_URL on LLM_API_KEY.
@@ -637,7 +641,24 @@ func (l *LLM) Chat(ctx context.Context, model string, msgs []openai.ChatCompleti
 			}
 		}
 	}
-	resp, err := l.client.Chat.Completions.New(ctx, p, l.chatOpts()...)
+	refusedKey := autoOnlyKey(model, forceTool)
+	if _, ok := l.autoOnly.Load(refusedKey); ok {
+		p.ToolChoice = openai.ChatCompletionToolChoiceOptionUnionParam{}
+	}
+	resp, err := l.complete(ctx, p)
+	if err != nil && toolChoiceRefused(p, err) {
+		// Not every endpoint lets the caller choose: Meta's take only "auto", and others refuse a
+		// named tool while the model is reasoning. The callers already cope with a provider that
+		// ignores tool_choice — a named tool it skipped is run for it, calls made under "none" are
+		// dropped — so the same request without the field is the recovery. Once that works it is
+		// remembered, and the next call of the kind goes straight there instead of paying for the
+		// refusal again.
+		slog.Warn("provider refused tool_choice; sending it as auto", "model", model, "choice", forceTool, "err", truncate(firstLine(err.Error()), 400))
+		p.ToolChoice = openai.ChatCompletionToolChoiceOptionUnionParam{}
+		if resp, err = l.complete(ctx, p); err == nil {
+			l.autoOnly.Store(refusedKey, struct{}{})
+		}
+	}
 	if err != nil {
 		return nil, Usage{}, l.failed(model, err)
 	}
@@ -647,6 +668,128 @@ func (l *LLM) Chat(ctx context.Context, model string, msgs []openai.ChatCompleti
 		us.KeyOwner = keyOwnerOrg
 	}
 	return resp, l.priced(ctx, model, us), nil
+}
+
+// complete sends one completion and treats a failure reported inside a 200 as the failure it is.
+// OpenRouter commits the status line before a slow upstream has answered — it holds the
+// connection open with keep-alive whitespace — so an upstream that then times out or errors
+// arrives as a 200 whose body is {"error": {...}} and no choices. The SDK, seeing a 200, neither
+// raises it nor retries it as it would the same failure sent as a 504, and the caller was left
+// with "model returned no choices". A transient one is retried once, as the SDK would have.
+func (l *LLM) complete(ctx context.Context, p openai.ChatCompletionNewParams) (*openai.ChatCompletion, error) {
+	for attempt := 0; ; attempt++ {
+		resp, err := l.client.Chat.Completions.New(ctx, p, l.chatOpts()...)
+		if err != nil {
+			return nil, err
+		}
+		be := errorInBody(resp)
+		if be == nil {
+			return resp, nil
+		}
+		if attempt == 0 && be.transient() && ctx.Err() == nil {
+			slog.Warn("provider failed inside a 200; retrying once", "model", p.Model, "code", be.Code, "err", truncate(be.Error(), 400))
+			continue
+		}
+		return nil, be
+	}
+}
+
+// bodyError is a failure a provider reported in the body of a 200; see complete.
+type bodyError struct {
+	Code     int
+	Message  string
+	Provider string // OpenRouter's metadata.raw: what the upstream itself said, when it said it
+}
+
+func (e *bodyError) Error() string {
+	msg := fmt.Sprintf("provider error %d: %s", e.Code, e.Message)
+	if e.Provider != "" {
+		msg += ": " + e.Provider
+	}
+	return msg
+}
+
+// transient is a failure worth one more try: the same set the SDK retries when it arrives as a
+// status code.
+func (e *bodyError) transient() bool {
+	return e.Code == http.StatusRequestTimeout || e.Code == http.StatusTooManyRequests || e.Code >= 500
+}
+
+// errorInBody is the failure a completion with no choices carried in its body, if it carried one.
+func errorInBody(resp *openai.ChatCompletion) *bodyError {
+	if len(resp.Choices) > 0 {
+		return nil
+	}
+	f, ok := resp.JSON.ExtraFields["error"]
+	if !ok {
+		return nil
+	}
+	var e struct {
+		Code     json.RawMessage `json:"code"`
+		Message  string          `json:"message"`
+		Metadata struct {
+			Raw json.RawMessage `json:"raw"`
+		} `json:"metadata"`
+	}
+	if json.Unmarshal([]byte(f.Raw()), &e) != nil {
+		return nil
+	}
+	be := &bodyError{Message: e.Message}
+	// The code is a number from OpenRouter and a string from some upstreams; only a number is a
+	// status, and anything else is reported as a 502, the gateway's own word for "upstream failed".
+	if json.Unmarshal(e.Code, &be.Code) != nil || be.Code == 0 {
+		be.Code = http.StatusBadGateway
+	}
+	if len(e.Metadata.Raw) > 0 {
+		var raw string
+		if json.Unmarshal(e.Metadata.Raw, &raw) != nil {
+			raw = string(e.Metadata.Raw)
+		}
+		be.Provider = raw
+	}
+	if be.Message == "" && be.Provider == "" {
+		return nil
+	}
+	return be
+}
+
+// autoOnlyKey is what an endpoint refused, remembered per model: "none" and a named tool
+// separately, because an endpoint can take one and not the other, and losing "none" where it
+// works would move the landing round's cached prefix for nothing (see landingChoice).
+func autoOnlyKey(model, forceTool string) string {
+	if forceTool == toolChoiceNone {
+		return model + " none"
+	}
+	return model + " named"
+}
+
+// toolChoiceRefused is a request that set tool_choice failing because of it: a provider's 400
+// about the field, or OpenRouter's 404 when routing removed every endpoint "by Tool
+// Compatibility" — none of them takes that choice. Providers spell the field their own way
+// ("tool_choice", "toolChoice", "tool choice"), so the match ignores case and separators.
+func toolChoiceRefused(p openai.ChatCompletionNewParams, err error) bool {
+	if !p.ToolChoice.OfAuto.Valid() && p.ToolChoice.OfFunctionToolChoice == nil {
+		return false
+	}
+	var status int
+	var api *openai.Error
+	var be *bodyError
+	switch {
+	case errors.As(err, &api):
+		status = api.StatusCode
+	case errors.As(err, &be):
+		status = be.Code
+	default:
+		return false
+	}
+	msg := strings.NewReplacer("_", "", " ", "", "-", "").Replace(strings.ToLower(err.Error()))
+	switch status {
+	case http.StatusBadRequest:
+		return strings.Contains(msg, "toolchoice")
+	case http.StatusNotFound:
+		return strings.Contains(msg, "toolcompatibility")
+	}
+	return false
 }
 
 // catalogueComplete says this endpoint's model list names every model it serves, so a model it
