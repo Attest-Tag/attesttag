@@ -225,12 +225,12 @@ func TestSlackSignInFlow(t *testing.T) {
 	fs.user = map[string]any{"id": "U2", "name": "bob", "real_name": "Bob", "is_admin": false, "is_owner": false,
 		"profile": map[string]any{"email": "bob@example.com"}}
 	client.Jar, _ = cookiejar.New(nil) // a different person, so a different browser
-	// And where he lands says the same thing twice: the organisation he founded has no workspace
-	// connected, so the sign-in carries straight on to the install rather than to a console with
-	// nothing in it. Alice went to /admin/ because the organisation she founded is the one this
-	// test seeded T1 into.
-	if loc := location(callback("good-code", start())); loc.String() != "/slack/install" {
-		t.Fatalf("second sign-in: want /slack/install, got %s", loc)
+	// And where he lands: the console, not the install. The organisation he founded has no
+	// workspace, but the one he signs in from is Alice's, so the install cannot be his — the setup
+	// walk says it is taken and offers to ask for an invitation. Carried on to Slack instead, he
+	// would meet a refusal, which once gave back the very bot token Alice's workspace runs on.
+	if loc := location(callback("good-code", start())); loc.String() != "/admin/" {
+		t.Fatalf("second sign-in: want /admin/, got %s", loc)
 	}
 	m2 := me()
 	u2, _ := m2["user"].(map[string]any)

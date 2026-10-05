@@ -290,12 +290,32 @@ func (b *Bot) handleInstallCallback(w http.ResponseWriter, r *http.Request) {
 	// Only a workspace admin or owner may bind their workspace to an organisation here. A
 	// plain member could otherwise connect their employer's workspace to a tenant of their
 	// own and read its channels through the bot. Fail closed: if Slack cannot say, refuse,
-	// and give the token back so nothing is left granted.
+	// and give the token back so nothing is left granted — unless something here runs on it.
 	if admin, err := slackUserIsAdmin(r.Context(), resp.AccessToken, resp.AuthedUser.ID); err != nil || !admin {
-		slackRevokeToken(r.Context(), resp.AccessToken)
+		// Slack issues one bot token per app per workspace, so for a workspace this deployment
+		// already serves — another organisation's, or this one's — what came back is the token
+		// that installation answers on, and revoking it disconnects the workspace for everybody
+		// in it. It did: a member who signed up on their own was sent on to Add to Slack, was
+		// refused as no admin, and the organisation that had installed the bot went quiet. A
+		// failed read counts as in use: keeping a token nobody needed is the smaller harm.
+		held, herr := b.store.Team(r.Context(), resp.Team.ID)
+		inUse := herr != nil || (held != nil && held.Status == "active")
+		if !inUse {
+			slackRevokeToken(r.Context(), resp.AccessToken)
+		} else {
+			slog.Warn("refused an install by somebody who is not a workspace admin; the bot token is kept, as a connected workspace runs on it",
+				"team", resp.Team.ID, "org", orgID)
+		}
 		if err != nil {
 			slog.Warn("could not confirm the installer is a workspace admin", "team", resp.Team.ID, "err", err)
 			installFailed(w, r, back, "Slack could not confirm that you administer that workspace. Try again in a moment.")
+			return
+		}
+		if held != nil && held.Status == "active" && held.OrgID != orgID {
+			// No admin could connect it either: it is somebody else's, and what they need is the
+			// way in, as for an admin's install of it (saveInstall's ErrTeamOwnedElsewhere).
+			installFailed(w, r, back, "That Slack workspace is already connected to another attest_tag organisation. "+
+				"Ask whoever set it up to invite you to theirs — a workspace belongs to one organisation.")
 			return
 		}
 		installFailed(w, r, back, "Only a Slack workspace admin or owner can connect a workspace.")

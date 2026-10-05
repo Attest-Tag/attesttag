@@ -54,6 +54,18 @@ the files it touched, the linter on just those files. It runs a whole command on
 in under two minutes, and spends no turns making a command run that the sandbox stops.
 → [Fix jobs](guide/fix-jobs.md)
 
+**A member who is not a Slack admin can no longer disconnect their workspace by pressing Add to
+Slack.** Slack hands back the same bot token for an app already installed in a workspace, and a
+refused install (the person is not a workspace admin) gave that token back to Slack — revoking the
+one the organisation that installed the bot was running on, and taking the bot out of the workspace
+for everybody in it. A refused install now gives a token back only when no organisation here uses
+that workspace; on one another organisation holds, it says so and points at an invitation. Signing
+up with Slack from a workspace another organisation already connected no longer carries straight on
+to Add to Slack either: the setup walk shows the workspace is taken and offers to ask for an
+invitation. And Slack's `tokens_revoked` disconnects a workspace only when it names the bot's token,
+not when people give back tokens of their own. A workspace this already disconnected needs one
+reinstall by a Slack workspace admin from the organisation that owns it.
+
 **A review finding can be fixed on the pull request.** Somebody who can push to the repository
 ticks the box on a finding's comment, replies `@<app> fix` in its thread, or comments `@<app> fix`
 (or `@<app> fix p1`) on the conversation, and a fix job commits the change to the pull request's own

@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -281,4 +283,70 @@ func legacyConfigureToken(t *testing.T, teamID, channel string) string {
 	mac := hmacNewSHA256([]byte(envMasterKey()))
 	mac.Write([]byte("configure:" + teamID + ":" + channel))
 	return hexEncode(mac.Sum(nil))[:24]
+}
+
+// A refused install never gives back a token a connected workspace runs on. Slack issues one bot
+// token per app per workspace, so for a workspace an organisation here already has, the token a
+// member's refused install brings back is that organisation's, and revoking it took the bot out of
+// the workspace for everyone in it. Only a token nothing here uses is still given back.
+func TestARefusedInstallKeepsTheTokenAConnectedWorkspaceRunsOn(t *testing.T) {
+	b, mux, st := installTestBot(t)
+	ctx := context.Background()
+	orgID, _, admin := seedOrg(t, st, RoleAdmin)
+	other, _, _ := seedOrgAs(t, st, "other@example.com", RoleAdmin)
+	exchange, isAdmin, revoke := oauthExchange, slackUserIsAdmin, slackRevokeToken
+	t.Cleanup(func() { oauthExchange, slackUserIsAdmin, slackRevokeToken = exchange, isAdmin, revoke })
+	team := "T_HELD"
+	oauthExchange = func(ctx context.Context, clientID, clientSecret, code, redirectURI string) (*slack.OAuthV2Response, error) {
+		resp := &slack.OAuthV2Response{AccessToken: "xoxb-live"}
+		resp.Team.ID, resp.Team.Name = team, "Held"
+		resp.AuthedUser.ID = "U_MEMBER"
+		return resp, nil
+	}
+	slackUserIsAdmin = func(ctx context.Context, token, userID string) (bool, error) { return false, nil }
+	var revoked []string
+	slackRevokeToken = func(ctx context.Context, token string) { revoked = append(revoked, token) }
+	install := func() string {
+		t.Helper()
+		state, _ := st.NewOAuthState(ctx, orgID, "U_MEMBER", installStateTTL)
+		loc, err := url.Parse(callback(t, mux, state, state, admin).Header().Get("Location"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return loc.Query().Get("install_error")
+	}
+	enc, _ := b.sealer.Seal([]byte("xoxb-live"))
+
+	// Another organisation's workspace: kept, and the member is pointed at an invitation, since no
+	// admin could connect it here either.
+	if err := st.SaveTeam(ctx, &Team{TeamID: team, OrgID: other, Name: "Held"}, enc); err != nil {
+		t.Fatal(err)
+	}
+	if msg := install(); !strings.Contains(msg, "already connected") || !strings.Contains(msg, "invite") {
+		t.Errorf("a member refused on another organisation's workspace was told %q", msg)
+	}
+	if got, _ := st.Team(ctx, team); got == nil || got.Status != "active" || got.OrgID != other {
+		t.Fatalf("the other organisation's workspace changed: %+v", got)
+	}
+	if len(revoked) != 0 {
+		t.Fatalf("revoked %q, the token the other organisation's workspace runs on", revoked)
+	}
+
+	// This organisation's own workspace, reinstalled by a member: refused, and still kept.
+	st.db.ExecContext(ctx, `update teams set org_id=? where team_id=?`, orgID, team)
+	if msg := install(); !strings.Contains(msg, "admin") {
+		t.Errorf("a member's reinstall of their own organisation's workspace was told %q", msg)
+	}
+	if len(revoked) != 0 {
+		t.Fatalf("revoked %q, the token this organisation's own workspace runs on", revoked)
+	}
+
+	// Disconnected here, nothing runs on it: the token this install brought is given back.
+	if err := st.RevokeTeam(ctx, team, "test"); err != nil {
+		t.Fatal(err)
+	}
+	install()
+	if !slices.Equal(revoked, []string{"xoxb-live"}) {
+		t.Errorf("a token nothing here uses was not given back: %q", revoked)
+	}
 }
