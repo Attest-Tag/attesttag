@@ -106,6 +106,7 @@ const ACTION_LABELS: Record<string, string> = {
   "review.type_saved": "Review type saved",
   "review.type_reset": "Review type reset to built-in",
   "review.type_reverted": "Review type reverted",
+  "review.type_deleted": "Review type deleted",
   "review.type_enabled": "Review type turned on",
   "review.type_disabled": "Review type turned off",
   "export.activity": "Activity exported",

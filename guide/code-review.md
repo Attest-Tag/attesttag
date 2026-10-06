@@ -326,6 +326,10 @@ optional paths, an optional bad and good example, an on/off switch, and where it
 - **A type switched off** stops running and leaves the Start review dialog. It is kept, and a branch
   rule that names it says so in the console; a pull request whose rule names it lists it under *Not
   reviewed* as turned off.
+- **Delete** removes a type of your own for good: it leaves the Types tab, Start review and the
+  commands. It is refused while a branch rule names the type, so take it out of them first. Its
+  history is kept for the reviews that ran it, so its key cannot be used for a new type. A built-in
+  is never deleted; turn it off instead.
 - **Proposed rules** come from a `remember …` reply in a finding's thread and do nothing until
   somebody approves it and saves the type, which makes it part of the next version; **Reject**,
   saved the same way, keeps it in the list, off.

@@ -202,6 +202,7 @@ export function ReviewTypeEditor({
   offeredModels,
   heavy,
   onChanged,
+  onDeleted,
 }: {
   typeKey: string;
   canManage: boolean;
@@ -210,6 +211,8 @@ export function ReviewTypeEditor({
   heavy: string;
   /** A save, a switch, a reset or a revert: the list beside it says so too. */
   onChanged: () => void;
+  /** The type was deleted: the list moves on to another. */
+  onDeleted: (key: string) => void;
 }) {
   const loaded = useApi<{ type: ReviewType }>(`/api/review-types/${encodeURIComponent(typeKey)}`);
   if (loaded.error && !loaded.data) return <ErrorBanner message={loaded.error} onRetry={loaded.reload} />;
@@ -233,6 +236,7 @@ export function ReviewTypeEditor({
       heavy={heavy}
       onReload={loaded.reload}
       onChanged={onChanged}
+      onDeleted={onDeleted}
     />
   );
 }
@@ -245,6 +249,7 @@ function Editor({
   heavy,
   onReload,
   onChanged,
+  onDeleted,
 }: {
   initial: ReviewType;
   canManage: boolean;
@@ -253,6 +258,7 @@ function Editor({
   heavy: string;
   onReload: () => void;
   onChanged: () => void;
+  onDeleted: (key: string) => void;
 }) {
   const [base, setBase] = useState(initial);
   const [draft, setDraft] = useState(() => draftOf(initial));
@@ -405,6 +411,30 @@ function Editor({
     }
   };
 
+  // Only a type of the organisation's own: a built-in would come straight back in its place. The
+  // server refuses while a branch rule names it, so the button says so before it is pressed.
+  const remove = async () => {
+    const ok = await confirm({
+      title: `Delete ${base.name}?`,
+      description:
+        `It leaves the Types tab, Start review and the commands for good. Its history is kept for the reviews that ran it, so the key ${base.key} cannot be used again.` +
+        (dirty ? " Unsaved edits here are discarded." : "") +
+        " To stop it for now, turn it off instead.",
+      confirmLabel: "Delete type",
+      destructive: true,
+    });
+    if (!ok) return;
+    setBusy("delete");
+    try {
+      await api.del(`/api/review-types/${encodeURIComponent(base.key)}?version=${base.version}`);
+      toast.success(`${base.name} deleted`);
+      onDeleted(base.key);
+    } catch (err) {
+      toast.error(errorMessage(err));
+      setBusy(null);
+    }
+  };
+
   // New built-in rules the copy predates run as shipped; switching one off puts it in the list, off.
   const offNew = (text: string) => draft.rules.some((r) => r.text === text && !base.rules.some((b) => b.text === text));
   const toggleNew = (rule: ReviewTypeRule, on: boolean) =>
@@ -496,6 +526,16 @@ function Editor({
           {/* Said beside it, not in a title: a disabled button shows none, and a phone never hovers. */}
           {canManage && base.builtin && base.version > 0 && !base.edited && (
             <span className="self-center text-xs text-muted-foreground">It says what the built-in says already.</span>
+          )}
+          {canManage && base.custom && (
+            <Button variant="outline" size="sm" onClick={() => void remove()} disabled={base.used_by > 0 || busy === "delete"}>
+              <Trash2 /> Delete
+            </Button>
+          )}
+          {canManage && base.custom && base.used_by > 0 && (
+            <span className="self-center text-xs text-muted-foreground">
+              To delete it, take it out of the {base.used_by === 1 ? "branch rule that names" : `${base.used_by} branch rules that name`} it first.
+            </span>
           )}
         </div>
       </div>
