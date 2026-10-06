@@ -12,8 +12,8 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
-    "lucide-react": "^1.48.0",
-    "next": "16.3.6",
+    "lucide-react": "^1.51.0",
+    "next": "16.3.8",
     "next-themes": "^0.4.6",
     "qrcode.react": "^4.2.0",
     "radix-ui": "^1.6.4",
@@ -29,8 +29,8 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
-    "eslint-config-next": "16.3.6",
-    "shadcn": "^4.21.0",
+    "eslint-config-next": "16.3.8",
+    "shadcn": "^4.21.1",
     "tailwindcss": "^4",
     "typescript": "^6"
   }
