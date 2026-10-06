@@ -1095,7 +1095,7 @@ func (r *reviewRun) find(ctx context.Context, ts *reviewTypeSpec, model string, 
 		if sub, ok := submissionFrom(msg, reviewSubmitTool); ok {
 			return sub, nil
 		}
-		msgs = append(msgs, msg.ToParam())
+		msgs = append(msgs, assistantTurn(*msg))
 		if len(msg.ToolCalls) == 0 {
 			// Prose and no tool: the model thinks it is done, and is asked for the tool next round —
 			// or, if this was that round, once more below.
@@ -2046,7 +2046,7 @@ func (r *reviewRun) verify(ctx context.Context, c *reviewCandidate) (*reviewVerd
 		if v, ok := verdictFrom(msg); ok {
 			return v, cost, nil
 		}
-		msgs = append(msgs, msg.ToParam())
+		msgs = append(msgs, assistantTurn(*msg))
 		if len(msg.ToolCalls) == 0 {
 			if land {
 				break

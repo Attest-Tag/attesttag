@@ -130,16 +130,17 @@ func (l *LLM) fetchModels(ctx context.Context) ([]ModelInfo, error) {
 	var out []ModelInfo
 	add := func(page modelsPage, kind string) {
 		for _, m := range page.Data {
-			if m.ID == "" || seen[m.ID] {
+			id := requestID(l.host, m.ID)
+			if id == "" || seen[id] {
 				continue
 			}
-			seen[m.ID] = true
-			info := ModelInfo{ID: m.ID, Name: m.Name, Kind: kind, ContextLength: int(m.ContextLength),
+			seen[id] = true
+			info := ModelInfo{ID: id, Name: m.Name, Kind: kind, ContextLength: int(m.ContextLength),
 				Inputs: m.Architecture.InputModalities, OwnedBy: m.OwnedBy,
 				PromptPerM: perMillion(m.Pricing.Prompt), CompletionPerM: perMillion(m.Pricing.Completion),
 				CacheReadPerM: perMillion(m.Pricing.InputCacheRead)}
 			if info.Kind == "" {
-				info.Kind = modelKind(m.ID, m.Architecture.OutputModalities)
+				info.Kind = modelKind(id, m.Architecture.OutputModalities)
 			}
 			if info.Name == info.ID {
 				info.Name = ""
@@ -154,6 +155,16 @@ func (l *LLM) fetchModels(ctx context.Context) ([]ModelInfo, error) {
 		out = []ModelInfo{}
 	}
 	return out, nil
+}
+
+// requestID is a listed model's id as requests name it. Google's own endpoint lists its models as
+// "models/gemini-…" and answers to the bare name too, which is the one its documentation and every
+// other catalogue use, so the console offers that.
+func requestID(host, id string) string {
+	if host == "generativelanguage.googleapis.com" {
+		return strings.TrimPrefix(id, "models/")
+	}
+	return id
 }
 
 // modelKind guesses whether a model embeds or chats: OpenRouter says so in its output
@@ -233,19 +244,39 @@ func (p modelPrice) cost(u Usage) float64 {
 // (gpt-4o-2024-08-06, claude-sonnet-4-20250514), which a catalogue lists without.
 var dateSuffixRe = regexp.MustCompile(`-(\d{4}-\d{2}-\d{2}|\d{8})$`)
 
+// catalogueIDs are the ids a model one vendor's own endpoint serves may have in a catalogue that
+// lists every vendor's, as OpenRouter's does: as named, under OpenAI's prefix (its API is where
+// unprefixed ids come from), under Google's for a Gemini model and under DeepSeek's for a DeepSeek
+// one with a version in its name. DeepSeek's unversioned names (deepseek-chat, deepseek-flash) are
+// aliases for whatever it serves today, while a catalogue entry of that name is one snapshot at
+// that snapshot's price, so they are not looked up under the prefix.
+func catalogueIDs(model string) []string {
+	ids := []string{model, "openai/" + model}
+	bare := strings.TrimPrefix(model, "models/")
+	m := strings.ToLower(bare)
+	switch {
+	case strings.HasPrefix(m, "gemini-"):
+		ids = append(ids, "google/"+bare)
+	case strings.HasPrefix(m, "deepseek-") && strings.ContainsAny(m, "0123456789"):
+		ids = append(ids, "deepseek/"+bare)
+	}
+	return ids
+}
+
 // priceOf finds a model's list price in this endpoint's catalogue. It is how a call on an
 // endpoint that reports no charge — OpenAI's own API reports tokens and nothing else — is given a
-// figure: the model is looked up as named, as OpenRouter names OpenAI's models ("openai/<id>"),
-// and both again without a snapshot date. An endpoint whose catalogue carries no prices, or a
-// model it does not list, prices nothing, and the call stays unpriced rather than guessed at.
+// figure: the model is looked up under each id catalogueIDs gives it ("gpt-5" as itself and as
+// "openai/gpt-5"), and again without a snapshot date. An endpoint whose catalogue carries no
+// prices, or a model it does not list, prices nothing, and the call stays unpriced rather than
+// guessed at.
 func (l *LLM) priceOf(ctx context.Context, model string) (modelPrice, bool) {
 	models, err := l.ListModels(ctx, false)
 	if err != nil || model == "" {
 		return modelPrice{}, false
 	}
-	candidates := []string{model, "openai/" + model}
+	candidates := catalogueIDs(model)
 	if base := dateSuffixRe.ReplaceAllString(model, ""); base != model {
-		candidates = append(candidates, base, "openai/"+base)
+		candidates = append(candidates, catalogueIDs(base)...)
 	}
 	for _, id := range candidates {
 		for _, m := range models {

@@ -133,6 +133,23 @@ upstream times out after OpenRouter has started its reply, the failure arrives a
 error in the body. That turned into "model returned no choices" and was never retried. It is now an
 error carrying what the provider said, and a timeout, a rate limit or a 5xx is tried once more.
 
+**Google Gemini and DeepSeek as your own model key, and Gemini 3's tool calls on Google's own
+endpoint.** Settings → Models → *Your model key* offers Google Gemini and DeepSeek beside OpenAI and
+OpenRouter, each with its address filled in. → [Its own model key](guide/plans.md#its-own-model-key)
+
+- **Tool rounds go back as the endpoint wrote them.** Gemini 3 at Google's own endpoint refused
+  every round after a tool call ("Function call is missing a thought_signature"), so any question
+  that needed a tool failed there. A tool round now carries back what the endpoint handed out with
+  its calls: the signature Google puts on each one, OpenRouter's `reasoning_details` (Gemini's
+  signatures there) and DeepSeek's `reasoning_content`. OpenAI's API writes none of these, and is
+  sent none.
+- **Model lists and prices.** Google's list drops the `models/` it puts in front of every id. A
+  Gemini model is priced from the catalogue as `google/<id>` and a DeepSeek one with a version in its
+  name as `deepseek/<id>`; DeepSeek's unversioned names (`deepseek-flash`) are aliases and stay
+  unpriced.
+- **DeepSeek has no embedding model**, so document search is off while a DeepSeek key is in use. Its
+  models refuse a named tool while they reason, which the change above already recovers from.
+
 ## 0.2.0 (2026-10-04)
 
 Like 0.1.0, the source alone: no images, Helm chart or binaries are published for it, so build from

@@ -976,7 +976,7 @@ func (r *reviewRun) resolveOne(ctx context.Context, res *reviewResolution) (*res
 		if v, ok := resolveVerdictFrom(msg); ok {
 			return v, cost, nil
 		}
-		msgs = append(msgs, msg.ToParam(), openai.UserMessage("Call submit_resolution now, with one of its states."))
+		msgs = append(msgs, assistantTurn(*msg), openai.UserMessage("Call submit_resolution now, with one of its states."))
 	}
 	return nil, cost, errReviewNoSubmission
 }

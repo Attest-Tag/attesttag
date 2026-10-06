@@ -89,6 +89,14 @@ other host keeps OpenRouter's shape, as it always has, since a gateway in front 
 depend on it. Every completion the bot asks for, on every host, asks for at most 32,768 tokens of
 output.
 
+A tool-using turn sends each round of the conversation back as the endpoint wrote it, with what it
+handed out alongside its tool calls: OpenRouter's `reasoning_details`, DeepSeek's `reasoning_content`,
+and the thought signature Google's own endpoint puts on each call (`extra_content`). Gemini 3 refuses
+the round after a call without its signature. An endpoint that writes none of these, OpenAI's among
+them, is sent none. A request whose `tool_choice` the endpoint refuses — Meta's Muse models take only
+`auto`, and Claude, Qwen and DeepSeek refuse a named tool while they reason — is sent again without
+it, and that model is sent none of that kind from then on.
+
 ### HTTP server and public origin
 
 | variable | default | purpose |

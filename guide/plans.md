@@ -191,9 +191,10 @@ everything else in [`billing.md`](billing.md).
 ### Its own model key
 
 An organisation can run on its own model provider instead of the deployment's: its admins open
-Settings → Models → **Your model key**, pick OpenAI, OpenRouter or any OpenAI-compatible endpoint
-(Azure OpenAI's v1 address is `https://<resource>.openai.azure.com/openai/v1`, and its models are the
-deployment names), paste a key, choose the default and embedding models, and save. They can replace,
+Settings → Models → **Your model key**, pick OpenAI, OpenRouter, Google Gemini, DeepSeek or any
+OpenAI-compatible endpoint (Azure OpenAI's v1 address is `https://<resource>.openai.azure.com/openai/v1`,
+and its models are the deployment names), paste a key, choose the default and embedding models, and
+save. They can replace,
 test or remove it whenever they like; nobody writes to support. Who may do this is `ORG_MODEL_KEYS`:
 a self-host defaults to `all`, so every organisation there can rotate its key from the console rather
 than by redeploying; `enterprise` limits it to accounts on the enterprise plan, which is what the
@@ -202,16 +203,20 @@ locked line naming the Enterprise plan rather than a form.
 
 The embedding model is optional, but without one document search is off while the key is in use —
 it says so, and an admin can choose one under Settings → Models — rather than embedding the account's
-documents on the deployment's key.
+documents on the deployment's key. DeepSeek serves no embedding model, so an account on a DeepSeek key
+has no document search; Google's `gemini-embedding` models work.
 
 While a key is in use, **everything the account causes runs on it**: replies in every channel, the
 watcher, the allow-rule checker and the thread summariser, the console assistant, its documents'
 embeddings, and its fix jobs. Its spend is its provider's to bill — recorded here like any other
 (`usage.key_owner = 'org'`), charged to no credit, and held by none of the deployment's ceilings: not
 the free plan's, not `PLATFORM_MONTHLY_BUDGET_USD_PER_ORG`, not a deal's `budget_usd`. Its own monthly
-budget still applies, and one it never set is no limit. OpenAI reports tokens and no price, so calls
-there are priced at list price from the deployment's catalogue and marked `~$` in the reply footer;
-an endpoint whose models are in no catalogue is unpriced, and a monthly budget cannot stop it.
+budget still applies, and one it never set is no limit. OpenAI, Google and DeepSeek report tokens and
+no price, so calls there are priced at list price from the deployment's catalogue — a Gemini model as
+`google/<id>`, a DeepSeek one with a version in its name as `deepseek/<id>` — and marked `~$` in the
+reply footer. DeepSeek's unversioned names (`deepseek-flash`) are aliases for whatever it serves that
+day, so they stay unpriced, as does an endpoint whose models are in no catalogue, and a monthly budget
+cannot stop them.
 
 #### When the model key fails
 
