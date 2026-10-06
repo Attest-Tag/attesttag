@@ -307,14 +307,18 @@ export function ScopeList({
     ? (starredList[0] ?? branches.flatMap((b) => (b.hit ? [b.team] : b.channels.slice(0, 1)))[0] ?? null)
     : null;
 
-  const selectedTeam = scopes.find((s) => s.id === selectedId)?.team_id ?? "";
+  // Only a channel is hidden by its workspace's fold. A workspace arrived on is its own row, shown
+  // however it is folded, and its fold stays as it was left: every reload arrives on whatever the
+  // page had open, so unfolding that one too undid a fold on every visit.
+  const selectedScope = scopes.find((s) => s.id === selectedId);
+  const hidingTeam = selectedScope?.kind === "channel" ? selectedScope.team_id : "";
   const revealed = useRef(false);
   useEffect(() => {
-    if (revealed.current || selectedTeam === "") return;
+    if (revealed.current || !selectedScope) return;
     revealed.current = true;
-    dropForNow(selectedTeam);
+    if (hidingTeam) dropForNow(hidingTeam);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once on arrival, not on every render
-  }, [selectedTeam]);
+  }, [selectedScope?.id, hidingTeam]);
 
   return (
     <div className="self-start overflow-hidden rounded-xl border bg-card">

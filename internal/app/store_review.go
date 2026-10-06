@@ -740,10 +740,11 @@ var (
 // ReviewType is a rubric and its rules. Key and BuiltinKey are fixed when the row is made: a run
 // records the key it ran, and a branch rule names it, so changing it would orphan both.
 //
-// For the same reason there is no delete. A type nobody wants is turned off (Enabled false) and
+// For the same reason a delete only hides the row (deleted_at, DeleteReviewType). A type nobody
+// wants for now is turned off (Enabled false); one nobody wants again is deleted, and either way it
 // stays, with its history, so every run that names {key, version} can still be shown the rubric it
-// ran with — a deleted type, and a new one made under its key later, would start again at version
-// 1 and make those names mean two different things.
+// ran with — and the key stays taken: a new type made under it would start again at version 1 and
+// make those names mean two different things.
 type ReviewType struct {
 	ID                int64            `json:"-"`
 	PublicID          string           `json:"id"`
@@ -860,9 +861,9 @@ func encodeSkillLinks(l []review.SkillLink) string {
 }
 
 // ReviewTypes is every type the organisation has a row for — its own, and its copies of built-ins
-// — with their rules. Built-ins it never edited are not here; the caller lays these over them.
+// — with their rules, less the deleted ones. Built-ins it never edited are not here; the caller lays these over them.
 func (s *Store) ReviewTypes(ctx context.Context, orgID int64) ([]*ReviewType, error) {
-	rows, err := s.db.QueryContext(ctx, `select `+reviewTypeCols+` from review_types where org_id=? order by id`, orgID)
+	rows, err := s.db.QueryContext(ctx, `select `+reviewTypeCols+` from review_types where org_id=? and deleted_at is null order by id`, orgID)
 	if err != nil {
 		return nil, err
 	}
@@ -911,10 +912,10 @@ func (s *Store) ReviewTypeByKey(ctx context.Context, orgID int64, key string) (*
 	return reviewTypeWhere(ctx, s.db, orgID, `key=?`, key)
 }
 
-// reviewTypeWhere reads one type and its rules. cond is one of the constant conditions above,
-// never anything a request supplied.
+// reviewTypeWhere reads one type and its rules; a deleted type is not found. cond is one of the
+// constant conditions above, never anything a request supplied.
 func reviewTypeWhere(ctx context.Context, q reviewQuerier, orgID int64, cond string, arg any) (*ReviewType, error) {
-	t, err := scanReviewType(q.QueryRowContext(ctx, `select `+reviewTypeCols+` from review_types where org_id=? and `+cond, orgID, arg))
+	t, err := scanReviewType(q.QueryRowContext(ctx, `select `+reviewTypeCols+` from review_types where org_id=? and deleted_at is null and `+cond, orgID, arg))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -992,6 +993,13 @@ func (s *Store) CreateReviewType(ctx context.Context, orgID int64, t *ReviewType
 		orgID, newPublicID(), t.Key, nullIfEmpty(t.BuiltinKey), strings.TrimSpace(t.Name), t.Purpose, encodeGlobs(t.PathGlobs),
 		t.Strictness, t.Model, t.MaxUSD, t.InlineMinSeverity, t.Enabled, by, at, at, encodeSkillLinks(t.Skills)).Scan(&id)
 	if isUniqueViolation(err) {
+		tx.Rollback()
+		var deleted bool
+		if s.db.QueryRowContext(ctx, `select 1 from review_types where org_id=? and key=? and deleted_at is not null`,
+			orgID, t.Key).Scan(&deleted) == nil {
+			return nil, fmt.Errorf("%w: a deleted type had the key %q, and the reviews it ran still name it; choose another key",
+				ErrReviewTypeKeyTaken, t.Key)
+		}
 		return nil, ErrReviewTypeKeyTaken
 	}
 	if err != nil {
@@ -1005,6 +1013,34 @@ func (s *Store) CreateReviewType(ctx context.Context, orgID int64, t *ReviewType
 		return nil, err
 	}
 	return saved, tx.Commit()
+}
+
+// DeleteReviewType deletes a type of the organisation's own, against the version the person was
+// looking at, as ErrReviewTypeStale when somebody saved it since. Only the row is marked: its
+// rules and versions stay, so the runs that name it keep explaining themselves and its key stays
+// taken. A copy of a built-in is never deleted — the built-in would come straight back in its
+// place — so it is ErrReviewTypeNotFound here like a type that does not exist.
+func (s *Store) DeleteReviewType(ctx context.Context, orgID, typeID int64, version int, by string) error {
+	at := now()
+	res, err := s.db.ExecContext(ctx, `update review_types set deleted_at=?, updated_by=?, updated_at=?
+		where org_id=? and id=? and version=? and builtin_key is null and deleted_at is null`,
+		at, by, at, orgID, typeID, version)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return nil
+	}
+	var one int
+	err = s.db.QueryRowContext(ctx, `select 1 from review_types where org_id=? and id=? and builtin_key is null and deleted_at is null`,
+		orgID, typeID).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrReviewTypeNotFound
+	}
+	if err != nil {
+		return err
+	}
+	return ErrReviewTypeStale
 }
 
 // SaveReviewType replaces a type's fields and its rule list, whole, and records the result as the
@@ -1029,7 +1065,7 @@ func (s *Store) SaveReviewType(ctx context.Context, orgID int64, t *ReviewType, 
 	// Checked under the stored key, which a save never changes, so an edit that left the key out
 	// is judged on what it does change.
 	var key string
-	err = tx.QueryRowContext(ctx, `select key from review_types where org_id=? and id=?`, orgID, t.ID).Scan(&key)
+	err = tx.QueryRowContext(ctx, `select key from review_types where org_id=? and id=? and deleted_at is null`, orgID, t.ID).Scan(&key)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrReviewTypeNotFound
 	}
@@ -1042,7 +1078,7 @@ func (s *Store) SaveReviewType(ctx context.Context, orgID int64, t *ReviewType, 
 	at := now()
 	res, err := tx.ExecContext(ctx, `update review_types set name=?, purpose=?, path_globs_json=?, strictness=?, model=?,
 		max_usd=?, inline_min_severity=?, enabled=?, skills_json=?, version=version+1, updated_by=?, updated_at=?
-		where org_id=? and id=? and version=?`,
+		where org_id=? and id=? and version=? and deleted_at is null`,
 		strings.TrimSpace(t.Name), t.Purpose, encodeGlobs(t.PathGlobs), t.Strictness, t.Model, t.MaxUSD, t.InlineMinSeverity,
 		t.Enabled, encodeSkillLinks(t.Skills), by, at, orgID, t.ID, t.Version)
 	if err != nil {
@@ -1050,7 +1086,7 @@ func (s *Store) SaveReviewType(ctx context.Context, orgID int64, t *ReviewType, 
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		var one int
-		if err := tx.QueryRowContext(ctx, `select 1 from review_types where org_id=? and id=?`, orgID, t.ID).Scan(&one); errors.Is(err, sql.ErrNoRows) {
+		if err := tx.QueryRowContext(ctx, `select 1 from review_types where org_id=? and id=? and deleted_at is null`, orgID, t.ID).Scan(&one); errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrReviewTypeNotFound
 		} else if err != nil {
 			return nil, err

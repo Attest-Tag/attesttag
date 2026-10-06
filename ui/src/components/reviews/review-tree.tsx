@@ -293,18 +293,22 @@ export function ReviewTree({
   const searching = q !== "";
   const total = tree.connections.reduce((n, c) => n + reposOf(c).length, 0);
 
-  // Arriving on a repository inside a folded connection or group opens it for this visit only,
-  // as the Workspaces rail does: the link's doing, not a decision to unfold.
+  // Arriving on a row inside a folded connection or group opens what hides it, for this visit only,
+  // as the Workspaces rail does: the link's doing, not a decision to unfold. Only what hides it: a
+  // connection or a group arrived on is a row of its own, shown however it is folded, and its fold
+  // stays as it was left. Every reload arrives on the node the page had open, so unfolding that one
+  // too undid a fold of the connection or group being looked at on every visit.
   const revealed = useRef(false);
   const selConn = selected?.conn.id ?? "";
-  const selGroup = selected?.kind === "repo" ? (selected.group?.id ?? "") : selected?.kind === "group" ? selected.group.id : "";
+  const hiddenInConn = selected != null && selected.kind !== "connection";
+  const hiddenInGroup = selected?.kind === "repo" ? (selected.group?.id ?? "") : "";
   useEffect(() => {
     if (revealed.current || selConn === "") return;
     revealed.current = true;
-    dropForNow(selConn);
-    if (selGroup) dropForNow(selGroup);
+    if (hiddenInConn) dropForNow(selConn);
+    if (hiddenInGroup) dropForNow(hiddenInGroup);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once on arrival, not on every render
-  }, [selConn, selGroup]);
+  }, [selConn, hiddenInConn, hiddenInGroup]);
 
   const hit = (repo: ReviewNode) => (repo.repo ?? "").includes(q);
   const isActive = (r: Resolved) =>

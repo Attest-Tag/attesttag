@@ -24,6 +24,7 @@ type qwenEngine struct {
 	bin       string
 	llm       app.JobLLMSecret
 	maxRounds int
+	jobID     int64
 }
 
 func (e *qwenEngine) Name() string { return "qwen_code" }
@@ -73,16 +74,47 @@ func (e *qwenEngine) writeSettings(home string) error {
 		return err
 	}
 	settings := map[string]any{
-		"general":   map[string]any{"enableAutoUpdate": false, "checkpointing": map[string]any{"enabled": false}},
-		"privacy":   map[string]any{"usageStatisticsEnabled": false},
-		"telemetry": map[string]any{"enabled": false},
-		"modelProviders": map[string]any{"openai": []map[string]any{{
-			"id": e.llm.Model, "name": e.llm.Model, "baseUrl": e.llm.BaseURL, "envKey": "OPENAI_API_KEY",
-		}}},
+		"general":        map[string]any{"enableAutoUpdate": false, "checkpointing": map[string]any{"enabled": false}},
+		"privacy":        map[string]any{"usageStatisticsEnabled": false},
+		"telemetry":      map[string]any{"enabled": false},
+		"modelProviders": map[string]any{"openai": []map[string]any{e.provider()}},
+		// A tool's output past this many characters is cut before it joins the conversation,
+		// which every later turn re-sends: 25,000 by default, a quarter of that here.
+		"tools": map[string]any{"truncateToolOutputThreshold": qwenToolOutputChars},
 	}
 	raw, _ := json.MarshalIndent(settings, "", "  ")
 	return os.WriteFile(filepath.Join(dir, "settings.json"), raw, 0o600)
 }
+
+// provider is the one model the CLI may use. On OpenRouter every request of the job carries the
+// same session_id, which keeps the job on the provider endpoint that served its first turn: an
+// agent re-sends its whole conversation every turn, a provider's prompt cache only helps when the
+// next turn reaches the same provider, and a model served by dozens of providers is otherwise
+// load-balanced across them call by call — each miss pays full price for the whole prefix again.
+// Qwen Code merges generationConfig.extra_body into every request body.
+//
+// contextWindowSize is what the CLI compresses the conversation against. Left to itself it takes
+// the model's window, and on a model with a million-token window compression never happens: a
+// long job carried every file it ever read into every turn. Told a smaller window, it summarises
+// the old turns once the conversation passes its threshold of it.
+func (e *qwenEngine) provider() map[string]any {
+	gc := map[string]any{"contextWindowSize": qwenContextWindow}
+	if strings.Contains(e.llm.BaseURL, "openrouter.ai") && e.jobID > 0 {
+		gc["extra_body"] = map[string]any{"session_id": fmt.Sprintf("attesttag-job-%d", e.jobID)}
+	}
+	return map[string]any{"id": e.llm.Model, "name": e.llm.Model, "baseUrl": e.llm.BaseURL, "envKey": "OPENAI_API_KEY", "generationConfig": gc}
+}
+
+// The engine's working limits on a long job. qwenContextWindow is the window the CLI compresses
+// against; qwenToolOutputChars caps one tool result; qwenExcludedTools are tools a worker job has
+// no use for. The agent tool runs sub-agents whose contexts are paid for apart from the main one,
+// and in practice they redid work the main loop then did again.
+const (
+	qwenContextWindow   = 160_000
+	qwenToolOutputChars = 6_000
+)
+
+var qwenExcludedTools = []string{"agent", "web_search", "web_fetch", "save_memory", "cron_create", "cron_list", "cron_delete", "ask_user_question", "enter_plan_mode", "exit_plan_mode"}
 
 func (e *qwenEngine) Run(ctx context.Context, ws *Workspace, b Brief) (EngineResult, error) {
 	home := filepath.Join(ws.JobDir, "home")
@@ -101,6 +133,7 @@ func (e *qwenEngine) Run(ctx context.Context, ws *Workspace, b Brief) (EngineRes
 	os.WriteFile(filepath.Join(ws.JobDir, "brief.md"), []byte(prompt), 0o600)
 	argv := append(qwenArgv(e.bin), "-p", prompt, "--yolo", "--output-format", "stream-json",
 		"--max-session-turns", strconv.Itoa(e.maxRounds), "--max-tool-calls", strconv.Itoa(e.maxRounds*3),
+		"--exclude-tools", strings.Join(qwenExcludedTools, ","),
 		// qwen wants whole seconds or a single unit ("5m"); Go's "40m0s" form is rejected.
 		"--max-wall-time", strconv.Itoa(int(remaining.Seconds())))
 	env := append(append([]string{}, ws.Env...),
@@ -140,7 +173,9 @@ func (e *qwenEngine) Run(ctx context.Context, ws *Workspace, b Brief) (EngineRes
 	if res.Summary == "" {
 		res.Summary = "The engine finished without a summary (stopped: " + res.Stopped + ")."
 	}
-	ws.Reporter.Usage(res.Usage)
+	if !ws.Metered {
+		ws.Reporter.Usage(res.Usage)
+	}
 	return res, nil
 }
 
@@ -244,7 +279,15 @@ func (s *qwenStream) readUsage(v any) {
 	in := num("input_tokens", "prompt_tokens", "inputTokens", "promptTokens", "input")
 	out := num("output_tokens", "completion_tokens", "outputTokens", "candidatesTokens", "output")
 	if in > 0 || out > 0 {
-		s.usage.In, s.usage.Out, s.seenUsage = in, out, true
+		// The cached count sits beside the totals it is part of: cache_read_input_tokens in the
+		// result's usage (Qwen Code 0.22), prompt_tokens_details.cached_tokens in OpenAI's shape.
+		cached := num("cache_read_input_tokens", "cached_tokens", "cachedContentTokenCount", "cachedTokens")
+		if d, ok := m["prompt_tokens_details"].(map[string]any); ok {
+			if f, ok := d["cached_tokens"].(float64); ok {
+				cached = int(f)
+			}
+		}
+		s.usage.In, s.usage.Out, s.usage.Cached, s.seenUsage = in, out, min(cached, in), true
 	}
 	for _, k := range []string{"models", "stats", "usage", "metadata"} {
 		if sub, ok := m[k]; ok {

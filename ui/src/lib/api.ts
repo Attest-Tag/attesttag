@@ -1358,7 +1358,7 @@ export type Job = {
   thread_ts: string;
   requester: string;
   approved_by: string;
-  /** "confirm" | "rule:<text>" | "" */
+  /** "confirm" | "rule:<text>" | "github" | "" */
   approval: string;
   connection_id: number;
   repo: string;
@@ -1387,6 +1387,8 @@ export type Job = {
   error: string;
   cost_usd: number;
   tokens_in: number;
+  /** The part of tokens_in the provider served from its prompt cache; 0 when not reported. */
+  tokens_cached: number;
   tokens_out: number;
   created_at: string;
   started_at: string;
@@ -1398,6 +1400,8 @@ export type Job = {
   /** The platform console's page for the execution; "" where there is none (local, k8s, docker). */
   console_url: string;
   thread_link: string;
+  /** "github" for a job asked for on a pull request, which lives there rather than in a chat thread. */
+  origin?: "github";
 };
 
 export type JobUsage = { in: number; out: number; cost_usd: number };
@@ -1452,11 +1456,28 @@ export type JobSpec = {
   channel: string;
   thread_ts: string;
   constraints: JobConstraints;
+  /** "pr" for a job that commits onto an open pull request's own branch instead of opening one. */
+  mode?: string;
+  head_sha?: string;
+  pr?: JobPRRef | null;
+};
+
+/** The pull request a job asked for on GitHub commits to, and where it was asked. */
+export type JobPRRef = {
+  number: number;
+  base: string;
+  url: string;
+  findings?: string[] | null;
+  thread?: number;
+  asked_by: string;
+  asked_url?: string;
 };
 
 export type JobPR = { url: string; number: number; branch: string; base: string; head_sha?: string; draft: boolean };
 
-export type JobTestRun = { ran: boolean; ok: boolean; passed?: number; failed?: number; seconds?: number; output?: string };
+/** One run of a check. `killed` says why the worker's sandbox stopped it before it finished — "out of memory", most
+ * often — which is a check that did not finish, not one that failed. */
+export type JobTestRun = { ran: boolean; ok: boolean; killed?: string; passed?: number; failed?: number; seconds?: number; output?: string };
 
 /** A gate run before the change and after it: the build, the suite, the linter. */
 export type JobCheck = {
@@ -1706,6 +1727,8 @@ export type EffectiveSettings = {
   WorkerMaxJobs: number;
   WorkerBranchPrefix: string;
   WorkerBranchSuffix: string;
+  /** OpenRouter providers a fix job's model calls ask for, in order; empty lets OpenRouter choose. */
+  WorkerProviders?: string;
   WorkerEventRetentionDays: number;
   /** Days of turns, tool calls, proxied requests and artifacts to keep; 0 keeps everything. */
   DataRetentionDays: number;
@@ -2041,8 +2064,12 @@ export type ReviewSettingsValues = {
   notify?: ReviewNotify;
   /** Which events the channel hears of, a set taken whole from the nearest level; empty is none. */
   notify_on?: ReviewNotifyEvent[];
+  /** Whether somebody who can push may have a finding fixed by a commit pushed to the pull request. */
+  fixes?: boolean;
   instructions?: string[];
   exclude_authors?: string[];
+  /** Bots whose pull requests are reviewed automatically all the same, as login globs; every other bot's are skipped. */
+  review_bots?: string[];
   ignore_paths?: string[];
   context_repos?: string[];
   branch_rules?: ReviewBranchRule[];
@@ -2066,8 +2093,11 @@ export type ReviewEffective = {
   notify?: ReviewNotify;
   /** Which events that channel hears of; absent is every one, as for a level nothing resolved. */
   notify_on?: ReviewNotifyEvent[];
+  /** Whether fixes may be asked for on the pull request; absent is off (the server leaves false out). */
+  fixes?: boolean;
   instructions: string[];
   exclude_authors: string[];
+  review_bots: string[];
   ignore_paths: string[];
   context_repos: string[];
   branch_rules: ReviewBranchRule[] | null;

@@ -89,6 +89,14 @@ other host keeps OpenRouter's shape, as it always has, since a gateway in front 
 depend on it. Every completion the bot asks for, on every host, asks for at most 32,768 tokens of
 output.
 
+A tool-using turn sends each round of the conversation back as the endpoint wrote it, with what it
+handed out alongside its tool calls: OpenRouter's `reasoning_details`, DeepSeek's `reasoning_content`,
+and the thought signature Google's own endpoint puts on each call (`extra_content`). Gemini 3 refuses
+the round after a call without its signature. An endpoint that writes none of these, OpenAI's among
+them, is sent none. A request whose `tool_choice` the endpoint refuses — Meta's Muse models take only
+`auto`, and Claude, Qwen and DeepSeek refuse a named tool while they reason — is sent again without
+it, and that model is sent none of that kind from then on.
+
 ### HTTP server and public origin
 
 | variable | default | purpose |
@@ -187,12 +195,12 @@ Off unless `WORKER_MODE` says otherwise. See [Fix jobs](fix-jobs.md).
 
 Inside the worker container: `ATTEST_JOB_ID`, `ATTEST_BOT_URL`, `ATTEST_JOB_TOKEN` and
 `WORKER_MODE` (set per execution by the bot), `WORKER_DIR` (`/work`), `WORKER_MAX_WALL` (`55m`),
-`WORKER_QWEN_BIN` (`qwen`), `WORKER_MISE_BIN` (`mise`), `WORKER_KEEP_WORK` (`1` keeps the job's
+`WORKER_QWEN_BIN` (`qwen`), `WORKER_PI_BIN` (`pi`), `WORKER_MISE_BIN` (`mise`), `WORKER_KEEP_WORK` (`1` keeps the job's
 directory) and `WORKER_SANDBOX_UID` (`10002` in the image), the user the repository's own code
 runs as. Outside `local` a job fails without it, or when the worker is not root and so cannot drop
 to it, unless `WORKER_ALLOW_SHARED_UID=1`, which should not be set. `WORKER_GIT_BASE` and
 `WORKER_GITHUB_API` redirect cloning and the pull request, in `local` mode only. In `local` mode
-the bot passes its own `WORKER_DIR`, `WORKER_MAX_WALL`, `WORKER_QWEN_BIN`, `WORKER_MISE_BIN`,
+the bot passes its own `WORKER_DIR`, `WORKER_MAX_WALL`, `WORKER_QWEN_BIN`, `WORKER_PI_BIN`, `WORKER_MISE_BIN`,
 `WORKER_KEEP_WORK`, `WORKER_GIT_BASE` and `WORKER_GITHUB_API` through; it never reads
 `WORKER_SANDBOX_UID`.
 
@@ -229,7 +237,9 @@ request alone gets its reviews and nothing else: `@` commands and replies in a f
 never delivered, and nothing reports that they are missing.
 
 The permissions code review's tokens ask for are *Contents: Read* and *Pull requests: Read and
-write*, which an App set up for fix jobs already has (with Contents read and write). An App given a
+write*, which an App set up for fix jobs already has (with Contents read and write). *Checks: Read
+and write* is optional: with it, each live review shows as an *attest_tag review* check on the pull
+request, and without it there is no check and nothing else changes. An App given a
 new permission at GitHub asks every account that installed it to accept the change, and until one
 does, the console's Reviews page warns on that installation's connection. On a deployment that does
 not take open sign-ups, `GET /api/github/installations` returns the exact `webhook_url` to paste and
@@ -307,7 +317,8 @@ a bot that hears every message and cannot answer one.
 
 | key | default | purpose |
 |---|---|---|
-| `worker_engine`, `worker_model` | `qwen_code`, heavy model | the coding agent that runs inside a fix job (Settings → Workers → Coding agent; `fake` for dry runs) and the model it runs on |
+| `worker_engine`, `worker_model` | `qwen_code`, heavy model | the coding agent that runs inside a fix job (Settings → Workers → Coding agent: `qwen_code`, `pi`, or `fake` for dry runs) and the model it runs on |
+| `worker_providers` | empty | on OpenRouter, the providers a job's model calls ask for, in order, falling back to any other: `deepinfra, novita/fp8`. Empty lets OpenRouter choose; either way a job stays on the provider that served its first call |
 | `worker_job_budget_usd`, `worker_timeout_minutes`, `worker_max_jobs` | `3`, `45`, `2` | per-job model spend cap (0.1 to 100 dollars; a per-job key is never minted without one), wall-clock cap (5 to 60 minutes), concurrent jobs (1 to 10) |
 | `worker_branch_prefix`, `worker_branch_suffix` | `feature/, bugfix/, hotfix/`, `attest_tag` | your branch convention and the tail that marks a branch as the bot's. The prefix is a list naming one entry per kind of change; the job's kind picks the entry that fits, and a job that does not say is a bug fix. Set it to `none` to keep no convention. Together they are the only refs the worker may push: `bugfix/fix-12-retry-storm-attest_tag` |
 | `worker_event_retention_days`, `worker_allow_rules` | `30`, `0` | how long job events and diffs are kept (1 to 365 days); whether an allow rule may start a job without a human Confirm |

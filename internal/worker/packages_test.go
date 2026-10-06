@@ -234,9 +234,9 @@ func TestPRBodyShowsEveryPackage(t *testing.T) {
 		},
 		Unchecked: []string{"docs-site", "."}, PR: &app.JobPR{URL: "https://github.com/acme/app/pull/3"}}
 	pkgs := []*pkgRun{{Dir: "services/api"}, {Dir: "web", Tools: []string{"node 22.23.2 (the job's default)"}}, {Dir: "tools"}}
-	body := prBody(spec, res, "Fixed it.", res.Recipe, 1, nil, pkgs)
+	body := prBody(spec, res, "Fixed it.", res.Recipe, 1, nil, pkgs, nil)
 	for _, want := range []string{
-		"> **Tests in `web/` still fail after this change.**",
+		"> **Tests in `web/` fail after this change, and passed before it.** Opened as a draft so a person can pick it up; see its checks below.",
 		"> **This change also touches `docs-site/` and the repository root, which this job did not check.**",
 		"### `services/api/`", "### `web/`", "| test after | `npm run test` | **fail** (1 failed, 0 passed) |",
 		"> web/.nvmrc pins node 0.0.1, which could not be installed.", "FAIL login.test.js",
@@ -247,11 +247,11 @@ func TestPRBodyShowsEveryPackage(t *testing.T) {
 			t.Errorf("body lacks %q:\n%s", want, body)
 		}
 	}
-	if got := ticketComment(spec, res); !strings.Contains(got, "tests still failing in web/; 2 other changed packages not checked") {
+	if got := ticketComment(spec, res); !strings.Contains(got, "tests in web/ failing (passed before); 2 other changed packages not checked") {
 		t.Errorf("ticket comment: %q", got)
 	}
 	one := &app.JobResult{Recipe: res.Recipe, Tests: res.Tests, PR: res.PR}
-	if b := prBody(spec, one, "Fixed it.", one.Recipe, 1, nil, nil); strings.Contains(b, "###") || strings.Contains(b, "also touches") {
+	if b := prBody(spec, one, "Fixed it.", one.Recipe, 1, nil, nil, nil); strings.Contains(b, "###") || strings.Contains(b, "also touches") {
 		t.Errorf("a single package's body grew sections:\n%s", b)
 	}
 	if got := ticketComment(spec, one); !strings.Contains(got, "(checks pass)") {

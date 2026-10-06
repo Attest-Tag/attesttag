@@ -3,9 +3,11 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -37,6 +39,9 @@ type procOut struct {
 	Output   string // combined stdout+stderr, head+tail
 	TimedOut bool
 	Duration time.Duration
+	// Signal is the signal that ended the command itself, 0 when it exited. A timeout or a cancel
+	// is the worker's own doing and says so above; anything else is somebody else's (killedBy).
+	Signal int
 }
 
 var errTimeout = errors.New("timed out")
@@ -98,6 +103,7 @@ func runCmd(ctx context.Context, spec cmdSpec) (procOut, error) {
 	out.Output = buf.String()
 	if cmd.ProcessState != nil {
 		out.Code = cmd.ProcessState.ExitCode()
+		out.Signal = exitSignal(cmd.ProcessState)
 	}
 	if cctx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
 		out.TimedOut = true
@@ -262,5 +268,48 @@ func baseEnv(jobDir, workDir string) []string {
 			}
 		}
 	}
+	if v, ok := lookupEnv("NODE_OPTIONS"); ok {
+		e = append(e, "NODE_OPTIONS="+v)
+	} else if mb := nodeHeapMB(memoryLimitBytes()); mb > 0 {
+		e = append(e, fmt.Sprintf("NODE_OPTIONS=--max-old-space-size=%d", mb))
+	}
 	return e
+}
+
+// nodeHeapMB is the V8 heap a repository's Node processes may grow to: about 60% of what the
+// container has, between 2 and 16 GiB. Node sizes its default heap from the machine rather than
+// the container, and a large front end's production build ran out of it on an 8 GiB worker while
+// most of the memory sat unused. The rest is left for the processes that run beside it — the test
+// runner's workers, the engine, the worker itself. Zero when the limit is unknown.
+func nodeHeapMB(limit int64) int {
+	if limit <= 0 {
+		return 0
+	}
+	return int(min(max(limit*6/10>>20, 2048), 16384))
+}
+
+// memoryLimitBytes is the container's memory: the cgroup's limit when one is set, else the
+// machine's, whichever is smaller. Zero when neither can be read (not Linux).
+func memoryLimitBytes() int64 {
+	var limit int64
+	for _, f := range []string{"/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"} {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		if n, err := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64); err == nil && n > 0 && n < 1<<50 {
+			limit = n
+			break
+		}
+	}
+	if raw, err := os.ReadFile("/proc/meminfo"); err == nil {
+		for _, line := range strings.Split(string(raw), "\n") {
+			if f := strings.Fields(line); len(f) >= 2 && f[0] == "MemTotal:" {
+				if kb, err := strconv.ParseInt(f[1], 10, 64); err == nil && kb > 0 && (limit == 0 || kb<<10 < limit) {
+					limit = kb << 10
+				}
+			}
+		}
+	}
+	return limit
 }

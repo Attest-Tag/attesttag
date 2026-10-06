@@ -14,6 +14,153 @@ Versions follow [semantic versioning](https://semver.org). Before 1.0 that means
   down migrations, so back the database up before a minor upgrade: going back means restoring
   that backup.
 
+## 0.3.0 (2026-10-06)
+
+The first release with images: `ghcr.io/attest-tag/attesttag:0.3.0` for linux/amd64 and
+linux/arm64, the fix-job worker images beside it, the Helm chart at
+`oci://ghcr.io/attest-tag/charts/attest-tag` and binaries for Linux and macOS, all signed with
+cosign. Pin the minor (`ATTEST_VERSION=0.3`, or `image.tag: "0.3"`) to take its fixes and no
+migration you did not read about. From here on these are built from `main` only: the release
+workflow refuses a tag that `main` does not contain. → [Deploy](guide/deploy.md)
+
+**Code review shows on the pull request while it works.** → [The reactions and the check](guide/code-review.md#the-reactions-and-the-check)
+
+- **Eyes, then a rocket.** A live review puts an eyes reaction on the pull request as it starts and
+  swaps it for a rocket once it is posted; a review that fails or is cancelled only takes the eyes
+  off.
+- **An *attest_tag review* check.** In progress while the review runs, then a success with the score
+  and the open findings — or neutral, skipped or cancelled when it was not posted, never a failure,
+  so requiring it blocks nothing. It needs the App's **Checks: Read and write** permission, which is
+  optional: an installation without it gets the reactions alone.
+- **Listed among the reviewers.** A first review with nothing to say inline now posts a review of
+  one line — the commit, the score and where the findings are — so the App appears under the pull
+  request's reviewers; later runs with nothing new inline still post none.
+- **A fix job's pull request is reviewed.** A pull request the App opened itself is no longer skipped
+  as a bot's: it is reviewed once somebody marks it ready, as anybody's draft is.
+
+**Code review reviews the bots you name.** A pull request a bot opened was always skipped. *Bots to
+review*, a new list in the review settings, names the bots whose pull requests are reviewed without
+anybody asking — by login, with or without `[bot]`, or a glob, and `*` for every bot — and adds up
+from the connection down like the other lists. Any other bot's pull request is still skipped, and
+the authors to skip still apply. → [Settings and their defaults](guide/code-review.md#settings-and-their-defaults)
+
+**Fix jobs say a check did not finish, not that it failed.** A suite or a build the worker's sandbox
+killed partway — most often out of memory, on a large repository — was reported as failing: the
+pull request opened with "Tests still fail after this change", its table counted one failure, and
+the coding agent was told the suite failed before its change, "that may be the bug". It is now
+*did not finish (killed: out of memory)* everywhere — the pull request, the thread, the console and
+the agent's brief — and the headline also says whether a failing check passed before the change,
+fails worse after it, or was failing already. → [Fix jobs](guide/fix-jobs.md)
+
+**Fix jobs check their change with a narrower run.** The coding agent was told to run the whole
+build, lint and test suite itself before it stopped, although the harness runs them again after it.
+On a large repository, one job spent some 60 of its 150 turns running them, and a type check, again
+and again, each turn re-sending the whole conversation so far. The brief now gives each check's
+time from before the change and asks for the narrowest run that covers the change — the tests for
+the files it touched, the linter on just those files. It runs a whole command only when it passed
+in under two minutes, and spends no turns making a command run that the sandbox stops.
+→ [Fix jobs](guide/fix-jobs.md)
+
+**A member who is not a Slack admin can no longer disconnect their workspace by pressing Add to
+Slack.** Slack hands back the same bot token for an app already installed in a workspace, and a
+refused install (the person is not a workspace admin) gave that token back to Slack — revoking the
+one the organisation that installed the bot was running on, and taking the bot out of the workspace
+for everybody in it. A refused install now gives a token back only when no organisation here uses
+that workspace; on one another organisation holds, it says so and points at an invitation. Signing
+up with Slack from a workspace another organisation already connected no longer carries straight on
+to Add to Slack either: the setup walk shows the workspace is taken and offers to ask for an
+invitation. And Slack's `tokens_revoked` disconnects a workspace only when it names the bot's token,
+not when people give back tokens of their own. A workspace this already disconnected needs one
+reinstall by a Slack workspace admin from the organisation that owns it.
+
+**A review finding can be fixed on the pull request.** Somebody who can push to the repository
+ticks the box on a finding's comment, replies `@<app> fix` in its thread, or comments `@<app> fix`
+(or `@<app> fix p1`) on the conversation, and a fix job commits the change to the pull request's own
+branch — one more commit, pushed as the App, never forced, no new pull request — then answers with
+the commit and what the checks said, and the review of the new head closes what it fixed. A change
+that breaks a check that passed before it is not pushed; its diff comes back with the answer. Pull
+requests from forks are refused, and so are people GitHub says cannot push. *Fixes* is a new review
+setting, on by default; turning it back on needs Manage connections. A reaction cannot ask for a
+fix: GitHub never delivers reactions to an App.
+→ [Fixing a finding](guide/code-review.md#fixing-a-finding-on-the-pull-request)
+
+**The fix-job worker on Google Cloud gets 8 GiB**, up from 4, beside its 2 CPUs: Cloud Run keeps a
+job's files in memory, and a large JavaScript repository's suite and build did not fit. Run
+`deploy/gcp/worker.sh` again to apply it (`MEMORY=4Gi` keeps the old size). The other platforms'
+defaults are unchanged.
+
+**Fix jobs keep their prompt cache, are billed exactly, and stop at their budget.** A coding agent
+re-sends its whole conversation every turn, so a long job reads millions of input tokens, nearly all
+of them the same prefix again. → [What a job costs](guide/fix-jobs.md#what-a-job-costs)
+
+- **A model proxy in the worker.** The engine calls a proxy on the worker's loopback instead of the
+  provider, with a token for that port: the model key no longer enters the sandbox. On OpenRouter
+  every call carries the job's `session_id`, which keeps the job on the provider holding its cache,
+  and asks for usage accounting, so each answer says what it cost, what came from cache and who
+  served it — the real bill, even on the shared key. At the job's budget the proxy stops the engine
+  and what it changed is opened as a draft.
+- **Providers on purpose.** A new `worker_providers` setting (Settings → Workers → Providers) names
+  the OpenRouter providers a job asks for, in order.
+- **The cache share everywhere the cost is.** The cached part of the input is stored on the job and
+  shown in the Slack report ("9.8M in (90% cached) / 74k out"), the console's job page, the reply on
+  a pull request a fix was pushed to, and a new **Cost** section in the pull request a job opens.
+- **pi as a second coding agent** (Settings → Workers → Coding agent). Seven tools, a short system
+  prompt and its own compaction; on the fix-job evals it read about a sixth of the tokens Qwen Code
+  did for the same correct fix. → [Engines and long jobs](guide/fix-jobs.md#engines-and-long-jobs)
+- **Long jobs carry less.** Both engines compact against a 160,000-token window instead of the
+  model's million; Qwen Code runs without its sub-agent, web and memory tools and cuts tool output
+  at 6,000 characters. The brief lists the files the request names as they are in the clone, and
+  tells the engine to batch reads and read each file once.
+- **Node builds get the memory the container has.** Repository commands run with a V8 heap of about
+  60% of it, where a large front end's build ran out of Node's default.
+- **Fix-job evals.** `evals/fixjobs` runs small tasks as real jobs and grades them with hidden tests,
+  to compare engines, models and providers on what was right and what it cost.
+  → [Fix-job evals](evals/README.md#fix-job-evals)
+
+**Models that will not be told which tool to use still answer.** Some endpoints refuse a
+`tool_choice` other than `auto`. Meta's Muse models refuse both `none` and a named tool. Claude
+Sonnet and Opus 5.5 and Qwen 3.8 Flash refuse a named tool while they reason, and OpenRouter answers
+a 404 when no endpoint of a model takes `none` (Llama 4 Maverick). A run on one of them failed at
+the step that asked: the first round of "check our docs" or "search the web", the landing round of
+a routine or reply that had spent its budget, and the last round of a code review. The request is
+now sent again without the choice, which every caller already handles: a tool the model skipped is
+run for it, and a call made while landing is dropped. The refusal is remembered per model and per
+kind, so a model that takes `none` keeps it.
+
+**A provider that fails partway through is retried, not reported as "no choices".** When an
+upstream times out after OpenRouter has started its reply, the failure arrives as a 200 with an
+error in the body. That turned into "model returned no choices" and was never retried. It is now an
+error carrying what the provider said, and a timeout, a rate limit or a 5xx is tried once more.
+
+**Google Gemini and DeepSeek as your own model key, and Gemini 3's tool calls on Google's own
+endpoint.** Settings → Models → *Your model key* offers Google Gemini and DeepSeek beside OpenAI and
+OpenRouter, each with its address filled in. → [Its own model key](guide/plans.md#its-own-model-key)
+
+- **Tool rounds go back as the endpoint wrote them.** Gemini 3 at Google's own endpoint refused
+  every round after a tool call ("Function call is missing a thought_signature"), so any question
+  that needed a tool failed there. A tool round now carries back what the endpoint handed out with
+  its calls: the signature Google puts on each one, OpenRouter's `reasoning_details` (Gemini's
+  signatures there) and DeepSeek's `reasoning_content`. OpenAI's API writes none of these, and is
+  sent none.
+- **Model lists and prices.** Google's list drops the `models/` it puts in front of every id. A
+  Gemini model is priced from the catalogue as `google/<id>` and a DeepSeek one with a version in its
+  name as `deepseek/<id>`; DeepSeek's unversioned names (`deepseek-flash`) are aliases and stay
+  unpriced.
+- **DeepSeek has no embedding model**, so document search is off while a DeepSeek key is in use. Its
+  models refuse a named tool while they reason, which the change above already recovers from.
+
+**A custom review type can be deleted** once no branch rule names it. The row and its versions are
+kept (migration `0033_review_type_deleted` marks it), so past runs still name what they ran with
+and its key stays taken; a built-in type or its copy cannot be deleted. → [Code review](guide/code-review.md)
+
+Upgrading: migrations `0032_job_cached_tokens` and `0033_review_type_deleted` add columns and apply
+themselves at startup; both are additive, so the old version keeps working while the new one
+rolls out. The fix-job proxy, pi, and fixes on the pull request need the worker image from this
+release (`deploy/<platform>/worker.sh`, or the published `attesttag-worker:0.3.0`): an older worker
+records no cached tokens and refuses a fix-on-the-pull-request job at its clone. For the code review
+check, add *Checks: Read and write* under the App's *Permissions & events* at GitHub; each account
+that installed it is then asked to accept, and its next review has a check.
+
 ## 0.2.0 (2026-10-04)
 
 Like 0.1.0, the source alone: no images, Helm chart or binaries are published for it, so build from

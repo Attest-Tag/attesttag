@@ -302,13 +302,27 @@ func (r *Runner) execute(ctx context.Context, claim *app.JobClaim, rep *Reporter
 		failWith(res, err)
 		return
 	}
-	if err := repo.checkoutBranch(ctx, spec.Branch); err != nil {
+	// A job on a pull request works on the pull request's own branch, which is what was cloned;
+	// any other job starts a branch of its own from the base.
+	prMode := spec.Mode == app.JobModePR
+	if prMode {
+		if b := repo.currentBranch(ctx); b != spec.Branch {
+			err := stepErr("clone_failed", fmt.Sprintf("the clone is on %q, not the pull request's branch %q", b, spec.Branch))
+			rep.Phase("clone", "failed", err.Error())
+			failWith(res, err)
+			return
+		}
+	} else if err := repo.checkoutBranch(ctx, spec.Branch); err != nil {
 		rep.Phase("clone", "failed", err.Error())
 		failWith(res, err)
 		return
 	}
 	baseSHA := repo.headSHA(ctx)
 	rep.Phase("clone", "ok", "at "+cut(baseSHA, 12))
+	if prMode && spec.HeadSHA != "" && baseSHA != spec.HeadSHA {
+		// Somebody pushed between the request and the clone: the job fixes the branch as it is now.
+		rep.Log(fmt.Sprintf("%s moved on since the fix was asked for (%s); working on %s", spec.Branch, cut(spec.HeadSHA, 12), cut(baseSHA, 12)))
+	}
 
 	// 2. what this repository is, and how it is built. Resolved before anything runs, so the
 	// toolchains it names can be installed and the engine can be told the commands. The brief's
@@ -409,7 +423,24 @@ func (r *Runner) execute(ctx context.Context, claim *app.JobClaim, rep *Reporter
 
 	// 5. the engine, stopped early enough that every package's after-checks and the push fit
 	ws.EngineStop = engineStop(deadline, beforeTime(pkgs), hasLint(pkgs))
-	eng, err := newEngine(spec.Constraints.Engine, r.opts, claim)
+	// The engine's model calls go through a proxy on the loopback that keeps the key out of the
+	// sandbox, pins the cache, meters what each call cost and stops the engine at the budget.
+	engCtx, engCancel := context.WithCancelCause(ctx)
+	defer engCancel(nil)
+	engClaim := *claim
+	var proxy *llmProxy
+	if spec.Constraints.Engine != "fake" && claim.Secrets.LLM.BaseURL != "" {
+		proxy = newLLMProxy(claim.Secrets.LLM, claim.Job.ID, spec.Constraints.Providers, claim.Limits.BudgetUSD, rep.Usage, func() { engCancel(errBudget) })
+		if err := proxy.start(); err != nil {
+			rep.Warn("model proxy unavailable, the engine calls the provider directly: " + err.Error())
+			proxy = nil
+		} else {
+			defer proxy.close()
+			engClaim.Secrets.LLM = proxy.Secret(claim.Secrets.LLM.Model)
+			ws.Metered = true
+		}
+	}
+	eng, err := newEngine(spec.Constraints.Engine, r.opts, &engClaim)
 	if err != nil {
 		rep.Phase("engine", "failed", err.Error())
 		failWith(res, err)
@@ -417,11 +448,21 @@ func (r *Runner) execute(ctx context.Context, claim *app.JobClaim, rep *Reporter
 	}
 	rep.Phase("engine", "started", eng.Name()+" on "+spec.Constraints.Model)
 	brief := Brief{JobID: claim.Job.ID, Spec: spec, Recipe: recipe, Baseline: res.Tests.Before, Build: res.Build.Before,
-		Notes: recipe.Why, RepoMap: repoMap(ws.RepoDir, 250), Conv: conventions(ws.RepoDir, 6000),
+		Notes: recipe.Why, RepoMap: repoMap(ws.RepoDir, 250), Conv: conventions(ws.RepoDir, 6000), Located: locateFiles(ws.RepoDir, spec, 15),
 		Primary: primary, Extras: extras, Shims: tc != nil && tc.active}
-	er, err := eng.Run(ctx, ws, brief)
+	er, err := eng.Run(engCtx, ws, brief)
+	if proxy != nil {
+		er.Usage = proxy.Total()
+		if s := proxy.Summary(); s != "" {
+			rep.Log(s)
+		}
+		if errors.Is(context.Cause(engCtx), errBudget) && ctx.Err() == nil {
+			er.Stopped, err = "spend", nil
+		}
+	}
 	res.Summary = er.Summary
 	res.LogTail = er.LogTail
+	res.Usage, res.Turns = er.Usage, er.Rounds // the pull request quotes them; the result's total is settled on the way out
 	if err != nil {
 		rep.Phase("engine", "failed", err.Error())
 		if !stopped(ctx, res) {
@@ -442,13 +483,16 @@ func (r *Runner) execute(ctx context.Context, claim *app.JobClaim, rep *Reporter
 		rep.Phase("engine", "failed", cut(er.Summary, 300))
 		res.Status, res.Error = app.JobFailed, app.JobError{Code: "engine_error", Message: cut(er.Summary, 1500)}
 		return
-	case "budget", "max_rounds":
+	case "budget", "max_rounds", "spend":
 		// Not a failure: what the engine had changed is committed and opened as a draft. The
 		// caveat travels as a note, so a job that produced a pull request does not read as an
 		// error in the thread and the console.
 		note := "the engine reached its time or tool-call limit before finishing on its own"
-		if er.Stopped == "max_rounds" {
+		switch er.Stopped {
+		case "max_rounds":
 			note = fmt.Sprintf("the engine used all %d turns before finishing on its own", maxRoundsFor(spec))
+		case "spend":
+			note = fmt.Sprintf("the engine was stopped when the job's model spend reached its $%.2f budget", claim.Limits.BudgetUSD)
 		}
 		res.Note = note + "; what it had changed was committed and pushed, so check the pull request for loose ends"
 		rep.Phase("engine", "ok", "stopped early: "+er.Stopped+"; committing what exists")
@@ -515,6 +559,10 @@ func (r *Runner) execute(ctx context.Context, claim *app.JobClaim, rep *Reporter
 	}
 
 	// 8. push
+	if prMode {
+		r.pushToPR(ctx, rep, res, repo, spec, baseSHA)
+		return
+	}
 	rep.Phase("push", "started", spec.Branch)
 	if err := repo.push(ctx, spec.Branch, spec.BaseBranch, spec.Constraints.BranchPrefix, spec.Constraints.BranchSuffix); err != nil {
 		rep.Phase("push", "failed", err.Error())
@@ -535,7 +583,7 @@ func (r *Runner) execute(ctx context.Context, claim *app.JobClaim, rep *Reporter
 	}
 	r.fillPackages(res)
 	pr, err := gh.createPR(ctx, spec.Repo, prInput{Title: prTitle(spec), Head: spec.Branch, Base: spec.BaseBranch, Draft: true,
-		Body: r.scrub.Clean(prBody(spec, res, er.Summary, recipe, claim.Job.ID, skipped, pkgs))})
+		Body: r.scrub.Clean(prBody(spec, res, er.Summary, recipe, claim.Job.ID, skipped, pkgs, claim.Price))})
 	if pr != nil {
 		res.PR = pr
 	}
@@ -547,20 +595,87 @@ func (r *Runner) execute(ctx context.Context, claim *app.JobClaim, rep *Reporter
 	rep.Phase("pr", "ok", pr.URL)
 	res.Status = app.JobSucceeded
 	res.TicketComment = ticketComment(spec, res)
+	headline(res)
+}
+
+// headline puts what the checks came to at the front of the summary, every package's that did not
+// end fine and then the primary's, so the first words anybody reads of a job are the caveat.
+func headline(res *app.JobResult) {
 	for _, p := range res.Packages {
-		switch p.StillFailing() {
-		case "tests":
-			res.Summary = "Tests in " + folderName(p.Workdir) + " still fail after the change. " + res.Summary
-		case "build":
-			res.Summary = "The build in " + folderName(p.Workdir) + " still fails after the change. " + res.Summary
+		if g, o := p.Verdict(); o != app.CheckFine {
+			res.Summary = verdictSentence(g, o, " in "+folderName(p.Workdir), p.Killed(g)) + ". " + res.Summary
 		}
 	}
-	switch {
-	case res.Tests.After.Ran && !res.Tests.After.OK:
-		res.Summary = "Tests still fail after the change. " + res.Summary
-	case res.Build.After.Ran && !res.Build.After.OK:
-		res.Summary = "The build still fails after the change. " + res.Summary
+	if g, o, killed := primaryVerdict(res); o != app.CheckFine {
+		res.Summary = verdictSentence(g, o, "", killed) + ". " + res.Summary
 	}
+}
+
+// pushToPR ends a job asked for on a pull request (app.JobModePR): the commit goes onto the pull
+// request's own branch and nothing is opened. A change that broke a check that passed before it is
+// not pushed — opened as a draft of its own, such a change waits for somebody to look at it; pushed
+// to the branch somebody is working on, it is in their way before anybody has — and the job fails
+// saying which, with its diff already delivered for whoever asked to read.
+func (r *Runner) pushToPR(ctx context.Context, rep *Reporter, res *app.JobResult, repo *Repo, spec app.JobSpec, start string) {
+	r.fillPackages(res)
+	if gate := brokenGate(res); gate != "" {
+		msg := fmt.Sprintf("the change broke the %s, which passed before it, so it was not pushed to %s", gate, spec.Branch)
+		rep.Phase("push", "skipped", msg)
+		res.Status, res.Error = app.JobFailed, app.JobError{Code: "checks_broken", Message: msg}
+		return
+	}
+	base := ""
+	if spec.PR != nil {
+		base = spec.PR.Base
+	}
+	rep.Phase("push", "started", spec.Branch)
+	moved, err := repo.pushOnto(ctx, spec.Branch, base, start)
+	if err != nil {
+		rep.Phase("push", "failed", err.Error())
+		if !stopped(ctx, res) {
+			failWith(res, err)
+		}
+		return
+	}
+	res.Branch = spec.Branch
+	res.HeadSHA = repo.headSHA(ctx)
+	if moved != "" {
+		note := fmt.Sprintf("somebody pushed to %s while the job worked, so the change was replayed onto %s after its checks had run: they describe the branch as it was before", spec.Branch, cut(moved, 12))
+		res.Note = strings.TrimPrefix(res.Note+"; "+note, "; ")
+		rep.Warn(note)
+	}
+	rep.Phase("push", "ok", cut(res.HeadSHA, 12))
+	rep.Phase("pr", "skipped", "committed to the pull request's own branch")
+	res.Status = app.JobSucceeded
+	headline(res)
+}
+
+// brokenGate is the first gate the change broke — the build or the tests passed before it and fail
+// after it, or more of them fail — in the primary package and then each other one checked, named
+// for a sentence; "" when the change broke none. A check that failed before as well, or did not
+// finish, is a caveat on the job, not a reason to keep its change off the branch.
+func brokenGate(res *app.JobResult) string {
+	broke := func(c app.JobCheck) bool {
+		o := c.Outcome()
+		return o == app.CheckBroken || o == app.CheckWorse
+	}
+	for _, g := range []struct {
+		name  string
+		check app.JobCheck
+	}{{"build", res.Build}, {"tests", res.Tests}} {
+		if broke(g.check) {
+			return g.name
+		}
+	}
+	for _, p := range res.Packages {
+		if broke(p.Build) {
+			return "build in " + folderName(p.Workdir)
+		}
+		if broke(p.Tests) {
+			return "tests in " + folderName(p.Workdir)
+		}
+	}
+	return ""
 }
 
 func hasLint(pkgs []*pkgRun) bool {
@@ -667,11 +782,23 @@ func (r *Runner) gate(ctx context.Context, ws *Workspace, rep *Reporter, res *ap
 	rep.Phase(phase, "started", s.String())
 	out := runStep(ctx, ws, s, cap)
 	rep.Tests(stepLine(strings.ReplaceAll(phase, "_", " "), out))
-	if out.OK {
+	before := strings.HasSuffix(phase, "_before")
+	switch {
+	case out.OK:
 		rep.Phase(phase, "ok", "")
-	} else if strings.HasSuffix(phase, "_before") {
+	case out.Killed != "":
+		// Skipped, not failed: the thread's checklist must not mark the change as failing a check
+		// that never got to the end.
+		when := "after the change; opening a draft anyway"
+		if before {
+			when = "before the change"
+		}
+		rep.Phase(phase, "skipped", name+" did not finish "+when+" (killed: "+out.Killed+")")
+	case before:
 		rep.Phase(phase, "failed", name+" fails before the change (that may be the bug)")
-	} else {
+	case phase == "build_after" && res.Build.Before.OK, phase == "test_after" && res.Tests.Before.OK:
+		rep.Phase(phase, "failed", name+" fails after the change, and passed before it; opening a draft anyway")
+	default:
 		rep.Phase(phase, "failed", name+" still fails; opening a draft anyway")
 	}
 	return out

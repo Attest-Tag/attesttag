@@ -90,7 +90,7 @@ database that already has rows in it.
 ## The fix-job worker
 
 Optional and off by default. `worker.sh` builds the worker image on Cloud Build and deploys it as
-the Cloud Run Job `attesttag-worker` (2 CPU, 4 GiB), under a service account of its own that is
+the Cloud Run Job `attesttag-worker` (2 CPU, 8 GiB), under a service account of its own that is
 granted nothing:
 
 ```bash

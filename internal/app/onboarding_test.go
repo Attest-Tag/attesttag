@@ -428,3 +428,33 @@ func TestAskInviteDoesNotCarryMrkdwnFromAName(t *testing.T) {
 		t.Errorf("the name should still be shown, escaped: %s", sent[0])
 	}
 }
+
+// A colleague who signs up on their own, from a workspace another organisation already connected,
+// is not sent on to Slack's consent screen: the install cannot be theirs, and the walk says so and
+// offers the way in. Sent on, they met a refusal that — before refused installs stopped giving the
+// token back — took the bot out of the workspace for the organisation that had installed it.
+func TestNeedsInstallLeavesATakenWorkspaceToTheWalk(t *testing.T) {
+	b, _, st := installTestBot(t)
+	ctx := context.Background()
+	owner, _, _ := seedOrgAs(t, st, "owner@acme.test", RoleAdmin)
+	enc, _ := b.sealer.Seal([]byte("xoxb-acme"))
+	if err := st.SaveTeam(ctx, &Team{TeamID: "T_ACME", OrgID: owner, Name: "Acme"}, enc); err != nil {
+		t.Fatal(err)
+	}
+	orgID, userID, _ := seedOrgAs(t, st, "colleague@acme.test", RoleAdmin)
+	if err := st.AddIdentity(ctx, userID, ProviderSlack, slackSubject("T_ACME", "U_COLLEAGUE")); err != nil {
+		t.Fatal(err)
+	}
+	u := &AdminUser{ID: userID, OrgID: orgID, Via: "slack"}
+	b.permissionsFor(ctx, u)
+	if b.needsInstall(ctx, u) {
+		t.Error("a colleague whose workspace another organisation holds was sent on to install it")
+	}
+	// Disconnected there, it is nobody's: the install is theirs to try.
+	if err := st.RevokeTeam(ctx, "T_ACME", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if !b.needsInstall(ctx, u) {
+		t.Error("a workspace nobody holds any more should be offered to the admin who signed in from it")
+	}
+}

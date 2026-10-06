@@ -15,8 +15,11 @@ and generates `MASTER_KEY`. It refuses to overwrite an existing `.env`, which is
 a second run that generated a new key would leave every connected workspace and saved connection
 undecryptable, with nothing to say so until something tried to use one.
 
-No release publishes an image yet, so there is none to pull. Build one from this checkout before
-the first `up -d`, and put `ATTEST_IMAGE=attesttag-local` in `.env` so that compose runs it:
+Compose pulls the latest release of `ghcr.io/attest-tag/attesttag`. Put `ATTEST_VERSION=0.3` in
+`.env` to stay on one minor version, whose later releases only fix things; what each release
+changes, and what an upgrade asks of you, is in [`CHANGELOG.md`](../../CHANGELOG.md). To run
+this checkout instead, build it before the first `up -d`, and put `ATTEST_IMAGE=attesttag-local`
+in `.env` so that compose runs it:
 
 ```bash
 docker build -t attesttag-local .
@@ -118,9 +121,8 @@ the bot logs the trade on every boot in that mode.
 Two things the overlay does not do for you:
 
 - **The image.** It runs `ghcr.io/attest-tag/attesttag-worker:latest` unless
-  `ATTEST_WORKER_IMAGE` names another, and that image is published only by a release that
-  publishes images, for `linux/amd64` only; none has yet. Until one does — and on an arm64 host
-  (Apple silicon, Graviton) after it too — build it here and put
+  `ATTEST_WORKER_IMAGE` names another, and each release publishes that image for `linux/amd64`
+  only. On an arm64 host (Apple silicon, Graviton), build it here and put
   `ATTEST_WORKER_IMAGE=attesttag-worker` in `.env`.
   `make worker-build` runs `docker build -f Dockerfile.worker -t attesttag-worker .`.
 - **Upgrades.** The bot pulls the image only when the daemon does not have it, so after an

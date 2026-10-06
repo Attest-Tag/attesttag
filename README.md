@@ -51,8 +51,9 @@ app's signing secret, client id and client secret into `.env` with a model key
 and its address, alone. Open the console and sign up; the first sign-up founds the deployment
 and everybody after arrives by invitation.
 
-No release publishes an image yet (0.1.0 is the source alone), so there is none to pull. Build
-one from the checkout — `docker build -t attesttag-local .` — and put
+That runs the latest release. To stay on one minor version, put `ATTEST_VERSION=0.3` in `.env`;
+[`CHANGELOG.md`](CHANGELOG.md) says what each release changes and what an upgrade asks of you.
+To run this checkout instead, build it — `docker build -t attesttag-local .` — and put
 `ATTEST_IMAGE=attesttag-local` in `.env`.
 
 The one thing that trips people up: **Slack will not deliver events to localhost**, and there is
@@ -77,11 +78,12 @@ version.
 | [**Azure**](deploy/azure/README.md) | Container Apps, with Postgres or a bucket | `./deploy/azure/containerapps.sh` |
 | [**Kubernetes**](deploy/helm/README.md) | anywhere, one chart, three shapes | `helm install` |
 
-They are all the same container: built from this checkout for now, and
-`ghcr.io/attest-tag/attesttag` once a release publishes it, for `linux/amd64` and `linux/arm64`,
+They are all the same container — `ghcr.io/attest-tag/attesttag`, published from 0.3.0 on by each
+[release](https://github.com/Attest-Tag/attesttag/releases) for `linux/amd64` and `linux/arm64`,
 signed, with provenance and an SBOM. (The fix-job worker images beside it are `linux/amd64`
 only.) Point it at a managed Postgres and a bucket and it runs somewhere none of these folders
-mentions.
+mentions. Each release also carries the binary itself, for Linux and macOS, to run without a
+container.
 
 **Three things decide whether a deployment works**, and they are the same everywhere: a public
 HTTPS origin; **always-on CPU**, because the Slack dispatcher, the routine scheduler and the

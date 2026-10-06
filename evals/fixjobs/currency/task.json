@@ -1,0 +1,5 @@
+{
+  "title": "Invoices ignore the customer's currency",
+  "requirement": "Every invoice is rendered in USD even for customers billed in EUR or GBP. Customer already has a currency field. format_money in billing/money.py always prints a dollar sign; it should take the currency code and print the right symbol ($ for USD, € for EUR, £ for GBP, and the code followed by a space for anything else, e.g. 'JPY 1,000.00'). Invoice.render in billing/invoice.py and the receipt line in billing/receipt.py must pass the customer's currency through. Keep the existing two-decimal, comma-grouped format.",
+  "acceptance": ["format_money(1234.5, 'EUR') == '€1,234.50'", "invoices and receipts use the customer's currency", "unknown codes print as the code and a space"]
+}

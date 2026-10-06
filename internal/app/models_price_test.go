@@ -114,3 +114,33 @@ func TestAnEstimateStaysAnEstimateWhenAdded(t *testing.T) {
 		t.Error("a total with an estimated part lost the mark")
 	}
 }
+
+// Google's and DeepSeek's own endpoints name their models without a vendor; the catalogue lists
+// them under one. A DeepSeek name without a version is an alias for whatever DeepSeek serves
+// today, and the catalogue's entry of that name is one older snapshot at its own price, so it is
+// not priced from there.
+func TestPriceOfFindsGeminiAndDeepSeekByTheirOwnNames(t *testing.T) {
+	l := catalogueLLM(t, `{"data":[
+ {"id":"google/gemini-3.8-flash","pricing":{"prompt":"0.00000075","completion":"0.00000375","input_cache_read":"0.000000075"}},
+ {"id":"deepseek/deepseek-v4-pro","pricing":{"prompt":"0.0000002088","completion":"0.0000004176"}},
+ {"id":"deepseek/deepseek-chat","pricing":{"prompt":"0.0000002574","completion":"0.0000010287"}}
+]}`)
+	ctx := context.Background()
+	for _, c := range []struct {
+		model string
+		ok    bool
+		in    float64
+	}{
+		{"gemini-3.8-flash", true, 0.75e-6},
+		{"models/gemini-3.8-flash", true, 0.75e-6}, // as Google's own list spells it
+		{"deepseek-v4-pro", true, 0.2088e-6},
+		{"deepseek-chat", false, 0},  // an alias: the catalogue's entry is another model's price
+		{"deepseek-flash", false, 0}, // an alias, and not listed anyway
+		{"gemini-9-ultra", false, 0},
+	} {
+		p, ok := l.priceOf(ctx, c.model)
+		if ok != c.ok || !near(p.In, c.in) {
+			t.Errorf("priceOf(%q) = %+v, %v; want in=%g, %v", c.model, p, ok, c.in, c.ok)
+		}
+	}
+}

@@ -41,11 +41,59 @@ has what each platform grants the bot and the worker.
 An organisation on its own model key ([plans.md](plans.md#its-own-model-key)) runs its jobs on that
 key and its endpoint: nothing is minted on the deployment's provisioning account, and a job keeps
 the key it was dispatched on — removing the key, or bringing one, between dispatch and claim fails
-the job with the reason. The key sits in the job's environment while the repository's own code
-runs, so it is used for jobs only while the key form's **Fix jobs** switch is on. It cannot be
-capped per job; the worker reports the tokens it used and the bot prices them from the catalogue,
-which is what the 1.25× budget cancel reads. The worker meters a key's spend itself only when the
-key was minted for that job — a shared key's running total is every other caller's spend too.
+the job with the reason. It is used for jobs only while the key form's **Fix jobs** switch is on.
+It cannot be capped per job at the provider; the worker's model proxy stops the engine at the job's
+budget instead, from what each call cost (below), and the bot still cancels a job at 1.25× it.
+
+### What a job costs
+
+A coding agent sends its whole conversation with every turn, so a job of a hundred turns reads
+millions of input tokens — mostly the same text again. A provider that caches that prefix charges a
+fraction for it, and that is most of the difference between an expensive job and a long one.
+
+**The model proxy.** The engine never talks to the provider. The worker starts a small proxy on its
+own loopback, and the engine is configured with that address and a token good for that port for the
+life of the job — so the real model key never enters the sandbox where the repository's code and
+the engine's shell commands run. The proxy adds three things to every call on OpenRouter: the job's
+`session_id`, which keeps the job on the provider endpoint holding its cache instead of balancing
+turns across every provider of the model; the providers named in `worker_providers`, in order; and a
+request for usage accounting, so each answer carries what it cost, how much of the prompt came from
+cache and who served it. That is the bill, on any key — the shared one included — and it is reported
+call by call, so the job's cost is current while it runs. When it reaches the job's budget the proxy
+refuses further calls and stops the engine, and what the engine had changed is committed and opened
+as a draft with a note saying why it stopped. The job's log ends the run with one line: calls, the
+share served from cache, the money and the providers (`model calls: 6 · 125,467 in (83% from cache)
+/ 2,452 out · $0.0547 as billed · served by Mistral 6`).
+
+The cached share is recorded on the job and shown wherever its cost is: the Slack report
+("9.8M in (90% cached) / 74k out"), the console's job page, the reply on a pull request a fix was
+pushed to, and the **Cost** table that ends a pull request the job opens — turns, input, cached
+input, output, and an estimate at the model's list price, since the pull request is written before
+the bill is settled. On an endpoint that reports no cost the bot prices the tokens from its
+catalogue, cached ones at the cache-read rate.
+
+### Engines and long jobs
+
+Two coding agents run inside the worker, chosen under Settings → Workers → Coding agent: **Qwen Code**
+and **pi**, a smaller agent with seven tools and a short system prompt. Both get the same brief, the
+same proxy and the same turn cap. Both are told to compact: the conversation is summarised once it
+nears a 160,000-token window, rather than the model's own — on a model with a million-token window
+that would never happen, and every file read early in a long job would ride along in every later
+turn. Qwen Code also runs without its sub-agent, web and memory tools, and cuts a tool's output at
+6,000 characters.
+
+The brief starts the engine where the work is. Files the request names — a path, the tail of one in a
+stack trace, a file name, or a component's name that matches a file — are looked up in the clone and
+listed first, and the engine is told how to spend turns: several reads in one turn, grep before
+whole files, a file read once, and installed dependencies left alone.
+
+A repository's Node processes get a V8 heap of about 60% of the container's memory
+(`NODE_OPTIONS=--max-old-space-size`, unless the worker's own environment sets `NODE_OPTIONS`): Node
+sizes its default from the machine, and a large front end's production build ran out of it with
+most of the container unused.
+
+To compare engines, models or providers on the same work, `evals/fixjobs` holds small repositories
+with a task each and hidden tests the engine never sees; see [evals/README.md](../evals/README.md).
 
 ### A job from claim to draft pull request
 
@@ -61,9 +109,12 @@ organisation's convention — `bugfix/fix-12-retry-storm-attest_tag` by default:
 the kind of change, `fix-<id>-<slug>`, then the suffix that marks it as the bot's (see
 `worker_branch_prefix` in [configuration](configuration.md#console-settings)) — and opens a
 **draft** pull request whose body carries the brief, the evidence, the files changed and every gate
-before and after, with an honest note on top when one still fails or none could be found. Every
-pull request is a draft, and no setting changes that. Build output and lockfiles the install step
-generated are never committed. Progress comes back as events; one checklist message in the thread
+before and after, with an honest note on top when one fails or did not finish, or none could be
+found — and whether a failing one passed before the change, failed worse after it, or was failing
+already. Every pull request is a draft, and no setting changes that; on a repository under
+[code review](code-review.md) it is reviewed like anybody's once somebody marks it ready for review.
+Build output and lockfiles the install step generated are never committed. Progress comes back as
+events; one checklist message in the thread
 (`○ clone → ○ set up and check → ○ fix → ○ build and test → ○ pull request`) is edited as they
 arrive, and the result is posted with the PR link, the diff and the log as files. *stop* in the
 thread, `!job cancel <id>` or the console's Cancel end a job; the worker learns on its next event
@@ -71,12 +122,39 @@ and pushes nothing further. A job that goes quiet for five minutes is marked sta
 the platform that started it, and given up on after fifteen more; jobs survive a bot restart
 because their rows and the checklist message live in the database.
 
+### Jobs asked for on a pull request
+
+A job can also be asked for on GitHub, from a [code review](code-review.md#fixing-a-finding-on-the-pull-request)
+finding: a ticked box on the finding's comment, or `@<app> fix` in its thread or on the
+conversation, by somebody GitHub says can push to the repository. There is no Confirm card — the
+person asking on the pull request is the one who could have pushed the change themselves — and no
+chat thread: the job answers on the pull request and is followed in the console's *Jobs*, where it
+reads *Asked for on GitHub*. Its brief is the findings as the review stored them: what is wrong,
+where, the code they quote, the change a finding suggested, and the asker's own words.
+
+What it does differently from a job asked for in chat:
+
+- it clones the pull request's own branch, and its change is one more commit on top of it — no new
+  branch, no pull request of its own. It pushes only to that branch, never to the one the pull
+  request merges into, and only with its commit built on the head it started from. It never forces:
+  when somebody pushed to the branch meanwhile, its commit is replayed once onto theirs and pushed
+  again, with a note that its checks ran before the replay; a replay that conflicts pushes nothing.
+- it pushes as the App, through the installation the review came through, whatever stored
+  connection the repository has — that connection still lends its recipe and its worker image.
+- a change that breaks a check that passed before it is not pushed. In chat such a change is still
+  opened as a draft, which waits for somebody to look; on a branch somebody is working on it would
+  be in their way first. The diff goes back with the answer instead.
+- it runs inside the life of an installation token, like any job on an App connection.
+
+Its cost is logged where the review's is, under the pull request.
+
 ### The sandbox user
 
 **The repository's code never runs as the worker.** In every container mode the worker drops to an
 unprivileged sandbox user (`WORKER_SANDBOX_UID`, 10002 in the image) for everything the repository
-decides — its install, build and tests, and the engine — and that user cannot read the job token or
-the environment the repository token travels in. Every git command after the clone is handed over
+decides — its install, build and tests, and the engine — and that user cannot read the job token,
+the environment the repository token travels in, or the model key, which stays with the worker's
+model proxy. Every git command after the clone is handed over
 (stage, diff, commit, push) runs as that same user, with hooks, `core.fsmonitor`, credential
 helpers, commit signing and external diff drivers pinned off on the command line, so a
 `.git/config` the repository's own code rewrote cannot run anything as root. `WORKER_MODE=local`
@@ -115,8 +193,12 @@ What a job runs is a **recipe**, and three things can decide it, in this order:
    correcting the test command does not cost you the rest.
 
 Whichever decided it, the resolved recipe reaches the engine's prompt — the exact commands, the
-directory, and what they said before the change — so it runs the same checks the harness will
-grade it with instead of going looking for them.
+directory, what they said before the change and how long they took — so it knows the checks the
+harness will grade it with instead of going looking for them. It checks its change with the
+narrowest run that covers it, such as the tests for the files it changed or the linter on just
+those files, and runs a whole command itself only when it passed before the change in under two
+minutes; the harness runs every one after it stops either way. A command the sandbox stops is not
+worked around: the agent says in its summary what it could not check.
 
 #### Monorepos and more than one package
 
@@ -158,7 +240,12 @@ without permission to sign, jobs simply install from cold.
 A gate that cannot run is never reported as a gate that failed. A missing toolchain, a suite that
 needs a database the worker cannot start, a monorepo where nothing said which package, a package
 the change touched outside the brief — each comes back as itself, in the pull request and in the
-thread, together with what would fix it.
+thread, together with what would fix it. Nor is a gate that could not finish: a suite or a build
+the worker's sandbox stopped partway — killed, most often for want of memory, which the container's
+own count of out-of-memory kills says when it can be read — is reported as *did not finish
+(killed: out of memory)*, never as a failure, and the pull request says it did not check the
+change. The coding agent is told the same of a check that was killed before its change, and to
+check the change with a narrower run, such as only the tests for the files it touches.
 
 #### The coding agent and its model key
 

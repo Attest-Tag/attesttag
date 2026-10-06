@@ -88,6 +88,7 @@ func (b *Bot) reviewRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/review-types/skill-check", manage(b.handleReviewSkillCheck))
 	mux.HandleFunc("GET /api/review-types/{id}", view(b.handleReviewTypeGet))
 	mux.HandleFunc("PUT /api/review-types/{id}", manage(b.handleReviewTypePut))
+	mux.HandleFunc("DELETE /api/review-types/{id}", manage(b.handleReviewTypeDelete))
 	mux.HandleFunc("POST /api/review-types/{id}/reset", manage(b.handleReviewTypeReset))
 	mux.HandleFunc("GET /api/review-types/{id}/versions", view(b.handleReviewTypeVersions))
 	mux.HandleFunc("GET /api/review-types/{id}/versions/{version}", view(b.handleReviewTypeVersion))
@@ -786,6 +787,12 @@ func reviewTierReach(changed []string, before, after review.Effective, byField b
 	}
 	if !off && after.Trigger == review.TriggerPush && before.Trigger != review.TriggerPush {
 		add("trigger")
+	}
+	// Fixes on lets the App push commits to the pull request's own branch when somebody with write
+	// access asks: a write to the repository's code, which is the connection's to allow, as posting
+	// live is. Turning them off asks nothing more.
+	if !off && after.Fixes && !before.Fixes {
+		add("fixes")
 	}
 	// Branch by branch. The comparison is of the whole ordered list, since the first match wins: the
 	// same rules in another order, or one fewer above a live one, send pull requests elsewhere. It
@@ -2379,6 +2386,49 @@ func (b *Bot) handleReviewTypeReset(w http.ResponseWriter, r *http.Request) {
 		// id the copy knows, so the copy's are deleted and these are written new.
 		return shipped
 	}, row.Version, false, "review.type_reset", nil)
+}
+
+// handleReviewTypeDelete deletes a type of the organisation's own, against ?version=, the version
+// the person was looking at. A built-in, or the organisation's copy of one, is turned off or reset
+// instead. A type a branch rule still names is refused: deleting it would leave the rule naming
+// nothing, which a pull request's summary could only call "no such review type".
+func (b *Bot) handleReviewTypeDelete(w http.ResponseWriter, r *http.Request) {
+	ctx, orgID := r.Context(), orgOf(r)
+	row, bt, err := b.reviewTypeTarget(ctx, orgID, r.PathValue("id"))
+	if err != nil {
+		reviewAPIError(w, err)
+		return
+	}
+	if bt != nil {
+		bad(w, errors.New("a built-in type is not deleted; turn it off, or reset it to the built-in"))
+		return
+	}
+	version, err := strconv.Atoi(r.URL.Query().Get("version"))
+	if err != nil || version < 1 {
+		bad(w, errors.New("send ?version=, the version of the type being deleted"))
+		return
+	}
+	t, err := b.reviewTreeIndex(ctx, orgID)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	if n := reviewTypeUsage(t)[row.Key]; n > 0 {
+		rules := "branch rules name"
+		if n == 1 {
+			rules = "branch rule names"
+		}
+		writeJSON(w, http.StatusConflict, map[string]any{"error": fmt.Sprintf(
+			"%d %s %s; take it out of them first, or turn the type off instead", n, rules, row.Key)})
+		return
+	}
+	if err := b.store.DeleteReviewType(ctx, orgID, row.ID, version, reviewActor(r)); err != nil {
+		reviewAPIError(w, err)
+		return
+	}
+	b.audit(r, "review.type_deleted", AuditEvent{TargetKind: "review_type", TargetID: row.PublicID, TargetName: row.Key,
+		Details: auditDetails(map[string]any{"version": row.Version})})
+	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
 func (b *Bot) handleReviewTypeVersions(w http.ResponseWriter, r *http.Request) {

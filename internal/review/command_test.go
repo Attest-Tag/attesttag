@@ -121,3 +121,36 @@ func TestParseCommandKeepsTheTextAsWritten(t *testing.T) {
 		t.Errorf("a bare mention has no text, got %q", cmd.Text)
 	}
 }
+
+// A fix is asked for by a word everybody already uses, and whatever follows the severities is the
+// asker's own words for the worker rather than a reason to read the line as a question.
+func TestParseCommandFix(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		verb Verb
+		sevs []Severity
+	}{
+		{"plain", "@slug fix", VerbFix, nil},
+		{"please fix", "@slug please fix", VerbFix, nil},
+		{"fix this please", "@slug fix this please", VerbFix, nil},
+		{"fix it.", "@slug fix it.", VerbFix, nil},
+		{"fix all findings", "@slug fix all findings", VerbFix, nil},
+		{"severities", "@slug fix p0 p1", VerbFix, []Severity{P0, P1}},
+		{"severities in any case, once each", "@slug fix P1, p1 and p2", VerbFix, []Severity{P1, P2}},
+		{"words after the severities are the note", "@slug fix p1 but keep the old name", VerbFix, []Severity{P1}},
+		{"a sentence after fix is still a fix", "@slug fix this, keep the public API", VerbFix, nil},
+		{"the filler before a severity is skipped", "@slug fix the p1 only", VerbFix, []Severity{P1}},
+		{"a severity after other words is the note's", "@slug fix only the tenant check, the p2 can wait", VerbFix, nil},
+		{"fixed is a claim, not a request", "@slug fixed in abc123", VerbQuestion, nil},
+		{"fix in the middle is a question", "@slug can you fix this?", VerbQuestion, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cmd, ok := ParseCommand(c.body, "slug")
+			if !ok || cmd.Verb != c.verb || !slices.Equal(cmd.Severities, c.sevs) {
+				t.Errorf("got %v %s %q, want %s %q", ok, cmd.Verb, cmd.Severities, c.verb, c.sevs)
+			}
+		})
+	}
+}

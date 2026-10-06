@@ -92,50 +92,39 @@ type reviewMasker struct{ inPEM bool }
 func reviewOrphanPEMEnd(s string) bool { return pemEnd.MatchString(s) && !pemBegin.MatchString(s) }
 
 // line masks one line and says what kinds of credential it held, in words that name the kind and
-// never the value. The line keeps its place: a masked line is still exactly one line.
-func (m *reviewMasker) line(s string) (string, []string) {
+// never the value. The line keeps its place: a masked line is still exactly one line. fake is true
+// when every credential on the line is plainly made up (secretPlaceholder).
+func (m *reviewMasker) line(s string) (out string, kinds []string, fake bool) {
 	if m.inPEM {
 		if pemEnd.MatchString(s) {
 			m.inPEM = false
 		}
-		return reviewMask, []string{"a private key"}
+		return reviewMask, []string{"a private key"}, false
 	}
 	if loc := pemBegin.FindStringIndex(s); loc != nil && !pemEnd.MatchString(s[loc[1]:]) {
 		m.inPEM = true
-		return s[:loc[0]] + reviewMask, []string{"a private key"}
+		return s[:loc[0]] + reviewMask, []string{"a private key"}, false
 	}
-	var kinds []string
-	for _, re := range secretRes {
-		if hit := re.FindString(s); hit != "" {
-			kinds = append(kinds, secretKind(hit))
-			s = re.ReplaceAllString(s, reviewMask)
+	s, hits := redactWith(s, reviewMask)
+	fake = len(hits) > 0
+	for _, hit := range hits {
+		if k := hit.kind(); !slices.Contains(kinds, k) {
+			kinds = append(kinds, k)
 		}
+		fake = fake && secretPlaceholder(hit.Value)
 	}
-	return s, kinds
+	return s, kinds, fake
 }
 
-// secretKind names what a credential is from its shape alone, for a finding that must say what was
-// committed without saying what it was.
-func secretKind(hit string) string {
-	switch {
-	case strings.HasPrefix(hit, "xapp-"):
-		return "a Slack app token"
-	case strings.HasPrefix(hit, "xox"):
-		return "a Slack token"
-	case strings.HasPrefix(hit, "sk-"):
-		return "an API key"
-	case strings.HasPrefix(hit, "AKIA"):
-		return "an AWS access key"
-	case strings.HasPrefix(hit, "github_pat_"), strings.HasPrefix(hit, "gh"):
-		return "a GitHub token"
-	case strings.HasPrefix(hit, "atj1."):
-		return "an attest_tag worker token"
-	case strings.HasPrefix(hit, "atk1."):
-		return "an attest_tag API key"
-	case strings.HasPrefix(hit, "eyJ"):
-		return "a JWT"
-	}
-	return "a private key"
+// secretPlaceholderRe is a credential-shaped value that says it is made up — xoxb-DEMO-FAKE-0001,
+// AWS's own AKIA…EXAMPLE, sk-test-… — or counts, as a hand-typed fake does (1234567890,
+// abcdefghij). A random key holds none of these by chance often enough to matter.
+var secretPlaceholderRe = regexp.MustCompile(`(?i)fake|example|dummy|placeholder|sample|redacted|changeme|your|xxxx|test|demo|0123456|1234567|abcdefg`)
+
+// secretPlaceholder says whether one credential found is plainly not a real credential. It is
+// masked all the same; it is reported as a note rather than as a committed credential.
+func secretPlaceholder(hit string) bool {
+	return !strings.HasPrefix(hit, "-----") && secretPlaceholderRe.MatchString(hit)
 }
 
 // maskText masks a whole file's content, line for line, and returns the lines it masked (1-based).
@@ -144,7 +133,7 @@ func maskText(text string) (string, []int) {
 	var m reviewMasker
 	var hit []int
 	for i, l := range lines {
-		out, kinds := m.line(l)
+		out, kinds, _ := m.line(l)
 		if len(kinds) > 0 || out != l {
 			hit = append(hit, i+1)
 		}
@@ -164,16 +153,7 @@ func reviewSecretPath(p string) bool { return review.MatchAny(reviewSecretPaths,
 // reviewFixturePath is where a credential-shaped string is expected — a test's fake key, a
 // recorded response — so one found there is a note, not a P0 against the pull request.
 func reviewFixturePath(p string) bool {
-	if strings.HasSuffix(p, "_test.go") {
-		return true
-	}
-	for _, seg := range strings.Split(p, "/") {
-		switch seg {
-		case "testdata", "fixtures", "__fixtures__":
-			return true
-		}
-	}
-	return false
+	return review.MatchAny(reviewTestPaths, p)
 }
 
 // ---- text written to the reviewer ----
@@ -206,6 +186,7 @@ func reviewInjectionLine(s string) bool {
 type reviewSecretHit struct {
 	Line  int // head line number
 	Kinds []string
+	Fake  bool // every credential on the line is a placeholder (secretPlaceholder)
 }
 
 // reviewFile is one changed file as the review holds it. File is the MASKED diff — its hunks are
@@ -240,10 +221,12 @@ func (f *reviewFile) hunkAt(side review.Side, line int) int {
 	return -1
 }
 
-// secretAt records a credential on an added line, once per line, with the kinds it held.
-func (f *reviewFile) secretAt(line int, kinds []string) {
+// secretAt records a credential on an added line, once per line, with the kinds it held. A line
+// stays fake only while everything found on it is.
+func (f *reviewFile) secretAt(line int, kinds []string, fake bool) {
 	for i := range f.secrets {
 		if f.secrets[i].Line == line {
+			f.secrets[i].Fake = f.secrets[i].Fake && fake
 			for _, k := range kinds {
 				if !slices.Contains(f.secrets[i].Kinds, k) {
 					f.secrets[i].Kinds = append(f.secrets[i].Kinds, k)
@@ -252,14 +235,14 @@ func (f *reviewFile) secretAt(line int, kinds []string) {
 			return
 		}
 	}
-	f.secrets = append(f.secrets, reviewSecretHit{Line: line, Kinds: kinds})
+	f.secrets = append(f.secrets, reviewSecretHit{Line: line, Kinds: kinds, Fake: fake})
 }
 
 // maskLine replaces one line of hunk hi with the mask, the way a credential found on it would be.
 func (f *reviewFile) maskLine(h *review.Hunk, hi, li int) {
 	l := &h.Lines[li]
 	if l.Kind == '+' {
-		f.secretAt(l.New, []string{"a private key"})
+		f.secretAt(l.New, []string{"a private key"}, false)
 	}
 	l.Text, f.masked[hi] = reviewMask, true
 }
@@ -324,7 +307,7 @@ func reviewParseFile(gf review.File, e review.Effective) *reviewFile {
 				}
 				continue
 			}
-			out, kinds := m.line(l.Text)
+			out, kinds, fake := m.line(l.Text)
 			if whole && strings.TrimSpace(l.Text) != "" {
 				out = reviewMask
 			}
@@ -336,7 +319,7 @@ func reviewParseFile(gf review.File, e review.Effective) *reviewFile {
 				continue
 			}
 			if len(kinds) > 0 {
-				f.secretAt(l.New, kinds)
+				f.secretAt(l.New, kinds, fake)
 			}
 			if reviewInjectionLine(l.Text) {
 				f.inject = append(f.inject, l.New)

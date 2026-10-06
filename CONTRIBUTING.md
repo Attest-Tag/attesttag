@@ -72,7 +72,8 @@ almost certainly found something real; read what it says before working around i
 The code is commented more heavily than most, and in a particular way: comments say **why**,
 not what. A comment that restates the line below it is noise, but the reason a timeout is 9
 seconds, or why a lease is released before a shutdown completes, is the thing a reader cannot
-recover from the code. Match the surrounding density.
+recover from the code. Match the surrounding density. Keep comments generic as well: explain
+the case a line handles, never the person, company or chat thread where it first came up.
 
 The same goes for commit messages. They are prose — a sentence saying what changed, then a
 paragraph or two on what was wrong before and why this is the fix. The subject is a sentence
@@ -103,6 +104,9 @@ Small and single-purpose travels fastest. Please:
   `.git/info/public-denylist` (your own cloud project, service URL and the like)
 - add a test when you fix a bug — the test is how the fix stays fixed
 - say in the description what you saw go wrong, not only what you changed
+- keep it generic: commits, descriptions and comments are public, so describe the problem and
+  its reproduction without personal data, company or customer details, or links to chat
+  threads and internal tickets
 
 For anything large, open an issue first and let's agree on the shape before you spend a weekend
 on it. That is for your benefit, not the project's.
@@ -111,17 +115,19 @@ on it. That is for your benefit, not the project's.
 
 For maintainers. A release is a `v*` tag on `main`, and the tag is the whole ceremony:
 [`release.yml`](.github/workflows/release.yml) runs the suite, publishes the images and the Helm
-chart to GHCR, builds the binaries with `make dist`, and creates the GitHub release. Before
-tagging, add the version's section to [`CHANGELOG.md`](CHANGELOG.md): the workflow refuses a tag
-without one, and the release notes open with it. A patch release never carries a migration,
+chart to GHCR, builds the binaries with `make dist`, and creates the GitHub release. It refuses a
+tag whose commit is not on `main`, so images, the chart and `:latest` only ever come from `main`:
+merge `testing` into `main` first, then tag the merge. Before that, add the version's section to
+[`CHANGELOG.md`](CHANGELOG.md): the workflow refuses a tag without one, and the release notes open
+with it. A patch release never carries a migration,
 because deployments pinned to a minor version restart onto it unread. When the workflow itself
 has changed, tag a release candidate first (`v0.2.0-rc.1`), which publishes everything except
 `:latest` and is marked as a prerelease.
 
-0.1.0 was released as the source alone: the release workflow was disabled first
-(`gh workflow disable release.yml`), so its tag built nothing, and the GitHub release was made
-by hand with its CHANGELOG section as the notes. `gh workflow enable release.yml` turns the
-builds back on for the next tag.
+0.1.0 and 0.2.0 were released as the source alone: the release workflow was disabled
+(`gh workflow disable release.yml`), so their tags built nothing, and their GitHub releases were
+made by hand with the CHANGELOG section as the notes. 0.3.0 is the first release the workflow
+published.
 
 ## Security
 

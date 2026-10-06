@@ -779,6 +779,10 @@ func TestReviewEngineCommittedSecretIsAP0ThatNeverEchoesIt(t *testing.T) {
 	fx := totalsFixture()
 	fx.addFile("config/github.go", "package config\n\nconst Token = \""+token+"\"\n\nfunc Owner() string { return \"acme\" }\n")
 	fx.addFile("config/github_test.go", "package config\n\nconst fakeToken = \""+token+"\"\n")
+	// A Python test is a test as much as a Go one, and sample data that names its token fake is not
+	// a leak: both were once reported as P0s.
+	fx.addFile("tests/unit/test_alert.py", "TOKEN = \""+token+"\"\n")
+	fx.addFile("site/scenarios/demo.json", "{\"auth\": \"Bearer "+"xoxb-DEMO-FAKE-0001\"}\n")
 	rig := newReviewRig(t, fx)
 	inMasked := map[string]any{
 		"path": "config/github.go", "side": "RIGHT", "line": 5, "severity": "P1", "category": "bug", "symbol": "Owner",
@@ -814,9 +818,11 @@ func TestReviewEngineCommittedSecretIsAP0ThatNeverEchoesIt(t *testing.T) {
 		strings.Contains(strings.Join(sn.Lines, "\n"), token) {
 		t.Errorf("the committed credential's snippet: %+v", sn)
 	}
-	note := by["config/github_test.go Credential-shaped value in a test fixture"]
-	if note.Kind != reviewKindNote || note.Scored() {
-		t.Errorf("the fixture's credential: %+v", note)
+	for _, k := range []string{"config/github_test.go Credential-shaped value in a test fixture",
+		"tests/unit/test_alert.py Credential-shaped value in a test fixture", "site/scenarios/demo.json Placeholder credential"} {
+		if note := by[k]; note.Kind != reviewKindNote || note.Scored() {
+			t.Errorf("%s: %+v", k, note)
+		}
 	}
 	if f := by["config/github.go Owner is hard-coded"]; f.Where != reviewWhereMasked || f.Placement != review.PlacementSummary {
 		t.Errorf("a finding in a hunk with a masked credential was placed %+v; want the summary only", f)

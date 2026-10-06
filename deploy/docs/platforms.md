@@ -13,8 +13,9 @@ Three things decide whether a platform works, and they are the same three everyw
    [`storage.md`](storage.md), which is the detail behind every row below.
 
 Everything else is a container, so the choice is mostly about which of your bills it lands on.
-No image has been published yet, so every platform runs an image built from this checkout, and
-each folder's README says how.
+Every platform runs the released image, `ghcr.io/attest-tag/attesttag`, except Google Cloud,
+whose script builds this checkout on Cloud Build; each folder's README says how to run one built
+from this checkout instead.
 
 | | Database | Documents | More than one instance |
 |---|---|---|---|
@@ -74,8 +75,7 @@ instance.
 DOMAIN=bot.example.com ./deploy/aws/fargate.sh
 ```
 
-It mirrors the published image into ECR, so until one is published add `IMAGE_SOURCE=build`,
-which builds this checkout instead.
+It mirrors the published image into ECR; `IMAGE_SOURCE=build` builds this checkout instead.
 
 **Not App Runner**, though it looks like the obvious Cloud Run analogue. App Runner throttles an
 instance's CPU whenever it is not serving a request and gives you no way to turn that off — so
@@ -114,8 +114,8 @@ the task count back to one, so raise it after each deploy:
 DOMAIN=bot.example.com ./deploy/azure/containerapps.sh
 ```
 
-It runs the published image, so until one is published `IMAGE=` has to name one built from this
-checkout — and one that can be pulled without credentials, because the app is given none
+It runs the published image. To run one built from this checkout, name it in `IMAGE=` — and it
+has to be one that can be pulled without credentials, because the app is given none
 ([`azure/README.md`](../azure/README.md)).
 
 Container Apps passes rule 2, which is worth saying because the wording suggests otherwise: an
@@ -241,13 +241,11 @@ first use.
 There are two images: [`Dockerfile.worker`](../../Dockerfile.worker) and the heavier
 `Dockerfile.worker.jvm`, which adds a JDK, Maven, Gradle and the .NET SDK. The three `worker.sh`
 scripts build both from this checkout, and `WORKER_JVM=0` skips the heavy one. Kubernetes and
-Docker pull the published `ghcr.io/attest-tag/attesttag-worker` instead, which exists only once
-a release publishes images — until then build it yourself, as
-[`local/README.md`](../local/README.md) shows. The published worker images are `linux/amd64`
-only, and so are the ones the three scripts
-build; on Kubernetes the bot pins its worker pods to amd64 nodes for that reason, and
-`WORKER_K8S_ARCH` (the chart's `worker.arch`) moves the pin or, set to `any`, lifts it for an
-image built for more.
+Docker pull the published `ghcr.io/attest-tag/attesttag-worker` instead, or one you build
+yourself, as [`local/README.md`](../local/README.md) shows. The published worker images are
+`linux/amd64` only, and so are the ones the three scripts build; on Kubernetes the bot pins its
+worker pods to amd64 nodes for that reason, and `WORKER_K8S_ARCH` (the chart's `worker.arch`)
+moves the pin or, set to `any`, lifts it for an image built for more.
 
 `WORKER_JOB_NAMES=java=…,java-gradle=…,dotnet=…` routes an ecosystem to the heavy image — job or
 task names on the clouds, image references on Kubernetes and Docker.

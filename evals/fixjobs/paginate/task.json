@@ -1,0 +1,5 @@
+{
+  "title": "The last page of a product list is always missing",
+  "requirement": "Customers report that the final page of the catalogue never shows: with 25 products and 10 per page they see pages 1 and 2 and then nothing. page_count in shop/paging.py and the slice in page_items look wrong. Fix the paging so every product is on exactly one page.",
+  "acceptance": ["page_count rounds up", "page_items returns the remaining products on the last page", "pages beyond the last are empty"]
+}

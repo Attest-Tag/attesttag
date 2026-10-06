@@ -105,7 +105,12 @@ function JobDetailBody({ id }: { id: number }) {
       ? `Confirmed by ${job.approved_by_name || job.approved_by || "someone"}`
       : job.approval.startsWith("rule:")
         ? `Allow rule: ${job.approval.slice(5)}`
-        : "—";
+        : job.approval === "github"
+          ? `Asked for on GitHub by ${job.requester_name || job.requester}, who can push to the repository`
+          : "—";
+  // A job asked for on a pull request commits onto that pull request's own branch: its branch is
+  // the pull request's head, and what it merges into is the pull request's base.
+  const prRef = spec?.mode === "pr" ? (spec.pr ?? null) : null;
   // A job that opened a pull request after the engine hit its turn or spend cap is a success
   // with a caveat. Newer workers send it as result.note; jobs finished before that carry it as
   // an "engine_error … stopped early" error, which is read the same way rather than shown red.
@@ -146,7 +151,7 @@ function JobDetailBody({ id }: { id: number }) {
               <BranchLink repo={job.repo} branch={job.branch} className={headerLink} /> →{" "}
             </>
           )}
-          <BranchLink repo={job.repo} branch={job.base_branch} className={headerLink} />
+          <BranchLink repo={job.repo} branch={prRef ? prRef.base : job.base_branch} className={headerLink} />
         </DialogDescription>
       </DialogHeader>
 
@@ -155,6 +160,13 @@ function JobDetailBody({ id }: { id: number }) {
           <Button asChild variant="outline" size="sm">
             <a href={job.thread_link} target="_blank" rel="noreferrer">
               <MessageSquare /> Slack thread
+            </a>
+          </Button>
+        )}
+        {prRef?.asked_url && (
+          <Button asChild variant="outline" size="sm">
+            <a href={prRef.asked_url} target="_blank" rel="noreferrer">
+              <MessageSquare /> Where it was asked
             </a>
           </Button>
         )}
@@ -268,7 +280,10 @@ function JobDetailBody({ id }: { id: number }) {
           )}
           <p className="mt-3 font-mono text-xs text-muted-foreground">
             {spec.constraints.engine}/{spec.constraints.model} · budget {formatJobCost(spec.constraints.budget_usd)} ·{" "}
-            {Math.round(spec.constraints.timeout_s / 60)} min · branch rule {jobBranchShape(spec.constraints.branch_prefix, spec.constraints.branch_suffix, "*")}
+            {Math.round(spec.constraints.timeout_s / 60)} min ·{" "}
+            {prRef
+              ? `commits to pull request #${prRef.number}'s own branch`
+              : `branch rule ${jobBranchShape(spec.constraints.branch_prefix, spec.constraints.branch_suffix, "*")}`}
             {spec.constraints.test_cmd ? ` · tests: ${spec.constraints.test_cmd}` : ""}
           </p>
         </Section>
@@ -298,7 +313,11 @@ function JobDetailBody({ id }: { id: number }) {
           <dt className="text-muted-foreground">Cost</dt>
           <dd className="tabular-nums">
             {formatJobCost(job.cost_usd)} of {formatJobCost(job.budget_usd)} budget ·{" "}
-            {formatNumber(job.tokens_in)} in / {formatNumber(job.tokens_out)} out tokens
+            {formatNumber(job.tokens_in)} in
+            {job.tokens_cached > 0 && job.tokens_in > 0 && (
+              <> ({Math.floor((job.tokens_cached * 100) / job.tokens_in)}% from cache)</>
+            )}{" "}
+            / {formatNumber(job.tokens_out)} out tokens
           </dd>
           <dt className="text-muted-foreground">Coding agent</dt>
           <dd className="font-mono text-xs">
@@ -500,18 +519,18 @@ function RunRow({
   /** Quieter detail after the result: the command an install ran, why a suite did not run. */
   children?: React.ReactNode;
 }) {
+  // A run the sandbox killed did not finish: it is not a failure, and the count of the part it got through is no count.
   const chip = !run.ran ? (
     <StatusChip variant="neutral">not run</StatusChip>
   ) : run.ok ? (
     <StatusChip variant="success">{okLabel}</StatusChip>
+  ) : run.killed ? (
+    <StatusChip variant="warning">did not finish</StatusChip>
   ) : (
     <StatusChip variant="danger">failed</StatusChip>
   );
-  const facts = run.ran
-    ? [counts ? `${run.passed ?? 0} passed, ${run.failed ?? 0} failed` : "", run.seconds ? `${run.seconds.toFixed(1)} s` : ""]
-        .filter(Boolean)
-        .join(" · ")
-    : "";
+  const result = run.killed ? `killed: ${run.killed}` : counts ? `${run.passed ?? 0} passed, ${run.failed ?? 0} failed` : "";
+  const facts = run.ran ? [result, run.seconds ? `${run.seconds.toFixed(1)} s` : ""].filter(Boolean).join(" · ") : "";
   return (
     <div>
       <div className="flex flex-wrap items-center gap-2 text-sm">

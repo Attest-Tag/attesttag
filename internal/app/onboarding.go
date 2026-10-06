@@ -183,7 +183,14 @@ func (b *Bot) needsInstall(ctx context.Context, u *AdminUser) bool {
 	if b.twoFactorOwed(ctx, u) || !b.settings.Get(ctx, u.OrgID).allowsVia(u.Via) {
 		return false
 	}
-	return !b.hasActiveTeam(ctx, u.OrgID)
+	if b.hasActiveTeam(ctx, u.OrgID) {
+		return false
+	}
+	// Nor somebody whose own workspace another organisation already connected: the install
+	// cannot be theirs, and the walk says so and offers the way in (workspaceTaken). Sent on to
+	// Slack instead, a colleague who signed up on their own met a refusal — and before installs
+	// stopped giving such a token back, took the bot out of the workspace for everyone.
+	return b.workspaceTaken(ctx, u) == nil
 }
 
 // hasActiveTeam is the whole of "is this organisation set up at all". A revoked row does not

@@ -79,6 +79,40 @@ type JobSpec struct {
 	Channel       string         `json:"channel"`
 	ThreadTS      string         `json:"thread_ts"`
 	Constraints   JobConstraints `json:"constraints"`
+	// Mode is JobModePR for a job that commits onto an open pull request's own branch, and ""
+	// for the usual job, which pushes a new branch and opens a pull request of its own. In
+	// JobModePR, BaseBranch and Branch are both the pull request's head branch — an older worker
+	// that knows nothing of modes then fails at its `checkout -b` of a branch that exists, rather
+	// than pushing anywhere — and HeadSHA is the head the request was made against.
+	Mode    string    `json:"mode,omitempty"`
+	HeadSHA string    `json:"head_sha,omitempty"`
+	PR      *JobPRRef `json:"pr,omitempty"`
+}
+
+// JobModePR is a job asked for on a pull request, from a review finding (review_fix.go): the change
+// is one more commit on the pull request's own branch, fast-forward only, and no pull request is
+// opened.
+const JobModePR = "pr"
+
+// JobPRRef is the pull request a JobModePR job commits to, and where on it the job was asked for:
+// what the bot answers on when the job ends. None of it is a credential — an installation id is
+// named in GitHub's own settings URLs — and the worker reads only Number, Base and URL of it.
+type JobPRRef struct {
+	Number int    `json:"number"`
+	Base   string `json:"base"` // the branch the pull request merges into
+	URL    string `json:"url"`
+	// InstallationID is the GitHub App installation the request came through, whose token the job
+	// pushes with: the App's own identity, as the review that raised the findings has.
+	InstallationID int64 `json:"installation_id"`
+	// Findings are the public ids of the review findings the job fixes.
+	Findings []string `json:"findings,omitempty"`
+	// Thread is the inline comment of the finding whose thread is answered; zero for a fix asked
+	// for on the conversation, which is answered there.
+	Thread int64 `json:"thread,omitempty"`
+	// AskedBy is the GitHub login that asked, and AskedURL the comment it asked in, when there is
+	// one (a ticked box is an edit of the bot's own comment).
+	AskedBy  string `json:"asked_by"`
+	AskedURL string `json:"asked_url,omitempty"`
 }
 
 // ToolEvidence is a tool result the bot gathered earlier in the thread (logs, Sentry, GitHub).
@@ -100,6 +134,9 @@ type JobConstraints struct {
 	BranchPrefix string  `json:"branch_prefix,omitempty"`
 	BranchSuffix string  `json:"branch_suffix"`
 	MaxRounds    int     `json:"max_rounds"`
+	// Providers are the OpenRouter providers the job's model calls ask for, in order, with a
+	// fallback to any other. Empty lets OpenRouter choose; the job's session keeps it on one.
+	Providers []string `json:"providers,omitempty"`
 	// Recipe is what the console knows about how to build and test this repository, or nil to
 	// let the worker read the repository's own .attest/recipe.yaml and then fall back to
 	// detection. It is snapshotted at dispatch like everything else here.
@@ -208,6 +245,22 @@ type JobClaim struct {
 	Secrets JobSecrets  `json:"secrets"`
 	Limits  JobLimits   `json:"limits"`
 	Cache   JobCache    `json:"cache,omitempty"`
+	// Price is the model's list price from the bot's catalogue, so the pull request the worker
+	// writes can say what the run came to. An estimate: the provider that served each call may
+	// charge differently, and the bot's own figure (metered or priced) is the one it records.
+	Price *JobPrice `json:"price,omitempty"`
+}
+
+// JobPrice is a model's list price in dollars per million tokens.
+type JobPrice struct {
+	InPerM     float64 `json:"in_per_m"`
+	CachedPerM float64 `json:"cached_per_m"`
+	OutPerM    float64 `json:"out_per_m"`
+}
+
+// Cost prices a job's tokens; cached prompt tokens are part of In and priced as cache reads.
+func (p JobPrice) Cost(u JobUsage) float64 {
+	return modelPrice{In: p.InPerM / 1e6, CachedIn: p.CachedPerM / 1e6, Out: p.OutPerM / 1e6}.cost(u.usage())
 }
 
 // JobCache is where a worker restores and saves this repository's dependency cache: two
@@ -263,17 +316,18 @@ type JobLimits struct {
 // ---- events ----
 
 type JobUsage struct {
-	In      int     `json:"in"`
+	In int `json:"in"`
+	// Cached is the part of In the provider served from its prompt cache, as the engine reported
+	// it. A worker built before it was sent reports none, and zero is a floor, not a claim.
+	Cached  int     `json:"cached,omitempty"`
 	Out     int     `json:"out"`
 	CostUSD float64 `json:"cost_usd"`
 }
 
-// usage is what a worker's report looks like as a turn's usage. The cache and reasoning counts
-// are zero because the worker never sends them: it runs someone else's agent in another
-// container and reports three numbers over this wire. Zero is the truthful value here, not a
-// missing one — see the note on the columns in migrations/sqlite/0010_usage_cache_tokens.sql.
+// usage is what a worker's report looks like as a turn's usage. Reasoning stays zero: the engine
+// reports it inside Out, if at all — see migrations/sqlite/0010_usage_cache_tokens.sql.
 func (u JobUsage) usage() Usage {
-	return Usage{In: u.In, Out: u.Out, CostUSD: u.CostUSD}
+	return Usage{In: u.In, CachedIn: u.Cached, Out: u.Out, CostUSD: u.CostUSD}
 }
 
 // usageOn is usage as one job spent it: on the organisation's own key it is recorded as the
@@ -341,7 +395,8 @@ type JobResult struct {
 	Unchecked     []string    `json:"unchecked,omitempty"`
 	DiffStat      JobDiffStat `json:"diff_stat"`
 	FilesChanged  []string    `json:"files_changed,omitempty"`
-	Usage         JobUsage    `json:"usage"` // total for the job
+	Usage         JobUsage    `json:"usage"`           // total for the job
+	Turns         int         `json:"turns,omitempty"` // model replies the engine took
 	Model         string      `json:"model,omitempty"`
 	Engine        string      `json:"engine,omitempty"`
 	LogTail       string      `json:"log_tail,omitempty"`
@@ -382,10 +437,16 @@ type JobStepRun struct {
 	Output  string  `json:"output,omitempty"` // tail
 }
 
-// JobTestRun: Ran=false means no test suite was found or it never got to run.
+// JobTestRun: Ran=false means no test suite was found or it never got to run. Killed says why a
+// run was stopped from outside before it could finish — "out of memory", most often: the worker's
+// sandbox ran out — which says nothing about the code either way, so it is reported as a check that
+// did not finish, never as one that failed. OK is false for one, as it was before Killed existed,
+// so a reader that does not know the field still never takes it for a pass. A run the job's own
+// time cap ended is not killed: its output says it timed out.
 type JobTestRun struct {
 	Ran     bool    `json:"ran"`
 	OK      bool    `json:"ok"`
+	Killed  string  `json:"killed,omitempty"`
 	Passed  int     `json:"passed,omitempty"`
 	Failed  int     `json:"failed,omitempty"`
 	Seconds float64 `json:"seconds,omitempty"`
@@ -419,15 +480,67 @@ type JobPackage struct {
 	Skipped string     `json:"skipped,omitempty"` // why nothing ran here at all
 }
 
-// StillFailing names the gate that fails after the change — "tests", then "build" — or "".
-func (p *JobPackage) StillFailing() string {
+// Failing reports whether a run got to its end and did not pass: the one kind of result that
+// says something about the code. A run that was killed before it finished says nothing either way.
+func (t JobTestRun) Failing() bool { return t.Ran && !t.OK && t.Killed == "" }
+
+// How a gate stands after a job's change, against how it stood before it (JobCheck.Outcome): what
+// the pull request's headline and the thread say of it.
+const (
+	CheckFine       = ""            // passes after the change, or did not run after it
+	CheckUnfinished = "unfinished"  // killed after the change before it finished: unchecked, not failing
+	CheckBroken     = "broken"      // passed before the change, and fails after it
+	CheckWorse      = "worse"       // failed before the change, and more of it fails after it
+	CheckStillFails = "still_fails" // failed before the change as well, and no worse after it
+	CheckFails      = "fails"       // fails after the change, with no finished run before it to compare
+)
+
+// Outcome is how the gate stands after the change against how it stood before. A run before the
+// change that failed is the comparison only when it finished: one killed before it could has no
+// count to hold the run after to. More failures, or fewer passes, after the change is worse — a
+// change that stops a suite compiling can fail fewer tests than the bug did, by running none.
+func (c JobCheck) Outcome() string {
+	a, b := c.After, c.Before
 	switch {
-	case p.Tests.After.Ran && !p.Tests.After.OK:
-		return "tests"
-	case p.Build.After.Ran && !p.Build.After.OK:
-		return "build"
+	case !a.Ran || a.OK:
+		return CheckFine
+	case a.Killed != "":
+		return CheckUnfinished
+	case !b.Ran || b.Killed != "":
+		return CheckFails
+	case b.OK:
+		return CheckBroken
+	case a.Failed > b.Failed || a.Passed < b.Passed:
+		return CheckWorse
 	}
-	return ""
+	return CheckStillFails
+}
+
+// Verdict is a package's headline: the gate ("tests" or "build") and its Outcome, or two empty
+// strings when both are fine. A failure that finished comes first, the tests' before the build's —
+// it says something about the change, where a check that did not finish says only that it went
+// unchecked.
+func (p *JobPackage) Verdict() (gate, outcome string) {
+	t, b := p.Tests.Outcome(), p.Build.Outcome()
+	switch {
+	case t != CheckFine && t != CheckUnfinished:
+		return "tests", t
+	case b != CheckFine && b != CheckUnfinished:
+		return "build", b
+	case t == CheckUnfinished:
+		return "tests", t
+	case b == CheckUnfinished:
+		return "build", b
+	}
+	return "", ""
+}
+
+// Killed is why the gate named by Verdict was stopped after the change, for an unfinished one.
+func (p *JobPackage) Killed(gate string) string {
+	if gate == "build" {
+		return p.Build.After.Killed
+	}
+	return p.Tests.After.Killed
 }
 
 // Checked is every package the job checked, the primary first, in one shape.

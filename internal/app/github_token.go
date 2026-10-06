@@ -44,18 +44,26 @@ import (
 // pull request, and whether that holds for an installation token is a thing to learn live. If it
 // does not, the fix is issues:write here and in nothing else, and every installation owner is then
 // asked to accept the new permission.
+//
+// review_checks is the review's check run in the pull request's checks list, and nothing else: an
+// App made before code review had one has no Checks permission, and a token asked for with a
+// permission the installation never granted is refused outright. Kept apart from review_post so that
+// refusal costs the check run alone, never the review, and asked for only by an installation that
+// granted it (reviewChecksGranted).
 const (
-	githubPurposeDefault    = ""
-	githubPurposeReviewRead = "review_read"
-	githubPurposeReviewPost = "review_post"
+	githubPurposeDefault      = ""
+	githubPurposeReviewRead   = "review_read"
+	githubPurposeReviewPost   = "review_post"
+	githubPurposeReviewChecks = "review_checks"
 )
 
 // githubPurposePermissions is the one list of what each purpose's token may do, pinned by
 // TestGitHubPurposePermissions so that widening one is a change somebody makes on purpose.
 var githubPurposePermissions = map[string]map[string]string{
-	githubPurposeDefault:    {"contents": "write", "pull_requests": "write"},
-	githubPurposeReviewRead: {"contents": "read", "pull_requests": "read"},
-	githubPurposeReviewPost: {"pull_requests": "write"},
+	githubPurposeDefault:      {"contents": "write", "pull_requests": "write"},
+	githubPurposeReviewRead:   {"contents": "read", "pull_requests": "read"},
+	githubPurposeReviewPost:   {"pull_requests": "write"},
+	githubPurposeReviewChecks: {"checks": "write"},
 }
 
 // githubTokenPermissions is the permission set a purpose mints with, as a copy the caller may

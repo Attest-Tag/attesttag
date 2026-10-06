@@ -72,6 +72,7 @@ type Job struct {
 	CostUSD         float64 `json:"cost_usd"`
 	TokensIn        int     `json:"tokens_in"`
 	TokensOut       int     `json:"tokens_out"`
+	TokensCached    int     `json:"tokens_cached"` // the part of TokensIn served from the provider's cache
 	LLMKeyHash      string  `json:"-"`
 	llmKeyEnc       []byte
 	// KeyOwner is whose model key the job runs on: keyOwnerPlatform, or keyOwnerOrg when the
@@ -81,6 +82,18 @@ type Job struct {
 	CreatedAt       string `json:"created_at"`
 	StartedAt       string `json:"started_at"`
 	FinishedAt      string `json:"finished_at"`
+}
+
+// jobGitHubChannel marks a job asked for on a GitHub pull request (review_fix.go) rather than in a
+// chat thread. Such a job has no workspace; its channel is "github:owner/name" and its thread
+// "pr:<n>", the pair a review's own spend is logged under, so its cost sits beside the review's
+// and "one job a thread" is one job a pull request.
+const jobGitHubChannel = "github:"
+
+// onGitHub reports whether the job was asked for on a pull request, and so answers there: it has no
+// thread to post a checklist or a report in.
+func (j *Job) onGitHub() bool {
+	return j.TeamID == "" && strings.HasPrefix(j.Channel, jobGitHubChannel)
 }
 
 func jobCols(full bool) string {
@@ -95,7 +108,7 @@ func jobCols(full bool) string {
 		coalesce(status_ts,''), coalesce(phase,''), last_seq, coalesce(last_event_at,''),
 		cancel_requested, coalesce(cancel_by,''), coalesce(cancel_reason,''), coalesce(cancel_requested_at,''),
 		` + result + `, coalesce(pr_url,''), coalesce(error,''), cost_usd, tokens_in, tokens_out, coalesce(llm_key_hash,''), llm_key_enc,
-		created_at, coalesce(started_at,''), coalesce(finished_at,''), key_owner`
+		created_at, coalesce(started_at,''), coalesce(finished_at,''), key_owner, tokens_cached`
 }
 
 func scanJob(row interface{ Scan(...any) error }) (*Job, error) {
@@ -108,7 +121,7 @@ func scanJob(row interface{ Scan(...any) error }) (*Job, error) {
 		&j.StatusTS, &j.Phase, &j.LastSeq, &j.LastEventAt,
 		&cancel, &j.CancelBy, &j.CancelReason, &j.CancelAt,
 		&j.Result, &j.PRURL, &j.Error, &j.CostUSD, &j.TokensIn, &j.TokensOut, &j.LLMKeyHash, &j.llmKeyEnc,
-		&j.CreatedAt, &j.StartedAt, &j.FinishedAt, &j.KeyOwner); err != nil {
+		&j.CreatedAt, &j.StartedAt, &j.FinishedAt, &j.KeyOwner, &j.TokensCached); err != nil {
 		return nil, err
 	}
 	j.DraftPR, j.CancelRequested = draft == 1, cancel == 1
@@ -238,6 +251,15 @@ func (s *Store) ActiveJobsInThread(ctx context.Context, orgID int64, teamID, cha
 	return s.queryJobs(ctx, orgID, `and team_id=? and channel=? and thread_ts=? and status in (`+placeholders(len(jobActiveStatuses))+`)`, args, 50)
 }
 
+// JobsInThreadSince counts the jobs a thread started since a moment, whatever became of them: for a
+// pull request (jobGitHubChannel), how many fix jobs it has started in a day.
+func (s *Store) JobsInThreadSince(ctx context.Context, orgID int64, teamID, channel, threadTS string, since time.Time) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `select count(*) from jobs where org_id=? and team_id=? and channel=? and thread_ts=? and created_at>=?`,
+		orgID, teamID, channel, threadTS, since.UTC().Format(time.DateTime)).Scan(&n)
+	return n, err
+}
+
 // ActiveJobsFor is everything one organisation still has in flight, whatever thread it came
 // from. Used when the account is being deleted, which is the one moment the question is asked
 // about the whole account rather than about one conversation in it.
@@ -292,7 +314,7 @@ func placeholders(n int) string {
 // jobFields are the columns SetJobFields and SetJobStatus may write.
 var jobFields = map[string]bool{"status_ts": true, "execution_ref": true, "dispatcher": true, "phase": true, "llm_key_hash": true,
 	"llm_key_enc": true, "error": true, "branch": true, "spec": true, "token_hash": true, "token_expires": true, "finished_at": true,
-	"started_at": true, "worker_info": true, "last_event_at": true, "cost_usd": true}
+	"started_at": true, "worker_info": true, "last_event_at": true, "cost_usd": true, "pr_url": true}
 
 func (s *Store) SetJobFields(ctx context.Context, orgID, id int64, set map[string]any) error {
 	if len(set) == 0 {
@@ -403,13 +425,13 @@ func (s *Store) AddJobEvents(ctx context.Context, orgID, id int64, evs []JobEven
 		if strings.TrimSpace(data) == "" {
 			data = "{}"
 		}
-		var in, out int
+		var in, cached, out int
 		var cost float64
 		if e.Usage != nil {
-			in, out, cost = e.Usage.In, e.Usage.Out, e.Usage.CostUSD
+			in, cached, out, cost = e.Usage.In, e.Usage.Cached, e.Usage.Out, e.Usage.CostUSD
 		}
-		res, err := s.db.ExecContext(ctx, `insert into job_events (org_id, job_id, seq, kind, phase, status, message, data, at, tokens_in, tokens_out, cost_usd)
-			values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) on conflict do nothing`, orgID, id, e.Seq, e.Kind, e.Phase, e.Status, e.Message, data, e.At, in, out, cost)
+		res, err := s.db.ExecContext(ctx, `insert into job_events (org_id, job_id, seq, kind, phase, status, message, data, at, tokens_in, tokens_cached, tokens_out, cost_usd)
+			values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) on conflict do nothing`, orgID, id, e.Seq, e.Kind, e.Phase, e.Status, e.Message, data, e.At, in, cached, out, cost)
 		if err != nil {
 			return accepted, used, err
 		}
@@ -424,7 +446,7 @@ func (s *Store) AddJobEvents(ctx context.Context, orgID, id int64, evs []JobEven
 			phase = e.Phase
 		}
 		if in > 0 || out > 0 || cost > 0 {
-			used.In, used.Out, used.CostUSD = used.In+in, used.Out+out, used.CostUSD+cost
+			used.In, used.Cached, used.Out, used.CostUSD = used.In+in, used.Cached+cached, used.Out+out, used.CostUSD+cost
 		}
 	}
 	if accepted == 0 {
@@ -434,7 +456,7 @@ func (s *Store) AddJobEvents(ctx context.Context, orgID, id int64, evs []JobEven
 	// `case when` rather than max(last_seq, ?): SQLite's max takes two scalars, Postgres's
 	// takes a column and calls the two-argument form greatest, and neither knows the other's
 	// spelling. The sequence number is therefore passed twice.
-	args := []any{maxSeq, maxSeq, now(), used.CostUSD, used.In, used.Out}
+	args := []any{maxSeq, maxSeq, now(), used.CostUSD, used.In, used.Cached, used.Out}
 	if phase != "" {
 		setPhase = ", phase=?"
 		args = append(args, phase)
@@ -443,7 +465,7 @@ func (s *Store) AddJobEvents(ctx context.Context, orgID, id int64, evs []JobEven
 	_, err := s.db.ExecContext(ctx, fmt.Sprintf(`update jobs set
 		last_seq=case when last_seq > ? then last_seq else ? end, last_event_at=?,
 		status=case when status='stale' then 'running' else status end,
-		cost_usd=cost_usd+?, tokens_in=tokens_in+?, tokens_out=tokens_out+?%s where org_id=? and id=?`, setPhase), args...)
+		cost_usd=cost_usd+?, tokens_in=tokens_in+?, tokens_cached=tokens_cached+?, tokens_out=tokens_out+?%s where org_id=? and id=?`, setPhase), args...)
 	return accepted, used, err
 }
 
@@ -452,8 +474,8 @@ func (s *Store) AddJobEvents(ctx context.Context, orgID, id int64, evs []JobEven
 func (s *Store) FinishJob(ctx context.Context, orgID, id int64, status string, res *JobResult) (JobUsage, bool, error) {
 	var cur string
 	var cost float64
-	var in, out int
-	err := s.db.QueryRowContext(ctx, `select status, cost_usd, tokens_in, tokens_out from jobs where org_id=? and id=?`, orgID, id).Scan(&cur, &cost, &in, &out)
+	var in, cached, out int
+	err := s.db.QueryRowContext(ctx, `select status, cost_usd, tokens_in, tokens_cached, tokens_out from jobs where org_id=? and id=?`, orgID, id).Scan(&cur, &cost, &in, &cached, &out)
 	if err == sql.ErrNoRows {
 		return JobUsage{}, false, nil
 	}
@@ -472,6 +494,9 @@ func (s *Store) FinishJob(ctx context.Context, orgID, id int64, status string, r
 		if res.Usage.In > in {
 			delta.In, in = res.Usage.In-in, res.Usage.In
 		}
+		if res.Usage.Cached > cached {
+			delta.Cached, cached = res.Usage.Cached-cached, res.Usage.Cached
+		}
 		if res.Usage.Out > out {
 			delta.Out, out = res.Usage.Out-out, res.Usage.Out
 		}
@@ -487,9 +512,9 @@ func (s *Store) FinishJob(ctx context.Context, orgID, id int64, status string, r
 		errText = truncate(errText, 500)
 	}
 	r, err := s.db.ExecContext(ctx, `update jobs set status=?, result=?, pr_url=case when ?<>'' then ? else pr_url end,
-		branch=case when ?<>'' then ? else branch end, error=?, cost_usd=?, tokens_in=?, tokens_out=?, finished_at=?
+		branch=case when ?<>'' then ? else branch end, error=?, cost_usd=?, tokens_in=?, tokens_cached=?, tokens_out=?, finished_at=?
 		where org_id=? and id=? and status not in ('succeeded','failed','cancelled','timeout')`,
-		status, raw, prURL, prURL, branch, branch, errText, cost, in, out, now(), orgID, id)
+		status, raw, prURL, prURL, branch, branch, errText, cost, in, cached, out, now(), orgID, id)
 	if err != nil {
 		return delta, false, err
 	}
@@ -502,7 +527,7 @@ func (s *Store) JobEvents(ctx context.Context, orgID, id int64, limit int) ([]Jo
 		limit = 500
 	}
 	rows, err := s.db.QueryContext(ctx, `select id, seq, coalesce(at,''), kind, coalesce(phase,''), coalesce(status,''), coalesce(message,''),
-		coalesce(data,'{}'), tokens_in, tokens_out, cost_usd, created_at from job_events where org_id=? and job_id=? order by seq limit ?`, orgID, id, limit)
+		coalesce(data,'{}'), tokens_in, tokens_cached, tokens_out, cost_usd, created_at from job_events where org_id=? and job_id=? order by seq limit ?`, orgID, id, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -511,16 +536,16 @@ func (s *Store) JobEvents(ctx context.Context, orgID, id int64, limit int) ([]Jo
 	for rows.Next() {
 		var e JobEvent
 		var data string
-		var in, out2 int
+		var in, cached, out2 int
 		var cost float64
-		if err := rows.Scan(&e.ID, &e.Seq, &e.At, &e.Kind, &e.Phase, &e.Status, &e.Message, &data, &in, &out2, &cost, &e.CreatedAt); err != nil {
+		if err := rows.Scan(&e.ID, &e.Seq, &e.At, &e.Kind, &e.Phase, &e.Status, &e.Message, &data, &in, &cached, &out2, &cost, &e.CreatedAt); err != nil {
 			return nil, err
 		}
 		if data != "" && data != "{}" {
 			e.Data = json.RawMessage(data)
 		}
 		if in > 0 || out2 > 0 || cost > 0 {
-			e.Usage = &JobUsage{In: in, Out: out2, CostUSD: cost}
+			e.Usage = &JobUsage{In: in, Cached: cached, Out: out2, CostUSD: cost}
 		}
 		out = append(out, e)
 	}

@@ -19,11 +19,57 @@ func TestCheckedPutsThePrimaryFirst(t *testing.T) {
 	if len(got) != 2 || got[0].Workdir != "services/api" || got[0].Note != "ran on 3.8" || got[1].Workdir != "web" {
 		t.Fatalf("checked: %+v", got)
 	}
-	if got[0].StillFailing() != "tests" || got[1].StillFailing() != "build" {
-		t.Fatalf("still failing: %q %q", got[0].StillFailing(), got[1].StillFailing())
+	if g, o := got[0].Verdict(); g != "tests" || o != CheckBroken {
+		t.Errorf("the primary's verdict: %q %q", g, o)
+	}
+	if g, o := got[1].Verdict(); g != "build" || o != CheckFails {
+		t.Errorf("web's verdict: %q %q", g, o)
 	}
 	if (&JobResult{}).Checked()[0].Workdir != "." {
 		t.Fatal("a result with no recipe is the root")
+	}
+}
+
+// A gate's outcome compares the run after the change with the one before it, and a run the sandbox
+// killed is never a failure: after the change it is unchecked, and before it there is nothing to
+// compare with.
+func TestCheckOutcome(t *testing.T) {
+	pass := JobTestRun{Ran: true, OK: true, Passed: 10}
+	fail := func(failed, passed int) JobTestRun { return JobTestRun{Ran: true, Failed: failed, Passed: passed} }
+	killed := JobTestRun{Ran: true, Killed: "out of memory"}
+	for _, c := range []struct {
+		name          string
+		before, after JobTestRun
+		want          string
+	}{
+		{"passes", fail(2, 8), pass, CheckFine},
+		{"not run after", pass, JobTestRun{}, CheckFine},
+		{"killed after", pass, killed, CheckUnfinished},
+		{"killed both times", killed, killed, CheckUnfinished},
+		{"broken by the change", pass, fail(1, 9), CheckBroken},
+		{"failing as before", fail(2, 8), fail(2, 8), CheckStillFails},
+		{"failing less", fail(2, 8), fail(1, 9), CheckStillFails},
+		{"more failures", fail(2, 8), fail(3, 7), CheckWorse},
+		{"fewer passing, e.g. no longer compiling", fail(2, 8), fail(1, 0), CheckWorse},
+		{"nothing before to compare", JobTestRun{}, fail(1, 0), CheckFails},
+		{"killed before, failing after", killed, fail(1, 0), CheckFails},
+	} {
+		if got := (JobCheck{Before: c.before, After: c.after}).Outcome(); got != c.want {
+			t.Errorf("%s: %q, want %q", c.name, got, c.want)
+		}
+	}
+	if killed.Failing() || !fail(1, 0).Failing() || pass.Failing() || (JobTestRun{}).Failing() {
+		t.Error("Failing is a run that finished and did not pass, and only that")
+	}
+	// A failure that finished heads the package over a check that did not: the build failing says
+	// something about the change, the tests being killed only that they did not check it.
+	p := JobPackage{Tests: JobCheck{Before: pass, After: killed}, Build: JobCheck{Before: pass, After: fail(1, 0)}}
+	if g, o := p.Verdict(); g != "build" || o != CheckBroken {
+		t.Errorf("verdict = %q %q, want the build's failure first", g, o)
+	}
+	p.Build.After = pass
+	if g, o := p.Verdict(); g != "tests" || o != CheckUnfinished || p.Killed(g) != "out of memory" {
+		t.Errorf("verdict = %q %q (%q), want the tests unfinished", g, o, p.Killed(g))
 	}
 }
 

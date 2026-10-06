@@ -52,10 +52,16 @@ holds an empty line for each key, and the cloud deploy scripts read the first on
 
 ## The image
 
-`ghcr.io/attest-tag/attesttag`, which the release workflow publishes for `linux/amd64` and
-`linux/arm64`, signed, with provenance and an SBOM; the fix-job worker images beside it are
-`linux/amd64` only. No release has published it yet (0.1.0 is the source alone), so build it
-from the checkout with `docker build -t attesttag-local .`.
+`ghcr.io/attest-tag/attesttag`, published by each release from 0.3.0 on, for `linux/amd64` and `linux/arm64`,
+signed, with provenance and an SBOM; the fix-job worker images beside it are `linux/amd64` only.
+`:latest` is the newest release; `:0.3` follows the 0.3 releases, which after 0.3.0 only fix
+things (`CHANGELOG.md` says what each release changes). To run a commit no release has,
+build it from the checkout with `docker build -t attesttag-local .`. `attesttag version` prints
+which one a container or binary is.
+
+Each GitHub release also carries the binary for Linux and macOS, amd64 and arm64, with the
+console built in, for running without a container. Outside the image it needs poppler's
+`pdftotext` on the PATH to read PDFs, and `litestream` to replicate SQLite to a bucket.
 
 The image runs as an unprivileged user (uid 10001), refuses to start without `MASTER_KEY` rather
 than invent one it would lose, and sets its session cookies `Secure` on every origin — so the
@@ -156,7 +162,7 @@ What to expect:
 
 **The fix worker.** `PROJECT=… REGION=… ./deploy/gcp/worker.sh` (or `make worker-deploy`) — run
 it before the bot's own deploy — builds `Dockerfile.worker` on Cloud Build (Debian slim, git, and the toolchains a repository's
-tests reach for — Python 3.14 + uv, Node 22, Go and Rust — plus the Qwen Code CLI), and the heavier
+tests reach for — Python 3.14 + uv, Node 22, Go and Rust — plus the Qwen Code and pi CLIs), and the heavier
 `Dockerfile.worker.jvm` (a JDK, Maven, Gradle and the .NET SDK) unless `WORKER_JVM=0`. It creates
 the Cloud Run Jobs `attesttag-worker` and `attesttag-worker-jvm` with one task, no retries and a
 one-hour ceiling, gives them a service account with **no roles** (everything a worker uses comes

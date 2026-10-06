@@ -37,6 +37,11 @@ import (
 //     only a comment this client listed on this pull request may be reacted to.
 //   - Only a review is ever posted, and only as a COMMENT: never an approval or a request for
 //     changes, which would turn an advisory reader into a gate somebody could talk into opening.
+//   - Beside it, the App's own signals (review_signals.go): reactions on the pull request itself,
+//     taken off again only when the client put them on, and one check
+//     run per review, written under a token for checks alone and updated only when the client
+//     created it or found it as the App's, by the run it belongs to. A check is never concluded as
+//     a failure, for the reason a review is never a request for changes.
 //
 // Reads are raw (ProxyRequest.Raw): the bytes are parsed here, line numbers have to match the head
 // exactly, and redact on a JSON page can take the document apart. Nothing this client returns has
@@ -82,6 +87,11 @@ type reviewGitHub struct {
 	// rootThreads is the pull request's threads by the id of the comment that opened each, once they
 	// have been listed (ThreadOf): a run that closes several findings lists them once.
 	rootThreads map[int64]githubThread
+	// reactions are the App's own reactions on the pull request itself, which this client put on,
+	// and the only ones it may take off. checks are the App's own check runs, created by this client
+	// or found by the run they belong to, and the only ones it may update.
+	reactions map[int64]bool
+	checks    map[int64]bool
 }
 
 // newReviewGitHub makes the client for pull request pr of repo, reached through conn. conn must be
@@ -101,7 +111,8 @@ func newReviewGitHub(p *Proxy, orgID int64, conn *Connection, repo string, pr in
 	}
 	return &reviewGitHub{proxy: p, orgID: orgID, conn: conn, base: reviewGitHubBase, repo: conn.Repo, pr: pr,
 		acc:  &Access{Rules: []Rule{{Conn: conn}}},
-		onPR: map[int64]bool{}, ours: map[int64]bool{}, inline: map[int64]bool{}, threads: map[string]bool{}}, nil
+		onPR: map[int64]bool{}, ours: map[int64]bool{}, inline: map[int64]bool{}, threads: map[string]bool{},
+		reactions: map[int64]bool{}, checks: map[int64]bool{}}, nil
 }
 
 // reviewConnection is the connection a review reaches a repository through: the installation the
@@ -178,8 +189,9 @@ func (c *reviewGitHub) AdoptIssueComment(id int64) {
 // reviewRoute is one request the client may make: a method and a path below /repos/{owner}/{name}/,
 // in which {n} is the client's own pull request, {id} a GitHub id, {sha} a full commit id and
 // {path} the rest of a file path. query lists the parameters it may carry. comment says what an
-// {id} that is a comment has to be: "pr", an issue comment known to be on this pull request;
-// "ours", one this review may edit; or "inline", a review comment listed from this pull request.
+// {id} has to be: "pr", an issue comment known to be on this pull request; "ours", one this review
+// may edit; "inline", a review comment listed from this pull request; "reaction", a reaction the
+// client put on the pull request; or "check", one of the App's own check runs.
 type reviewRoute struct {
 	method, pattern string
 	query           []string
@@ -201,54 +213,90 @@ var reviewRoutes = []reviewRoute{
 	{"PATCH", "issues/comments/{id}", nil, "ours"},
 	{"POST", "issues/comments/{id}/reactions", nil, "pr"},
 	{"POST", "pulls/comments/{id}/reactions", nil, "inline"},
+	{"POST", "issues/{n}/reactions", nil, ""},
+	{"DELETE", "issues/{n}/reactions/{id}", nil, "reaction"},
+	// Whether somebody may have a fix pushed to the pull request's branch (review_fix.go): their
+	// permission on this repository, a read every installation token may make (Metadata).
+	{"GET", "collaborators/{login}/permission", nil, ""},
+}
+
+// reviewCheckRoutes are the review's check run, and go out under the token for checks alone
+// (githubPurposeReviewChecks) — never under one that can write pull requests, nor the other way
+// round. A check run belongs to a commit, not to a pull request, so the repository is all the path
+// can be held to; what the client writes there is its own, made by CreateCheckRun.
+var reviewCheckRoutes = []reviewRoute{
+	{"GET", "commits/{sha}/check-runs", []string{"check_name", "app_id", "filter", "per_page"}, ""},
+	{"POST", "check-runs", nil, ""},
+	{"PATCH", "check-runs/{id}", nil, "check"},
 }
 
 var commitSHA = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
 
+// githubUserLogin is a GitHub user's login as GitHub allows one: letters, digits and single
+// hyphens, starting with a letter or digit, at most 39 characters. Nothing else may be a path
+// segment of a request about a user — no "..", no slash, no "[bot]".
+var githubUserLogin = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9]|-[A-Za-z0-9]){0,38}$`)
+
 // allow reports why u may not be requested with method, or nil when it may.
 func (c *reviewGitHub) allow(method string, u *url.URL) error {
+	_, err := c.route(method, u)
+	return err
+}
+
+// route checks u against the allowlist and returns the token purpose the request goes out under:
+// a check run's own (reviewCheckRoutes), or "" for one that follows from the method (reviewSend).
+func (c *reviewGitHub) route(method string, u *url.URL) (purpose string, err error) {
 	base, err := url.Parse(c.base)
 	if err != nil {
-		return err
+		return "", err
 	}
 	refuse := func(why string) error {
 		return fmt.Errorf("code review may not %s %s: %s", method, u.Path, why)
 	}
 	if u.Scheme != base.Scheme || !strings.EqualFold(u.Host, base.Host) {
-		return refuse("not GitHub's API")
+		return "", refuse("not GitHub's API")
 	}
 	segs := strings.Split(strings.TrimPrefix(u.EscapedPath(), "/"), "/")
 	if len(segs) < 4 || segs[0] != "repos" || !strings.EqualFold(segs[1]+"/"+segs[2], c.repo) {
-		return refuse("not this review's repository")
+		return "", refuse("not this review's repository")
 	}
 	rest := segs[3:]
-	for _, r := range reviewRoutes {
-		if r.method != method {
-			continue
-		}
-		id, ok := c.matchRoute(r.pattern, rest)
-		if !ok {
-			continue
-		}
-		for k := range u.Query() {
-			if !slices.Contains(r.query, k) {
-				return refuse("it does not take ?" + k)
+	for _, table := range []struct {
+		routes  []reviewRoute
+		purpose string
+	}{{reviewRoutes, ""}, {reviewCheckRoutes, githubPurposeReviewChecks}} {
+		for _, r := range table.routes {
+			if r.method != method {
+				continue
 			}
+			id, ok := c.matchRoute(r.pattern, rest)
+			if !ok {
+				continue
+			}
+			for k := range u.Query() {
+				if !slices.Contains(r.query, k) {
+					return "", refuse("it does not take ?" + k)
+				}
+			}
+			c.mu.Lock()
+			known, own, inline, reaction, check := c.onPR[id], c.ours[id], c.inline[id], c.reactions[id], c.checks[id]
+			c.mu.Unlock()
+			switch {
+			case r.comment == "ours" && !own:
+				return "", refuse("that comment is not one this review wrote")
+			case r.comment == "pr" && !known:
+				return "", refuse("that comment is not known to be on this pull request")
+			case r.comment == "inline" && !inline:
+				return "", refuse("that review comment is not known to be on this pull request")
+			case r.comment == "reaction" && !reaction:
+				return "", refuse("that reaction is not one this review put on this pull request")
+			case r.comment == "check" && !check:
+				return "", refuse("that check run is not one this review made")
+			}
+			return table.purpose, nil
 		}
-		c.mu.Lock()
-		known, own, inline := c.onPR[id], c.ours[id], c.inline[id]
-		c.mu.Unlock()
-		switch {
-		case r.comment == "ours" && !own:
-			return refuse("that comment is not one this review wrote")
-		case r.comment == "pr" && !known:
-			return refuse("that comment is not known to be on this pull request")
-		case r.comment == "inline" && !inline:
-			return refuse("that review comment is not known to be on this pull request")
-		}
-		return nil
 	}
-	return refuse("not a request code review makes")
+	return "", refuse("not a request code review makes")
 }
 
 // matchRoute matches path segments against a pattern, returning the {id} it named, if any.
@@ -285,6 +333,10 @@ func (c *reviewGitHub) matchRoute(pattern string, segs []string) (int64, bool) {
 			id = n
 		case "{sha}":
 			if !commitSHA.MatchString(s) {
+				return 0, false
+			}
+		case "{login}":
+			if !githubUserLogin.MatchString(s) {
 				return 0, false
 			}
 		default:
@@ -341,8 +393,9 @@ func isGitHubStatus(err error, status int) bool {
 // ---- the request ----
 
 // do sends one request below the repository: rel is the path after /repos/{owner}/{name}/. The
-// purpose follows from the method, in this one place: a read mints review_read, anything else
-// review_post, so no helper can write with a token that was meant to read or the reverse.
+// purpose follows from the route and the method, in this one place: a check run's routes mint
+// review_checks, any other read review_read and any other write review_post, so no helper can write
+// with a token that was meant to read, or reach checks with one meant for pull requests.
 func (c *reviewGitHub) do(ctx context.Context, method, rel string, q url.Values, body any, accept string, maxBytes int) (*ProxyResponse, error) {
 	u, err := url.Parse(c.base + "/repos/" + c.repo + "/" + rel)
 	if err != nil {
@@ -351,7 +404,8 @@ func (c *reviewGitHub) do(ctx context.Context, method, rel string, q url.Values,
 	if len(q) > 0 {
 		u.RawQuery = q.Encode()
 	}
-	if err := c.allow(method, u); err != nil {
+	purpose, err := c.route(method, u)
+	if err != nil {
 		return nil, err
 	}
 	var raw string
@@ -362,7 +416,11 @@ func (c *reviewGitHub) do(ctx context.Context, method, rel string, q url.Values,
 		}
 		raw = string(b)
 	}
-	return reviewSend(ctx, c.proxy, c.orgID, c.acc, c.conn, method, u.String(), method+" "+truncate(rel, 120), raw, accept, maxBytes)
+	what := method + " " + truncate(rel, 120)
+	if purpose != "" {
+		return reviewSendAs(ctx, c.proxy, c.orgID, c.acc, c.conn, purpose, method, u.String(), what, raw, accept, maxBytes)
+	}
+	return reviewSend(ctx, c.proxy, c.orgID, c.acc, c.conn, method, u.String(), what, raw, accept, maxBytes)
 }
 
 // reviewSend sends one of code review's requests to GitHub through the proxy, for a pull request's
@@ -488,8 +546,9 @@ type githubPullRef struct {
 	SHA  string `json:"sha"`
 	Ref  string `json:"ref"`
 	Repo *struct {
-		FullName string `json:"full_name"`
-		Private  bool   `json:"private"`
+		FullName      string `json:"full_name"`
+		Private       bool   `json:"private"`
+		DefaultBranch string `json:"default_branch"`
 	} `json:"repo"` // nil when the fork it came from has been deleted
 }
 
@@ -497,6 +556,26 @@ type githubPullRef struct {
 // is gone counts as one: it was not this repository's branch.
 func (p *githubPull) IsFork() bool {
 	return p.Head.Repo == nil || p.Base.Repo == nil || !strings.EqualFold(p.Head.Repo.FullName, p.Base.Repo.FullName)
+}
+
+// WritePermission reports whether login may push to this repository: GitHub's own answer, its
+// legacy base permission admin or write — what maintain is read as too — counting every grant, the
+// organisation's and the teams' included. A comment's author_association says none of that: an
+// organisation member may only read, and a member whose membership is private reads as NONE.
+func (c *reviewGitHub) WritePermission(ctx context.Context, login string) (bool, error) {
+	if !githubUserLogin.MatchString(login) {
+		return false, nil
+	}
+	var p struct {
+		Permission string `json:"permission"`
+	}
+	if err := c.getJSON(ctx, "collaborators/"+login+"/permission", nil, 64<<10, &p); err != nil {
+		if isGitHubStatus(err, 404) {
+			return false, nil // not somebody GitHub knows on this repository
+		}
+		return false, err
+	}
+	return p.Permission == "admin" || p.Permission == "write", nil
 }
 
 // Pull reads the pull request itself.
@@ -805,6 +884,170 @@ func (c *reviewGitHub) react(ctx context.Context, rel, content string) error {
 	}
 	_, err := c.do(ctx, "POST", rel, nil, map[string]string{"content": content}, "", proxyMaxRead)
 	return err
+}
+
+// githubReaction is one reaction, as GitHub lists and creates them.
+type githubReaction struct {
+	ID      int64      `json:"id"`
+	Content string     `json:"content"`
+	User    githubUser `json:"user"`
+}
+
+// ReactToPull puts a reaction on the pull request itself and returns its id. GitHub answers a
+// reaction the App already has there with that one, so putting it on twice leaves one — and putting
+// it on is how the id of the App's own is learnt: listing a pull request's reactions takes a token
+// that can read issues, which code review does not ask for. Either way it is the App's own, and the
+// client may take it off again.
+func (c *reviewGitHub) ReactToPull(ctx context.Context, content string) (int64, error) {
+	if !slices.Contains(githubReactions, content) {
+		return 0, fmt.Errorf("%q is not a GitHub reaction", truncate(content, 20))
+	}
+	resp, err := c.do(ctx, "POST", fmt.Sprintf("issues/%d/reactions", c.pr), nil, map[string]string{"content": content}, "", proxyMaxRead)
+	if err != nil {
+		return 0, err
+	}
+	var out githubReaction
+	if err := json.Unmarshal([]byte(resp.Body), &out); err != nil {
+		return 0, err
+	}
+	if out.ID <= 0 {
+		return 0, errors.New("GitHub answered a reaction without its id")
+	}
+	c.mu.Lock()
+	c.reactions[out.ID] = true
+	c.mu.Unlock()
+	return out.ID, nil
+}
+
+// DeletePullReaction takes one of the App's own reactions off the pull request. One already gone is
+// the outcome asked for.
+func (c *reviewGitHub) DeletePullReaction(ctx context.Context, id int64) error {
+	_, err := c.do(ctx, "DELETE", fmt.Sprintf("issues/%d/reactions/%d", c.pr, id), nil, nil, "", proxyMaxRead)
+	if isGitHubStatus(err, 404) {
+		return nil
+	}
+	return err
+}
+
+// reviewCheckRun is a check run as POST /check-runs takes it, and PATCH /check-runs/{id} the fields
+// after HeadSHA of it.
+type reviewCheckRun struct {
+	Name        string             `json:"name,omitempty"`
+	HeadSHA     string             `json:"head_sha,omitempty"`
+	ExternalID  string             `json:"external_id,omitempty"`
+	Status      string             `json:"status,omitempty"`
+	Conclusion  string             `json:"conclusion,omitempty"`
+	StartedAt   string             `json:"started_at,omitempty"`
+	CompletedAt string             `json:"completed_at,omitempty"`
+	DetailsURL  string             `json:"details_url,omitempty"`
+	Output      *reviewCheckOutput `json:"output,omitempty"`
+}
+
+type reviewCheckOutput struct {
+	Title   string `json:"title"`
+	Summary string `json:"summary"`
+}
+
+// reviewCheckConclusions are the conclusions a review's check may end with — none of them failure or
+// action_required, which would read as the code failing and block a merge wherever the check is
+// required. GitHub counts success, neutral and skipped as passing.
+var reviewCheckConclusions = []string{"success", "neutral", "skipped", "cancelled"}
+
+// reviewCheckTitleMax bounds a check's title, which GitHub shows on one line beside its name, and
+// reviewCheckSummaryMax its summary, which GitHub refuses past this many characters.
+const (
+	reviewCheckTitleMax   = 120
+	reviewCheckSummaryMax = 65535
+)
+
+func (in reviewCheckRun) check(create bool) error {
+	switch {
+	case create && (in.Name == "" || !commitSHA.MatchString(in.HeadSHA)):
+		return fmt.Errorf("a check run needs a name and a full commit id, not %q and %q", truncate(in.Name, 60), truncate(in.HeadSHA, 70))
+	case !create && (in.Name != "" || in.HeadSHA != ""):
+		return errors.New("a check run's name and commit are set when it is made, not changed after")
+	case in.Status != "in_progress" && in.Status != "completed":
+		return fmt.Errorf("a review's check run is in_progress or completed, not %q", truncate(in.Status, 30))
+	case (in.Status == "completed") != (in.Conclusion != ""):
+		return errors.New("a check run has a conclusion when, and only when, it is completed")
+	case in.Conclusion != "" && !slices.Contains(reviewCheckConclusions, in.Conclusion):
+		return fmt.Errorf("a review's check run does not conclude %q", truncate(in.Conclusion, 30))
+	case in.DetailsURL != "" && !strings.HasPrefix(in.DetailsURL, "https://github.com/"):
+		return errors.New("a check run's details are on GitHub")
+	case in.Output == nil:
+		return nil
+	case strings.TrimSpace(in.Output.Title) == "" || utf8.RuneCountInString(in.Output.Title) > reviewCheckTitleMax:
+		return fmt.Errorf("a check run's title is 1 to %d characters", reviewCheckTitleMax)
+	case strings.TrimSpace(in.Output.Summary) == "" || utf8.RuneCountInString(in.Output.Summary) > reviewCheckSummaryMax:
+		return fmt.Errorf("a check run's summary is 1 to %d characters", reviewCheckSummaryMax)
+	}
+	return nil
+}
+
+// CreateCheckRun starts a check run on a commit of the repository and returns its id, which the
+// client may then update.
+func (c *reviewGitHub) CreateCheckRun(ctx context.Context, in reviewCheckRun) (int64, error) {
+	if err := in.check(true); err != nil {
+		return 0, err
+	}
+	resp, err := c.do(ctx, "POST", "check-runs", nil, in, "", proxyMaxRead)
+	if err != nil {
+		return 0, err
+	}
+	var out struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(resp.Body), &out); err != nil {
+		return 0, err
+	}
+	if out.ID <= 0 {
+		return 0, errors.New("GitHub answered a new check run without its id")
+	}
+	c.mu.Lock()
+	c.checks[out.ID] = true
+	c.mu.Unlock()
+	return out.ID, nil
+}
+
+// UpdateCheckRun moves one of the client's own check runs on: its text while it runs, or how it
+// ended.
+func (c *reviewGitHub) UpdateCheckRun(ctx context.Context, id int64, in reviewCheckRun) error {
+	if err := in.check(false); err != nil {
+		return err
+	}
+	_, err := c.do(ctx, "PATCH", fmt.Sprintf("check-runs/%d", id), nil, in, "", proxyMaxRead)
+	return err
+}
+
+// FindCheckRun finds the check run named name on sha that the App made for externalID — a run put
+// back after its start made one — and records it as the client's own; 0 when there is none. appID
+// is the App's id: another App may name a check the same, and its runs are not this one's to touch.
+func (c *reviewGitHub) FindCheckRun(ctx context.Context, sha, name, externalID, appID string) (int64, error) {
+	if !commitSHA.MatchString(sha) || name == "" || externalID == "" || appID == "" {
+		return 0, errors.New("a check run is found by its commit, its name, its run and the App's id")
+	}
+	var out struct {
+		CheckRuns []struct {
+			ID         int64  `json:"id"`
+			ExternalID string `json:"external_id"`
+			App        struct {
+				ID int64 `json:"id"`
+			} `json:"app"`
+		} `json:"check_runs"`
+	}
+	q := url.Values{"check_name": {name}, "app_id": {appID}, "filter": {"all"}, "per_page": {"100"}}
+	if err := c.getJSON(ctx, "commits/"+sha+"/check-runs", q, proxyMaxRead, &out); err != nil {
+		return 0, err
+	}
+	for _, cr := range out.CheckRuns {
+		if cr.ID > 0 && cr.ExternalID == externalID && strconv.FormatInt(cr.App.ID, 10) == appID {
+			c.mu.Lock()
+			c.checks[cr.ID] = true
+			c.mu.Unlock()
+			return cr.ID, nil
+		}
+	}
+	return 0, nil
 }
 
 // ---- review threads (GraphQL) ----

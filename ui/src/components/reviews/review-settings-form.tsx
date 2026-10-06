@@ -16,6 +16,7 @@ import {
 } from "@/components/reviews/review-fields";
 import {
   DRAFTS,
+  FIXES,
   FORKS,
   MODES,
   STRICTNESS,
@@ -236,6 +237,21 @@ export function ReviewSettingsForm({
             onPick={(v) => void save("forks", v)}
           />
         </SettingsSection>
+        <SettingsSection
+          title="Fixes"
+          description="Whether somebody who can push to the repository may have a finding fixed from the pull request: a fix job makes the change and pushes it as one more commit on the pull request's own branch. Never on a pull request from a fork."
+        >
+          <ChoiceField
+            env={env}
+            field="fixes"
+            label="Fixes"
+            choices={FIXES}
+            own={own.fixes === undefined ? undefined : own.fixes ? "yes" : "no"}
+            inherited={inherited.fixes ? "yes" : "no"}
+            reach={["yes"]}
+            onPick={(v) => void save("fixes", v === undefined ? undefined : v === "yes")}
+          />
+        </SettingsSection>
       </SettingsGroup>
 
       <SettingsGroup title="Notifications">
@@ -333,13 +349,24 @@ export function ReviewSettingsForm({
         </SettingsSection>
         <SettingsSection
           title="Authors to skip"
-          description="GitHub logins, or globs of them, never reviewed automatically — bots, mostly. A command still reviews them."
+          description="GitHub logins, or globs of them, never reviewed automatically — machine accounts, mostly. A command still reviews them."
         >
           <ChipsListField
             env={env}
             field="exclude_authors"
             label="Authors"
-            placeholder="renovate[bot], *-bot"
+            placeholder="release-bot, *-ci"
+          />
+        </SettingsSection>
+        <SettingsSection
+          title="Bots to review"
+          description="A pull request a bot opened is skipped, unless the bot is listed here — by login, with or without [bot], or a glob; * lets every bot through. The authors to skip still apply."
+        >
+          <ChipsListField
+            env={env}
+            field="review_bots"
+            label="Bots"
+            placeholder="dependabot, renovate[bot]"
           />
         </SettingsSection>
         <SettingsSection title="Paths to ignore" description="Path globs left out of every review: generated code, lockfiles, vendored packages.">

@@ -2,6 +2,8 @@ package worker
 
 import (
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 
 	"attesttag/internal/app"
@@ -23,7 +25,12 @@ func commitMessage(spec app.JobSpec, summary string, jobID int64) string {
 	if body == "" {
 		body = strings.TrimSpace(spec.Requirement)
 	}
-	return fmt.Sprintf("%s\n\n%s\n\nattest_tag fix job #%d", prTitle(spec), cut(body, 1500), jobID)
+	trailer := fmt.Sprintf("attest_tag fix job #%d", jobID)
+	if spec.Mode == app.JobModePR && spec.PR != nil && spec.PR.AskedBy != "" {
+		// A commit on somebody's own branch says who asked for it, so the branch's history does.
+		trailer += ", asked for by @" + spec.PR.AskedBy
+	}
+	return fmt.Sprintf("%s\n\n%s\n\n%s", prTitle(spec), cut(body, 1500), trailer)
 }
 
 func fence(s string) string {
@@ -44,6 +51,9 @@ func checkRow(name, cmd string, t app.JobTestRun) string {
 		return ""
 	case !t.Ran:
 		return fmt.Sprintf("| %s | `%s` | not run |", name, cmd)
+	case t.Killed != "":
+		// No counts: a run killed partway has counted only what it got through.
+		return fmt.Sprintf("| %s | `%s` | **did not finish** (killed: %s, after %.0fs) |", name, cmd, t.Killed, t.Seconds)
 	case t.OK && t.Passed > 0:
 		return fmt.Sprintf("| %s | `%s` | pass (%d passed, %.0fs) |", name, cmd, t.Passed, t.Seconds)
 	case t.OK:
@@ -86,12 +96,64 @@ func checkRows(build, tests, lint app.JobCheck) string {
 	return "| | command | result |\n|---|---|---|\n" + strings.Join(rows, "\n") + "\n"
 }
 
+// verdictSentence says how a gate stands after the change (app.JobCheck.Outcome), as a sentence
+// without its full stop: where names the package — " in `web/`" — for a job that checked several,
+// and killed is why a run that did not finish was stopped. One that did not finish is said to have
+// checked nothing, never to have failed: the sandbox stopping a suite says nothing about the code,
+// and a headline saying the tests fail sends a reviewer looking for a bug the change did not make.
+func verdictSentence(gate, outcome, where, killed string) string {
+	if gate == "build" {
+		switch outcome {
+		case app.CheckUnfinished:
+			return "The build" + where + " did not finish: it was killed (" + killed + "), so it did not check this change"
+		case app.CheckBroken:
+			return "The build" + where + " fails after this change, and passed before it"
+		case app.CheckWorse:
+			return "The build" + where + " fails with more errors after this change than before it"
+		case app.CheckStillFails:
+			return "The build" + where + " failed before this change and still fails after it"
+		}
+		return "The build" + where + " fails after this change"
+	}
+	switch outcome {
+	case app.CheckUnfinished:
+		return "The tests" + where + " did not finish: they were killed (" + killed + "), so they did not check this change"
+	case app.CheckBroken:
+		return "Tests" + where + " fail after this change, and passed before it"
+	case app.CheckWorse:
+		return "More tests" + where + " fail after this change than before it"
+	case app.CheckStillFails:
+		return "Tests" + where + " failed before this change and still fail after it"
+	}
+	return "Tests" + where + " fail after this change"
+}
+
+// verdictHeadline is verdictSentence at the top of a pull request, with what to do about it.
+func verdictHeadline(gate, outcome, where, killed, more string) string {
+	next := "Opened as a draft so a person can pick it up; " + more + "."
+	if outcome == app.CheckUnfinished {
+		next = "Please run it before merging; " + more + "."
+		if gate == "tests" {
+			next = "Please run them before merging; " + more + "."
+		}
+	}
+	return "> **" + verdictSentence(gate, outcome, where, killed) + ".** " + next + "\n\n"
+}
+
+// primaryVerdict is the primary package's Verdict, which the result keeps apart from the others'.
+func primaryVerdict(res *app.JobResult) (gate, outcome, killed string) {
+	p := app.JobPackage{Build: res.Build, Tests: res.Tests}
+	gate, outcome = p.Verdict()
+	return gate, outcome, p.Killed(gate)
+}
+
 // prBody is the pull request description: the brief, the evidence, what changed, and every gate
-// that ran, with an honest note up top when one still fails or none could be found. pkgs are the
-// packages the job checked, the primary first, for the toolchains each ran on.
-func prBody(spec app.JobSpec, res *app.JobResult, summary string, recipe *app.Recipe, jobID int64, skipped []string, pkgs []*pkgRun) string {
+// that ran, with an honest note up top when one fails, did not finish, or none could be found.
+// pkgs are the packages the job checked, the primary first, for the toolchains each ran on.
+func prBody(spec app.JobSpec, res *app.JobResult, summary string, recipe *app.Recipe, jobID int64, skipped []string, pkgs []*pkgRun, price *app.JobPrice) string {
 	var b strings.Builder
 	multi := len(res.Packages) > 0
+	gate, outcome, killed := primaryVerdict(res)
 	if res.Note != "" {
 		b.WriteString("> **Note:** " + res.Note + ".\n\n")
 	}
@@ -106,21 +168,16 @@ func prBody(spec app.JobSpec, res *app.JobResult, summary string, recipe *app.Re
 		}
 		b.WriteString("> **Nothing here was checked automatically: " + why + ".** Please build and test by hand before merging.\n")
 		b.WriteString("> You can tell attest_tag how this repository is built by committing `.attest/recipe.yaml`.\n\n")
-	case res.Tests.After.Ran && !res.Tests.After.OK:
-		b.WriteString("> **Tests still fail after this change.** Opened as a draft so a person can pick it up; see the output below.\n\n")
-	case res.Build.After.Ran && !res.Build.After.OK:
-		b.WriteString("> **The build still fails after this change.** Opened as a draft so a person can pick it up; see the output below.\n\n")
+	case outcome != app.CheckFine:
+		b.WriteString(verdictHeadline(gate, outcome, "", killed, "see the output below"))
 	case res.Setup.Ran && !res.Setup.OK:
 		b.WriteString("> **Dependencies did not install cleanly**, so the checks below may not mean much. Please run them before merging.\n\n")
 	case !res.Tests.After.Ran && !res.Build.After.Ran:
 		b.WriteString("> **The checks could not be run after the change.** Please run them before merging.\n\n")
 	}
 	for _, p := range res.Packages {
-		switch p.StillFailing() {
-		case "tests":
-			b.WriteString("> **Tests in " + folderMD(p.Workdir) + " still fail after this change.** See its checks below.\n\n")
-		case "build":
-			b.WriteString("> **The build in " + folderMD(p.Workdir) + " still fails after this change.** See its checks below.\n\n")
+		if g, o := p.Verdict(); o != app.CheckFine {
+			b.WriteString(verdictHeadline(g, o, " in "+folderMD(p.Workdir), p.Killed(g), "see its checks below"))
 		}
 	}
 	if len(res.Unchecked) > 0 {
@@ -184,6 +241,9 @@ func prBody(spec app.JobSpec, res *app.JobResult, summary string, recipe *app.Re
 		if recipe != nil {
 			fmt.Fprintf(&b, "\n<sub>Recipe: %s (from %s)</sub>\n", recipe.Describe(), recipeSourceLabel(recipe.Source))
 		}
+	}
+	if s := spendSection(res, price); s != "" {
+		b.WriteString("\n## Cost\n" + s)
 	}
 	fmt.Fprintf(&b, "\n---\nGenerated by attest_tag fix job #%d (engine %s, model %s). Review before merging; nothing here merges on its own.\n", jobID, spec.Constraints.Engine, spec.Constraints.Model)
 	return b.String()
@@ -276,11 +336,10 @@ func ticketComment(spec app.JobSpec, res *app.JobResult) string {
 		return ""
 	}
 	state := "checks pass"
+	gate, outcome, killed := primaryVerdict(res)
 	switch {
-	case res.Tests.After.Ran && !res.Tests.After.OK:
-		state = "tests still failing"
-	case res.Build.After.Ran && !res.Build.After.OK:
-		state = "build still failing"
+	case outcome != app.CheckFine:
+		state = verdictState(gate, "", outcome, killed)
 	case !res.Tests.After.Ran && !res.Build.After.Ran:
 		state = "nothing could be checked"
 	case !res.Tests.After.Ran:
@@ -289,8 +348,8 @@ func ticketComment(spec app.JobSpec, res *app.JobResult) string {
 	if len(res.Packages) > 0 {
 		var failing []string
 		for _, p := range res.Checked() {
-			if f := p.StillFailing(); f != "" {
-				failing = append(failing, f+" still failing in "+folderName(p.Workdir))
+			if g, o := p.Verdict(); o != app.CheckFine {
+				failing = append(failing, verdictState(g, " in "+folderName(p.Workdir), o, p.Killed(g)))
 			}
 		}
 		if len(failing) > 0 {
@@ -305,4 +364,76 @@ func ticketComment(spec app.JobSpec, res *app.JobResult) string {
 		state += fmt.Sprintf("; %d other changed packages not checked", n)
 	}
 	return fmt.Sprintf("attest_tag opened a draft pull request for this: %s (%s). Review before merging.", res.PR.URL, state)
+}
+
+// verdictState is a gate's outcome in the few words a ticket comment has room for: where names the
+// package — " in web/" — for a job that checked several.
+func verdictState(gate, where, outcome, killed string) string {
+	g := gate + where
+	switch outcome {
+	case app.CheckUnfinished:
+		return g + " did not finish, killed: " + killed
+	case app.CheckBroken:
+		return g + " failing (passed before)"
+	case app.CheckWorse:
+		return g + " failing worse than before"
+	case app.CheckStillFails:
+		return g + " still failing, as before"
+	}
+	return g + " failing"
+}
+
+// spendSection is what the engine's run took: turns, tokens and how much of the prompt the
+// provider served from its cache, and an estimate at the model's list price when the bot sent
+// one. An agent re-sends its whole conversation every turn, so a long job's input runs to
+// millions of tokens; the cache share is what says whether that was expensive.
+func spendSection(res *app.JobResult, price *app.JobPrice) string {
+	u := res.Usage
+	if u.In <= 0 && u.Out <= 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("| Turns | Input tokens | From cache | Output tokens |")
+	if price != nil {
+		b.WriteString(" Estimated cost |")
+	}
+	b.WriteString("\n|---:|---:|---:|---:|")
+	if price != nil {
+		b.WriteString("---:|")
+	}
+	cached := "—"
+	if u.Cached > 0 && u.In > 0 {
+		cached = fmt.Sprintf("%s (%d%%)", groupDigits(u.Cached), u.Cached*100/u.In)
+	}
+	turns := "—"
+	if res.Turns > 0 {
+		turns = strconv.Itoa(res.Turns)
+	}
+	fmt.Fprintf(&b, "\n| %s | %s | %s | %s |", turns, groupDigits(u.In), cached, groupDigits(u.Out))
+	if price != nil {
+		fmt.Fprintf(&b, " $%.2f |", price.Cost(u))
+	}
+	b.WriteString("\n")
+	if price != nil {
+		fmt.Fprintf(&b, "\n<sub>Estimated at the model's list price ($%s in, $%s cached, $%s out per million tokens); the provider that served each call may charge differently.</sub>\n",
+			fmtPerM(price.InPerM), fmtPerM(price.CachedPerM), fmtPerM(price.OutPerM))
+	}
+	return b.String()
+}
+
+// groupDigits writes 9842872 as 9,842,872.
+func groupDigits(n int) string {
+	s := strconv.Itoa(n)
+	if n < 0 {
+		return s
+	}
+	for i := len(s) - 3; i > 0; i -= 3 {
+		s = s[:i] + "," + s[i:]
+	}
+	return s
+}
+
+// fmtPerM writes a per-million price without the float noise of a per-token one scaled up.
+func fmtPerM(v float64) string {
+	return strconv.FormatFloat(math.Round(v*1e4)/1e4, 'f', -1, 64)
 }

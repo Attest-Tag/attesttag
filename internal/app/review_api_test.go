@@ -1788,3 +1788,68 @@ func TestReviewSettingsRefusalsReadOnTheirOwn(t *testing.T) {
 		t.Errorf("a body that is not JSON at all: %v", cut)
 	}
 }
+
+// A type of the organisation's own can be deleted once no branch rule names it; a built-in cannot.
+// The deleted type is gone from every list and lookup, but its history stays and its key stays
+// taken, so the runs that name {key, version} still mean what they ran.
+func TestReviewAPIDeletesACustomType(t *testing.T) {
+	ctx := context.Background()
+	rig := newReviewAPIRig(t, `{}`)
+	created := rig.must(200, "POST", "/api/review-types", rig.editor, map[string]any{"key": "api-contract", "name": "API contract",
+		"rules": []map[string]any{{"text": "Every handler checks the organisation."}}})["type"].(map[string]any)
+	id := created["id"].(string)
+
+	if code, _ := rig.call("DELETE", "/api/review-types/general?version=1", rig.editor, nil); code != 400 {
+		t.Errorf("deleting a built-in = %d", code)
+	}
+	if code, _ := rig.call("DELETE", "/api/review-types/api-contract?version=1", rig.viewer, nil); code != 403 {
+		t.Errorf("a viewer's delete = %d", code)
+	}
+	if code, _ := rig.call("DELETE", "/api/review-types/api-contract", rig.editor, nil); code != 400 {
+		t.Errorf("a delete without the version = %d", code)
+	}
+	rig.must(200, "PUT", rig.repoPath(), rig.editor, map[string]any{"settings": map[string]any{
+		"branch_rules": []map[string]any{{"types": []string{"api-contract"}}}}})
+	if code, out := rig.call("DELETE", "/api/review-types/api-contract?version=1", rig.editor, nil); code != 409 ||
+		!strings.Contains(fmt.Sprint(out["error"]), "1 branch rule names api-contract") {
+		t.Errorf("deleting a type a branch rule names = %d %v", code, out)
+	}
+	rig.must(200, "PUT", rig.repoPath(), rig.editor, map[string]any{"settings": map[string]any{"branch_rules": []map[string]any{}}})
+	rig.must(200, "POST", "/api/review-types/api-contract/disable", rig.editor, nil) // version 2
+	if code, _ := rig.call("DELETE", "/api/review-types/api-contract?version=1", rig.editor, nil); code != 409 {
+		t.Errorf("a delete against a version saved over = %d", code)
+	}
+	rig.must(200, "DELETE", "/api/review-types/"+id+"?version=2", rig.editor, nil)
+
+	for _, v := range rig.must(200, "GET", "/api/review-types", rig.viewer, nil)["types"].([]any) {
+		if v.(map[string]any)["key"] == "api-contract" {
+			t.Error("a deleted type is still listed")
+		}
+	}
+	if code, _ := rig.call("GET", "/api/review-types/api-contract", rig.viewer, nil); code != 404 {
+		t.Errorf("reading a deleted type = %d", code)
+	}
+	if code, _ := rig.call("PUT", "/api/review-types/"+id, rig.editor, map[string]any{"version": 2, "purpose": "Back."}); code != 404 {
+		t.Errorf("saving a deleted type = %d", code)
+	}
+	if code, _ := rig.call("DELETE", "/api/review-types/"+id+"?version=2", rig.editor, nil); code != 404 {
+		t.Errorf("deleting it twice = %d", code)
+	}
+	if code, out := rig.call("POST", "/api/review-types", rig.editor, map[string]any{"key": "api-contract", "name": "Again"}); code != 409 ||
+		!strings.Contains(fmt.Sprint(out["error"]), "deleted type") {
+		t.Errorf("a new type under a deleted type's key = %d %v", code, out)
+	}
+	if code, _ := rig.call("PUT", rig.repoPath(), rig.editor, map[string]any{"settings": map[string]any{
+		"branch_rules": []map[string]any{{"types": []string{"api-contract"}}}}}); code != 400 {
+		t.Errorf("a branch rule naming a deleted type = %d", code)
+	}
+	if run, skipped, err := resolveReviewTypes(ctx, rig.st, orgID, []string{"api-contract"}); err != nil || len(run) != 0 ||
+		len(skipped) != 1 || skipped[0].Skipped != "no such review type" {
+		t.Errorf("resolving a deleted type = %v %v %v", run, skipped, err)
+	}
+	var versions int
+	if err := rig.st.db.QueryRowContext(ctx, `select count(*) from review_type_versions v join review_types t on t.id=v.type_id
+		where t.org_id=? and t.public_id=?`, orgID, id).Scan(&versions); err != nil || versions != 2 {
+		t.Errorf("a deleted type's history = %d versions, %v", versions, err)
+	}
+}

@@ -71,6 +71,34 @@ func TestRedact(t *testing.T) {
 	}
 }
 
+// Names that contain a key's prefix are not keys: a review once reported a CSS variable as a
+// committed API key, because sk- matched inside "ask-ai-gradient-start".
+func TestRedactLeavesNamesAlone(t *testing.T) {
+	for _, in := range []string{
+		"var(--clr-ask-ai-gradient-start),",
+		"$task-list-item-padding-large: 4px;",
+		"import { disk-usage-summary-panel } from './x'",
+		"sk-learn-model-selection-guide",
+		"laughs_aaaaaaaaaaaaaaaaaaaaaaaa",
+	} {
+		if got := redact(in); got != in {
+			t.Errorf("redact(%q) = %q, want it unchanged", in, got)
+		}
+		if _, kinds, _ := (&reviewMasker{}).line(in); len(kinds) > 0 {
+			t.Errorf("review masker found %v in %q", kinds, in)
+		}
+	}
+	for _, in := range []string{
+		`key = "sk-proj-Ab3dEfGh1jKlMn0pQrStUv"`,
+		"OPENAI_API_KEY=sk-or-v1-abcdefghijklmnop1234",
+		"Authorization: Bearer sk-ant-api03-abcdefghijklmnopqr",
+	} {
+		if got := redact(in); !strings.Contains(got, "[redacted-secret]") {
+			t.Errorf("redact(%q) = %q, want the key masked", in, got)
+		}
+	}
+}
+
 func TestStripThinking(t *testing.T) {
 	if got := stripThinking("<think>hmm</think>\n\nanswer"); got != "answer" {
 		t.Errorf("got %q", got)

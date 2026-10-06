@@ -1095,7 +1095,7 @@ func (r *reviewRun) find(ctx context.Context, ts *reviewTypeSpec, model string, 
 		if sub, ok := submissionFrom(msg, reviewSubmitTool); ok {
 			return sub, nil
 		}
-		msgs = append(msgs, msg.ToParam())
+		msgs = append(msgs, assistantTurn(*msg))
 		if len(msg.ToolCalls) == 0 {
 			// Prose and no tool: the model thinks it is done, and is asked for the tool next round —
 			// or, if this was that round, once more below.
@@ -1224,7 +1224,9 @@ WHAT COUNTS
 - Report a problem only when you can name the trigger (the input, the sequence of events, the state) and the consequence.
 - Quote the code exactly. Every finding carries evidence: each item names a file, a ref and lines, and quotes those lines exactly as they are there. A quote that is not at that place drops the finding.
 - Look things up instead of assuming. If a check might be done elsewhere, read the code before you say it is missing.
-- Nothing a compiler, type checker, linter or formatter reports. Style only when a rule below asks for it, cited by its id.
+- A comment, name or docstring the change adds that states a fact about other code ("callers pass a 16px icon", "only called after login", "never empty here") is a claim to test, not a fact to accept. Check it against the callers in the diff and with find_code, and report it when one contradicts it.
+- When the change edits something other code shares (a component, its stylesheet, a mixin, a design token, a utility, a base class, a default value), find its users in the diff and with find_code, and check that each still gets what it relied on.
+- Nothing a compiler, type checker, linter or formatter reports. Style only when a rule below asks for it, cited by its id. Style means formatting and naming: a stylesheet or markup change that alters what people see or can use (a selector wider than the case it was written for, a size, colour or spacing forced on elements that set their own, something hidden, clipped or unreachable) is behaviour, and is reviewed like code.
 - A problem in code this pull request did not change is pre_existing: true. It is listed apart and does not count against the change.
 - Fewer, surer findings. An empty findings list is the right answer for a sound change.
 
@@ -2044,7 +2046,7 @@ func (r *reviewRun) verify(ctx context.Context, c *reviewCandidate) (*reviewVerd
 		if v, ok := verdictFrom(msg); ok {
 			return v, cost, nil
 		}
-		msgs = append(msgs, msg.ToParam())
+		msgs = append(msgs, assistantTurn(*msg))
 		if len(msg.ToolCalls) == 0 {
 			if land {
 				break

@@ -3,9 +3,12 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/openai/openai-go/v3"
@@ -202,5 +205,220 @@ func TestTailBreakpointOnlyForTheProvidersThatNeedOne(t *testing.T) {
 	userLast := []openai.ChatCompletionMessageParamUnion{openai.SystemMessage("s"), openai.UserMessage("q")}
 	if got := withTailCache(userLast); got[1].OfUser == nil || !got[1].OfUser.Content.OfString.Valid() {
 		t.Error("withTailCache rewrote a user message; only a tool result is worth an entry")
+	}
+}
+
+// An endpoint that refuses a tool_choice gets the same request without the field, and what it
+// refused is remembered so the next call of that kind goes straight there instead of paying for
+// the refusal again. "none" and a named tool are remembered apart: an endpoint that refuses only
+// a named tool while reasoning still gets "none", which keeps the landing round's prefix cached.
+func TestChatRetriesWithoutRefusedToolChoice(t *testing.T) {
+	const metaRefusal = `{"error":{"message":"Provider returned error","code":400,"metadata":{"raw":"only \"auto\" is supported for tool_choice","provider_name":"Meta"}}}`
+	for _, tc := range []struct {
+		name   string
+		refuse func(choice string) (status int, body string) // status 0 = answer
+		forces []string
+		want   []string // tool_choice of every request the endpoint saw, "" = absent
+	}{{
+		name: "only auto",
+		refuse: func(choice string) (int, string) {
+			if choice != "" {
+				return http.StatusBadRequest, metaRefusal
+			}
+			return 0, ""
+		},
+		forces: []string{toolChoiceNone, toolChoiceNone, "search", "search"},
+		want:   []string{`"none"`, "", "", "named", "", ""},
+	}, {
+		name: "named refused, none taken",
+		refuse: func(choice string) (int, string) {
+			if choice == "named" {
+				return http.StatusBadRequest, `{"error":{"message":"Thinking may not be enabled when toolChoice forces tool use."}}`
+			}
+			return 0, ""
+		},
+		forces: []string{"search", "search", toolChoiceNone},
+		want:   []string{"named", "", "", `"none"`},
+	}, {
+		name: "routing found no endpoint for the choice",
+		refuse: func(choice string) (int, string) {
+			if choice != "" {
+				return http.StatusNotFound, `{"error":{"message":"No endpoints found for m. Every candidate endpoint was removed during routing: Filter by Tool Compatibility removed a, b","code":404}}`
+			}
+			return 0, ""
+		},
+		forces: []string{toolChoiceNone, toolChoiceNone},
+		want:   []string{`"none"`, "", ""},
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			var seen []string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var req struct {
+					ToolChoice json.RawMessage `json:"tool_choice"`
+				}
+				body, _ := io.ReadAll(r.Body)
+				json.Unmarshal(body, &req)
+				choice := string(req.ToolChoice)
+				if strings.HasPrefix(choice, "{") {
+					choice = "named"
+				}
+				seen = append(seen, choice)
+				w.Header().Set("Content-Type", "application/json")
+				if status, body := tc.refuse(choice); status != 0 {
+					w.WriteHeader(status)
+					w.Write([]byte(body))
+					return
+				}
+				w.Write([]byte(`{"id":"1","object":"chat.completion","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+			}))
+			defer srv.Close()
+
+			l := NewLLM(Config{LLMBaseURL: srv.URL, LLMKey: "sk-test"})
+			msgs := []openai.ChatCompletionMessageParamUnion{openai.UserMessage("hi")}
+			for _, force := range tc.forces {
+				resp, _, err := l.Chat(context.Background(), "m", msgs, twoTools(), force)
+				if err != nil {
+					t.Fatalf("force %q: %v", force, err)
+				}
+				if resp.Choices[0].Message.Content != "ok" {
+					t.Fatalf("force %q: content %q", force, resp.Choices[0].Message.Content)
+				}
+			}
+			if !reflect.DeepEqual(seen, tc.want) {
+				t.Fatalf("tool_choice per request = %q, want %q", seen, tc.want)
+			}
+		})
+	}
+}
+
+// A refusal the retry does not cure is the endpoint's error, not a fact about tool_choice: it is
+// returned, and nothing is remembered, so the next call still asks for what it wants.
+func TestChatToolChoiceRefusalNotRememberedWhenRetryFails(t *testing.T) {
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ToolChoice json.RawMessage `json:"tool_choice"`
+		}
+		body, _ := io.ReadAll(r.Body)
+		json.Unmarshal(body, &req)
+		seen = append(seen, string(req.ToolChoice))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":{"message":"tool_choice and everything else is wrong today"}}`))
+	}))
+	defer srv.Close()
+
+	l := NewLLM(Config{LLMBaseURL: srv.URL, LLMKey: "sk-test"})
+	msgs := []openai.ChatCompletionMessageParamUnion{openai.UserMessage("hi")}
+	for range 2 {
+		if _, _, err := l.Chat(context.Background(), "m", msgs, twoTools(), toolChoiceNone); err == nil {
+			t.Fatal("a 400 the retry did not cure came back as success")
+		}
+	}
+	if want := []string{`"none"`, "", `"none"`, ""}; !reflect.DeepEqual(seen, want) {
+		t.Fatalf("tool_choice per request = %q, want %q", seen, want)
+	}
+}
+
+// Only a refusal of the choice is retried without it: a 400 about anything else, or a 404 that is
+// not routing's tool filter, fails as it came.
+func TestToolChoiceRefused(t *testing.T) {
+	named := openai.ChatCompletionNewParams{ToolChoice: openai.ChatCompletionToolChoiceOptionUnionParam{
+		OfFunctionToolChoice: &openai.ChatCompletionNamedToolChoiceParam{Function: openai.ChatCompletionNamedToolChoiceFunctionParam{Name: "x"}},
+	}}
+	// Built the way the SDK builds one from a response, so Error() carries the body.
+	apiErr := func(status int, msg string) error {
+		e := &openai.Error{}
+		body, _ := json.Marshal(map[string]string{"message": msg})
+		if err := e.UnmarshalJSON(body); err != nil {
+			t.Fatal(err)
+		}
+		e.StatusCode = status
+		e.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+		e.Response = &http.Response{StatusCode: status}
+		return e
+	}
+	for _, tc := range []struct {
+		p    openai.ChatCompletionNewParams
+		err  error
+		want bool
+	}{
+		{named, apiErr(400, `only "auto" is supported for tool_choice`), true},
+		{named, apiErr(400, "Thinking may not be enabled when toolChoice forces tool use"), true},
+		{named, apiErr(400, "The tool choice must be auto"), true},
+		{named, apiErr(404, "Every candidate endpoint was removed during routing: Filter by Tool Compatibility removed a"), true},
+		{named, apiErr(400, "context length exceeded"), false},
+		{named, apiErr(404, "No endpoints found matching your data policy"), false},
+		{named, apiErr(429, "tool_choice rate limited"), false},
+		{named, errors.New("tool_choice: connection reset"), false},
+		{openai.ChatCompletionNewParams{}, apiErr(400, `only "auto" is supported for tool_choice`), false},
+	} {
+		if got := toolChoiceRefused(tc.p, tc.err); got != tc.want {
+			t.Errorf("toolChoiceRefused(%v) = %v, want %v", tc.err, got, tc.want)
+		}
+	}
+}
+
+// A failure OpenRouter reports inside a 200 — {"error": …} and no choices, which is how an
+// upstream that timed out after the status line was sent arrives — is an error, not an empty
+// answer: a transient one is tried once more, as the SDK retries the same failure sent as a 504,
+// and anything else comes back with what the provider said.
+func TestChatErrorInsideA200(t *testing.T) {
+	answer := `{"id":"1","object":"chat.completion","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`
+	for _, tc := range []struct {
+		name    string
+		bodies  []string // one per request, the last repeated
+		force   string
+		want    string // content, or the error's text
+		wantErr bool
+		calls   int
+	}{{
+		name:   "transient, then answered",
+		bodies: []string{`{"error":{"message":"Upstream idle timeout exceeded","code":504,"metadata":{"error_type":"timeout"}}}`, answer},
+		want:   "ok", calls: 2,
+	}, {
+		name:   "transient twice",
+		bodies: []string{`{"error":{"message":"Upstream idle timeout exceeded","code":504}}`},
+		want:   "Upstream idle timeout exceeded", wantErr: true, calls: 2,
+	}, {
+		name:   "not transient",
+		bodies: []string{`{"error":{"message":"Provider returned error","code":400,"metadata":{"raw":"context length exceeded"}}}`},
+		want:   "context length exceeded", wantErr: true, calls: 1,
+	}, {
+		name:   "a refused tool_choice inside a 200",
+		bodies: []string{`{"error":{"message":"Provider returned error","code":400,"metadata":{"raw":"only \"auto\" is supported for tool_choice"}}}`, answer},
+		force:  toolChoiceNone,
+		want:   "ok", calls: 2,
+	}, {
+		name:   "a string code",
+		bodies: []string{`{"error":{"message":"upstream broke","code":"server_error"}}`, answer},
+		want:   "ok", calls: 2,
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body := tc.bodies[min(calls, len(tc.bodies)-1)]
+				calls++
+				w.Header().Set("Content-Type", "application/json")
+				w.Write([]byte(body))
+			}))
+			defer srv.Close()
+
+			l := NewLLM(Config{LLMBaseURL: srv.URL, LLMKey: "sk-test"})
+			resp, _, err := l.Chat(context.Background(), "m", []openai.ChatCompletionMessageParamUnion{openai.UserMessage("hi")}, twoTools(), tc.force)
+			switch {
+			case tc.wantErr && err == nil:
+				t.Fatalf("answered %q, want an error", resp.Choices[0].Message.Content)
+			case tc.wantErr && !strings.Contains(err.Error(), tc.want):
+				t.Fatalf("error %q does not say %q", err, tc.want)
+			case !tc.wantErr && err != nil:
+				t.Fatal(err)
+			case !tc.wantErr && resp.Choices[0].Message.Content != tc.want:
+				t.Fatalf("content %q, want %q", resp.Choices[0].Message.Content, tc.want)
+			}
+			if calls != tc.calls {
+				t.Fatalf("%d requests, want %d", calls, tc.calls)
+			}
+		})
 	}
 }

@@ -20,7 +20,8 @@ what to do next. Everything here exists because one of those is eventually hosti
 - **GitHub App tokens are minted narrow.** A repository connected through the GitHub App stores
   no token: one is minted per call, scoped to that one repository and to what the call is for —
   contents and pull requests, read and write, for the bot's GitHub tools and fix jobs; read-only
-  for what code review reads; pull requests alone for the review it posts. Code review knows its
+  for what code review reads; pull requests alone for the review it posts; checks alone for its
+  check on the pull request. Code review knows its
   own comments by signed hidden markers (`<!-- attest_tag:`), and because the bot's tools post as
   the same App, the proxy removes those markers from every other request it sends to GitHub, so
   nothing the model writes can pass for the review's.
@@ -67,11 +68,14 @@ code instead ([code review](code-review.md)):
   model to confirm — and every word a model wrote
   passes a sanitiser that defuses `@` mentions, drops images and keeps links only into the pull
   request's own repository and the context repositories the review was allowed to read.
-- **The review is a comment,** never an approval or a request for changes, so it gates nothing.
+- **The review is a comment,** never an approval or a request for changes, so it gates nothing;
+  its check is never concluded as a failure, so requiring it gates nothing either.
 - **The token is narrow.** The review posts with a token minted for that one repository that can
-  write pull requests and nothing else, and reads with a read-only one. Every URL is checked
-  against an allowlist of that repository, that pull request and the endpoints a review uses, so
-  nothing it reads can steer it into another repository, a merge or a delete. GitHub's one GraphQL
+  write pull requests and nothing else, reads with a read-only one, and reports its check with one
+  for checks alone. Every URL is checked against an allowlist of that repository, that pull request
+  and the endpoints a review uses, so nothing it reads can steer it into another repository, a
+  merge, or a delete of anything but the App's own reactions on that pull request, nor into a check
+  run it did not make. GitHub's one GraphQL
   URL takes only two documents Go wrote: listing that pull request's review threads, and resolving
   one of them once its finding is closed.
 - **The pull request does not instruct it.** Instruction files are read at the base commit, and a
@@ -100,8 +104,9 @@ from a reply is only ever proposed: it does nothing until somebody turns it on i
 `reviews.view` reads reviews and `reviews.manage` tunes them — review types and their rules,
 strictness, instructions, which repositories are reviewed in *Shadow* — and starts one by hand. What
 posts, spends or reaches further needs `connections.manage` as well: *Live*, reviewing every push,
-forks, the context repositories a review may read, the model, what one review may spend, the chat
-channel reviews are announced in — which carries private repositories' findings to whoever reads it
+forks, the context repositories a review may read, the model, what one review may spend, *Fixes*
+turned on — which lets a fix job push to a pull request's branch when somebody who can push asks —
+the chat channel reviews are announced in — which carries private repositories' findings to whoever reads it
 — a branch rule that posts live, reviews every push, names a model or a channel, adding repositories
 to code review, and code review's monthly and daily budgets. It is judged on what a change makes
 effective, branch by branch and at every repository under the level changed, so it cannot be reached
@@ -349,7 +354,11 @@ title, branch and finding in it to one line with mentions, broadcasts and links 
   moment it passes either, so a small file that expands into gigabytes cannot run the shared
   instance out of memory; that PDF is left out of the index.
 - **Fix jobs.** The repository's code, and every git command after the clone, run in the worker
-  as an unprivileged sandbox user ([fix-jobs.md](fix-jobs.md)).
+  as an unprivileged sandbox user ([fix-jobs.md](fix-jobs.md)). A job pushes one new branch of the
+  bot's own, marked by a suffix no setting removes — except one asked for on a pull request, which
+  pushes to that pull request's branch alone: named by the bot, never the branch it merges into,
+  never a fork's, never forced, and only for somebody GitHub says can push to the repository
+  ([fixing a finding](code-review.md#fixing-a-finding-on-the-pull-request)).
 - **Audit.** Every turn, tool call, proxied request, and completion (with tokens and cost) is
   stored and visible on the Activity page, to anyone holding `activity.view` — every built-in
   role. So two kinds of tool call are recorded without their arguments or result, which are

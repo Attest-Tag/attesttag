@@ -11,8 +11,8 @@ CNAME to — and `openssl` for `CREATE_DATABASE=1`. Reads secrets from `.env` (`
 overrides) — run [`../local/bootstrap.sh`](../local/bootstrap.sh) first if you have not.
 Idempotent: rerunning it is how you ship a new image.
 
-By default it mirrors the published image into ECR, and none has been published yet: add
-`IMAGE_SOURCE=build`, which builds this checkout for `linux/amd64` instead.
+By default it mirrors the latest released image into ECR. `IMAGE_SOURCE=build` builds this
+checkout for `linux/amd64` instead.
 
 > **Not run against a live account routinely, unlike [`../gcp/`](../gcp/README.md),** which the
 > hosted service deploys with. This one was written against the AWS API and reviewed, and
@@ -38,7 +38,7 @@ price of that, and it is most of the bill here.
 | S3 bucket | `attesttag-data-<account>`, or the one `BUCKET` names. Documents under `docs/`, the SQLite replica beside them |
 | IAM user + access key | The app signs S3 requests with static keys and has no instance-role path, so a task role would not be read. The user's policy covers this one bucket prefix and nothing else |
 | Secrets Manager | `attesttag/s3-key`, holding that key, and `attesttag/env`, one JSON document holding the secrets the script knows from the env file plus the S3 secret. ECS reads individual keys out of the second |
-| ECR repository | The image, mirrored from ghcr.io — or built from this checkout with `IMAGE_SOURCE=build`, the only choice until an image is published |
+| ECR repository | The image, mirrored from ghcr.io — or built from this checkout with `IMAGE_SOURCE=build` |
 | ACM certificate | For `$DOMAIN`, validated by a CNAME the script prints |
 | ALB + target group | 443 forwards, 80 redirects. Health check `/health` |
 | ECS cluster + service | One task, always on |

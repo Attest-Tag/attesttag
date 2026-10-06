@@ -1151,6 +1151,12 @@ func (a *Agent) turn(ctx context.Context, c *Call) error {
 				note, stopped = outOfSpendNote, "I hit my budget"
 				slog.Warn("turn reached its spend ceiling; landing it", "channel", c.Channel, "thread", c.ThreadTS,
 					"round", round, "cost_usd", fmt.Sprintf("%.5f", c.usage.CostUSD), "in", c.usage.In)
+			case repeats.stuck() && repeats.canSkip(c.Kind):
+				// A routine works down a list; one looping item is skipped, not the rest of it.
+				repeats.skip()
+				params.Messages = append(params.Messages, openai.UserMessage(skipNote))
+				slog.Warn("routine kept repeating its tool calls; skipping to the next item", "channel", c.Channel, "thread", c.ThreadTS,
+					"round", round, "repeated", repeats.total, "skips", repeats.skips)
 			case repeats.stuck():
 				note, stopped = stuckNote, "I kept repeating the same tool calls"
 				slog.Warn("turn kept repeating its tool calls; landing it", "channel", c.Channel, "thread", c.ThreadTS,
@@ -1283,12 +1289,12 @@ func (a *Agent) turn(ctx context.Context, c *Call) error {
 			c.AnswerTS = ts
 			c.roundsUsed = round + 1
 			a.store.AddTurn(ctx, c.TeamID, c.Channel, c.ThreadTS, "assistant", c.SL.BotUserID, text, ts, c.usage.In, c.usage.Out)
-			slog.Info("turn", "channel", c.Channel, "thread", c.ThreadTS, "model", model, "rounds", round+1, "repeated", repeats.total,
+			slog.Info("turn", "channel", c.Channel, "thread", c.ThreadTS, "model", model, "rounds", round+1, "repeated", repeats.total, "skips", repeats.skips,
 				"in", c.usage.In, "cached_in", c.usage.CachedIn, "out", c.usage.Out, "reasoning", c.usage.Reasoning,
 				"cost_usd", fmt.Sprintf("%.5f", c.usage.CostUSD))
 			return err
 		}
-		params.Messages = append(params.Messages, msg.ToParam())
+		params.Messages = append(params.Messages, assistantTurn(msg))
 		// A call the turn has made before runs at most twice more, each time under a note
 		// saying so, and then is refused; a round that asks for nothing new counts towards
 		// landing the turn. See repeat_guard.go for why.

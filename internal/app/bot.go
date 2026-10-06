@@ -299,6 +299,7 @@ func Run() {
 	}
 	b.jobs = NewJobRunner(cfg, store, slacks, proxy, settings)
 	b.jobs.agent = b.agent
+	b.jobs.onGitHubEnd = b.reviewFixEnded
 	b.agent.jobs = b.jobs
 	b.review = newReviewEngine(b.agent)
 	ix.scopes = func(ctx context.Context, orgID int64) map[string]string {
@@ -613,19 +614,37 @@ func teamOf(raw json.RawMessage, ev slackevents.EventsAPIEvent) string {
 	return ev.TeamID
 }
 
+// disconnectedBySlack records a workspace Slack says the bot is gone from: its token is dead by the
+// time this arrives. The organisation is read first, while the row is still active, which is all
+// OrgOfTeam will answer for.
+func (b *Bot) disconnectedBySlack(ctx context.Context, teamID, reason string) {
+	if teamID == "" {
+		return
+	}
+	slog.Info("workspace disconnected by Slack", "team", teamID, "why", reason)
+	org, orgErr := b.store.OrgOfTeam(ctx, teamID)
+	b.slacks.Evict(teamID)
+	b.store.RevokeTeam(ctx, teamID, reason)
+	if orgErr == nil {
+		b.changed(ctx, org)
+	}
+}
+
 func (b *Bot) route(ctx context.Context, teamID string, ev slackevents.EventsAPIEvent) {
 	// Uninstall and revoke arrive like any other event and are the only ones handled without
 	// a client — by then the token is already dead.
-	switch ev.InnerEvent.Data.(type) {
-	case *slackevents.AppUninstalledEvent, *slackevents.TokensRevokedEvent:
-		if teamID != "" {
-			slog.Info("workspace disconnected by Slack", "team", teamID)
-			b.slacks.Evict(teamID)
-			b.store.RevokeTeam(ctx, teamID, "the app was uninstalled or its tokens were revoked in Slack")
-			if org, err := b.store.OrgOfTeam(ctx, teamID); err == nil {
-				b.changed(ctx, org)
-			}
+	switch e := ev.InnerEvent.Data.(type) {
+	case *slackevents.TokensRevokedEvent:
+		// Slack sends this for user tokens too — a person's own grant to the app, given back — and
+		// lists them apart from the bot's. Only the bot's is what the workspace runs on.
+		if len(e.Tokens.Bot) == 0 {
+			slog.Info("user tokens revoked in Slack; the bot's token stands", "team", teamID, "users", len(e.Tokens.Oauth))
+			return
 		}
+		b.disconnectedBySlack(ctx, teamID, "the app's token was revoked in Slack")
+		return
+	case *slackevents.AppUninstalledEvent:
+		b.disconnectedBySlack(ctx, teamID, "the app was uninstalled in Slack")
 		return
 	}
 	sl, err := b.slacks.For(ctx, teamID)

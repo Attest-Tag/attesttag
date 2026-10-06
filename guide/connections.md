@@ -228,10 +228,11 @@ reaches GitHub only through the installation — never through a pasted token, s
 GitHub sends no pull-request events — and the repositories connected here through it are what the
 Reviews page lists under that connection, though every repository the installation can see is
 reviewed under the connection's settings. It needs *Contents: Read* and *Pull requests: Read and
-write*, and the webhook events in
+write* — and *Checks: Read and write* for its check on the pull request, which is optional — and the
+webhook events in
 [configuration](configuration.md#the-apps-webhook-and-permissions-for-code-review). Its tokens are
 minted per call like the bot's, and narrower: read-only for what a review reads, pull requests
-alone for what it posts. Under Repositories each repository saved through the App says *review:
+alone for what it posts, checks alone for its check. Under Repositories each repository saved through the App says *review:
 live*, *shadow* or *off*, and **Code review settings…** in its menu opens its settings; *Connect
 repo* warns when the installation picked has not accepted what code review asks for.
 
