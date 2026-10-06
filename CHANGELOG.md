@@ -14,7 +14,14 @@ Versions follow [semantic versioning](https://semver.org). Before 1.0 that means
   down migrations, so back the database up before a minor upgrade: going back means restoring
   that backup.
 
-## Unreleased
+## 0.3.0 (2026-10-06)
+
+The first release with images: `ghcr.io/attest-tag/attesttag:0.3.0` for linux/amd64 and
+linux/arm64, the fix-job worker images beside it, the Helm chart at
+`oci://ghcr.io/attest-tag/charts/attest-tag` and binaries for Linux and macOS, all signed with
+cosign. Pin the minor (`ATTEST_VERSION=0.3`, or `image.tag: "0.3"`) to take its fixes and no
+migration you did not read about. From here on these are built from `main` only: the release
+workflow refuses a tag that `main` does not contain. → [Deploy](guide/deploy.md)
 
 **Code review shows on the pull request while it works.** → [The reactions and the check](guide/code-review.md#the-reactions-and-the-check)
 
@@ -110,14 +117,6 @@ of them the same prefix again. → [What a job costs](guide/fix-jobs.md#what-a-j
   to compare engines, models and providers on what was right and what it cost.
   → [Fix-job evals](evals/README.md#fix-job-evals)
 
-Upgrading: migration `0032_job_cached_tokens` adds the columns and applies itself at startup. The
-proxy, pi and the rest of the worker's changes need the worker image rebuilt from this release
-(`deploy/<platform>/worker.sh`); an older worker's jobs record no cached tokens. For the code review check, add *Checks: Read and write* under the
-App's *Permissions & events* at GitHub; each account that installed it is then asked to accept, and
-its next review has a check. Fixes on the pull request need the worker image rebuilt from this
-release (`deploy/<platform>/worker.sh`): an older worker refuses such a job at its clone and pushes
-nothing.
-
 **Models that will not be told which tool to use still answer.** Some endpoints refuse a
 `tool_choice` other than `auto`. Meta's Muse models refuse both `none` and a named tool. Claude
 Sonnet and Opus 5.5 and Qwen 3.8 Flash refuse a named tool while they reason, and OpenRouter answers
@@ -149,6 +148,18 @@ OpenRouter, each with its address filled in. → [Its own model key](guide/plans
   unpriced.
 - **DeepSeek has no embedding model**, so document search is off while a DeepSeek key is in use. Its
   models refuse a named tool while they reason, which the change above already recovers from.
+
+**A custom review type can be deleted** once no branch rule names it. The row and its versions are
+kept (migration `0033_review_type_deleted` marks it), so past runs still name what they ran with
+and its key stays taken; a built-in type or its copy cannot be deleted. → [Code review](guide/code-review.md)
+
+Upgrading: migrations `0032_job_cached_tokens` and `0033_review_type_deleted` add columns and apply
+themselves at startup; both are additive, so the old version keeps working while the new one
+rolls out. The fix-job proxy, pi, and fixes on the pull request need the worker image from this
+release (`deploy/<platform>/worker.sh`, or the published `attesttag-worker:0.3.0`): an older worker
+records no cached tokens and refuses a fix-on-the-pull-request job at its clone. For the code review
+check, add *Checks: Read and write* under the App's *Permissions & events* at GitHub; each account
+that installed it is then asked to accept, and its next review has a check.
 
 ## 0.2.0 (2026-10-04)
 
