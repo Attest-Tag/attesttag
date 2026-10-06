@@ -115,17 +115,19 @@ on it. That is for your benefit, not the project's.
 
 For maintainers. A release is a `v*` tag on `main`, and the tag is the whole ceremony:
 [`release.yml`](.github/workflows/release.yml) runs the suite, publishes the images and the Helm
-chart to GHCR, builds the binaries with `make dist`, and creates the GitHub release. Before
-tagging, add the version's section to [`CHANGELOG.md`](CHANGELOG.md): the workflow refuses a tag
-without one, and the release notes open with it. A patch release never carries a migration,
+chart to GHCR, builds the binaries with `make dist`, and creates the GitHub release. It refuses a
+tag whose commit is not on `main`, so images, the chart and `:latest` only ever come from `main`:
+merge `testing` into `main` first, then tag the merge. Before that, add the version's section to
+[`CHANGELOG.md`](CHANGELOG.md): the workflow refuses a tag without one, and the release notes open
+with it. A patch release never carries a migration,
 because deployments pinned to a minor version restart onto it unread. When the workflow itself
 has changed, tag a release candidate first (`v0.2.0-rc.1`), which publishes everything except
 `:latest` and is marked as a prerelease.
 
-0.1.0 was released as the source alone: the release workflow was disabled first
-(`gh workflow disable release.yml`), so its tag built nothing, and the GitHub release was made
-by hand with its CHANGELOG section as the notes. `gh workflow enable release.yml` turns the
-builds back on for the next tag.
+0.1.0 and 0.2.0 were released as the source alone: the release workflow was disabled
+(`gh workflow disable release.yml`), so their tags built nothing, and their GitHub releases were
+made by hand with the CHANGELOG section as the notes. 0.3.0 is the first release the workflow
+published.
 
 ## Security
 
