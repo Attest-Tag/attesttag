@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/bits"
 	"net/url"
 	"path"
 	"regexp"
@@ -15,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode"
 
 	"attesttag/internal/review"
 )
@@ -47,9 +49,11 @@ const (
 	// release-sized pull request becomes several passes rather than one it skims.
 	reviewUnitTokens  = 40_000
 	reviewCharsPerTok = 3.5
-	// The most changed files one review reads, best first (reviewRank). The rest are said out loud
-	// in "Not reviewed", which caps the score, rather than read badly.
-	reviewMaxFiles = 80
+	// The most changed files one review reads, riskiest first (reviewRank). The rest are said out
+	// loud in "Not reviewed", which caps the score, rather than read badly. A large pull request is
+	// where a bug hides best, and at 80 a large one left most of itself unread; the finder's time
+	// grows with what there is to read (reviewFinderBudget), and max $ still bounds the money.
+	reviewMaxFiles = 150
 	// A changed file this short is shown whole, up to this many of them per unit; a longer one is
 	// shown as the declaration enclosing each hunk, at most this many lines a hunk.
 	reviewWholeFileLines = 400
@@ -206,6 +210,7 @@ type reviewFile struct {
 	// "unreadable"), or "" when it is.
 	skip   string
 	tier   int // reviewRank's tier
+	risk   int // reviewRank's order within the tier (reviewRisk)
 	tokens int // its numbered diff's estimated size
 }
 
@@ -332,7 +337,7 @@ func reviewParseFile(gf review.File, e review.Effective) *reviewFile {
 		masked.Patch = ""
 	}
 	f.File = masked
-	f.tier = reviewTier(raw.Path)
+	f.tier, f.risk = reviewTier(raw.Path), reviewRisk(raw.Path, f.changed())
 	f.tokens = reviewTokens(review.NumberedPatch(masked))
 	switch {
 	case e.IgnoresPath(raw.Path):
@@ -401,26 +406,121 @@ var (
 	reviewTestPaths = []string{"**/*_test.*", "**/*.test.*", "**/*.spec.*", "**/test_*.py", "**/test/**", "**/tests/**",
 		"**/__tests__/**", "**/testdata/**", "**/fixtures/**"}
 	reviewDocPaths = []string{"**/*.md", "**/*.mdx", "**/*.rst", "**/*.txt", "**/*.adoc", "docs/**", "doc/**", "**/LICENSE*"}
+	// reviewSurfacePaths change how a thing looks or what a test is fed rather than what the code
+	// does: stylesheets and images, stories, snapshots, fixtures and mocks, and translations. Read
+	// after the tests, since a large pull request's cut falls on whatever is ranked last. Snapshot
+	// files a test runner writes (__snapshots__, .snap) are generated (reviewGeneratedPaths) and
+	// never get this far.
+	reviewSurfacePaths = []string{"**/*.css", "**/*.scss", "**/*.sass", "**/*.less", "**/*.styl", "**/*.svg",
+		"**/*.stories.*", "**/*.story.*", "**/stories/**", "**/snapshots/**", "**/fixtures/**", "**/__fixtures__/**",
+		"**/testdata/**", "**/__mocks__/**", "**/mocks/**", "**/*.mock.*", "**/*_mock.*", "**/mock_*",
+		"**/locales/**", "**/locale/**", "**/translations/**", "**/i18n/**/*.json", "**/*.po", "**/*.pot", "**/*.xlf", "**/*.xliff"}
 )
 
-// reviewTier ranks what a reviewer should read first: source, then tests, then docs, then lockfiles.
+// reviewTier ranks what a reviewer should read first: source, then tests, then the surface files
+// (reviewSurfacePaths), then docs, then lockfiles.
 func reviewTier(p string) int {
 	switch {
 	case review.MatchAny(reviewLockfiles, p):
-		return 3
+		return 4
+	case review.MatchAny(reviewSurfacePaths, p):
+		return 2
 	case review.MatchAny(reviewTestPaths, p):
 		return 1
 	case review.MatchAny(reviewDocPaths, p):
-		return 2
+		return 3
 	}
 	return 0
 }
 
-// reviewRank orders the reviewable files best first — by tier, then the larger change, then the
-// path, so the order never depends on how GitHub happened to list them.
+// reviewRiskWords are the words in a path that mark code where a bug costs most: who may do what,
+// money, the shape and storage of data, state a user interface shares, work that runs in the
+// background or on a schedule, and the edges where data comes in and goes out. A word of four
+// letters or more also matches the start of a longer one ("migrations", "authorize"); a shorter
+// one only itself or its plural, so "api" is not "apiary". A word earlier in the list wins a
+// path word both match, so "router" counts once.
+var reviewRiskWords = []string{"auth", "permission", "policy", "security", "session", "token", "payment", "billing",
+	"invoice", "migration", "schema", "model", "store", "state", "redux", "reducer", "logic", "saga", "hook", "api",
+	"route", "router", "handler", "controller", "service", "worker", "job", "queue", "task", "cron", "db", "sql",
+	"query", "cache", "lock", "sync", "upload", "download", "export", "import"}
+
+// reviewPathWords splits a path into lowercase words at every separator, at a lower-to-upper case
+// change, before the last capital of a run followed by a lower case letter ("HTTPHandler" is
+// "http handler"), and between letters and digits.
+func reviewPathWords(p string) []string {
+	var words []string
+	rs := []rune(p)
+	start := -1
+	flush := func(end int) {
+		if start >= 0 {
+			words = append(words, strings.ToLower(string(rs[start:end])))
+			start = -1
+		}
+	}
+	for i, r := range rs {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+			flush(i)
+			continue
+		}
+		if start >= 0 {
+			prev := rs[i-1]
+			switch {
+			case unicode.IsLower(prev) && unicode.IsUpper(r),
+				unicode.IsUpper(prev) && unicode.IsUpper(r) && i+1 < len(rs) && unicode.IsLower(rs[i+1]),
+				unicode.IsDigit(prev) != unicode.IsDigit(r):
+				flush(i)
+			}
+		}
+		if start < 0 {
+			start = i
+		}
+	}
+	flush(len(rs))
+	return words
+}
+
+// reviewRiskWord is the risk word a path word is, or "".
+func reviewRiskWord(w string) string {
+	one := w
+	switch {
+	case len(w) > 4 && strings.HasSuffix(w, "ies"):
+		one = w[:len(w)-3] + "y"
+	case len(w) > 3 && strings.HasSuffix(w, "s") && !strings.HasSuffix(w, "ss"):
+		one = w[:len(w)-1]
+	}
+	for _, rw := range reviewRiskWords {
+		if one == rw || (len(rw) >= 4 && strings.HasPrefix(w, rw)) {
+			return rw
+		}
+	}
+	return ""
+}
+
+// reviewRisk is how early a changed file is read within its tier: three points for each distinct
+// risk word in its path, up to three of them, a React hook's "use…" file counting as "hook", plus
+// a point for each doubling of its changed lines. So one risk word weighs about as much as eight
+// times the lines: a twenty-line change to a store is read before a hundred-line one to a page,
+// and a large change still rises on its size alone.
+func reviewRisk(p string, changed int) int {
+	words := reviewPathWords(p)
+	found := map[string]bool{}
+	for i, w := range words {
+		if rw := reviewRiskWord(w); rw != "" {
+			found[rw] = true
+		} else if w == "use" && i+2 < len(words) {
+			// use-auth.ts, useSaveField.tsx: "use", a word, and the extension after it.
+			found["hook"] = true
+		}
+	}
+	return 3*min(len(found), 3) + bits.Len(uint(max(changed, 0)))
+}
+
+// reviewRank orders the reviewable files best first — by tier, then the riskier (reviewRisk), then
+// the larger change, then the path, so the order never depends on how GitHub happened to list them.
 func reviewRank(files []*reviewFile) {
 	slices.SortStableFunc(files, func(a, b *reviewFile) int {
-		return cmp.Or(cmp.Compare(a.tier, b.tier), cmp.Compare(b.changed(), a.changed()), cmp.Compare(a.Path, b.Path))
+		return cmp.Or(cmp.Compare(a.tier, b.tier), cmp.Compare(b.risk, a.risk), cmp.Compare(b.changed(), a.changed()),
+			cmp.Compare(a.Path, b.Path))
 	})
 }
 

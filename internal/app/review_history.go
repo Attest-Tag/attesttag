@@ -374,9 +374,9 @@ func reviewInDocsDir(p string) bool {
 	return false
 }
 
-// reviewPathWords are the words a path is made of, for telling which documents are about the code a
+// reviewDocWords are the words a path is made of, for telling which documents are about the code a
 // unit changes; words every path has say nothing about which.
-func reviewPathWords(p string) []string {
+func reviewDocWords(p string) []string {
 	var out []string
 	for _, w := range strings.FieldsFunc(strings.ToLower(p), func(r rune) bool {
 		return r == '/' || r == '_' || r == '-' || r == '.' || r == ' '
@@ -445,7 +445,7 @@ func reviewDocPointers(tree, unit, changed []string) []string {
 	}
 	words := map[string]bool{}
 	for _, p := range unit {
-		for _, w := range reviewPathWords(p) {
+		for _, w := range reviewDocWords(p) {
 			words[w] = true
 		}
 	}
@@ -456,7 +456,7 @@ func reviewDocPointers(tree, unit, changed []string) []string {
 	var ranked []scored
 	for _, p := range folders {
 		n := 0
-		for _, w := range reviewPathWords(p) {
+		for _, w := range reviewDocWords(p) {
 			if words[w] {
 				n++
 			}

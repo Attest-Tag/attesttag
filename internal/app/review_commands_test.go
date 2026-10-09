@@ -221,7 +221,7 @@ func TestReviewCommandNamesTypes(t *testing.T) {
 		t.Fatalf("an unknown type queued a run: %+v", runs)
 	}
 	a := rig.answers()
-	if len(a) != 1 || !strings.Contains(a[0], "no review type `nonesuch`") || !strings.Contains(a[0], "`general`, `security`, `tests`, `performance`, `release`") {
+	if len(a) != 1 || !strings.Contains(a[0], "no review type `nonesuch`") || !strings.Contains(a[0], "`general`, `security`, `tests`, `performance`, `concurrency`, `release`") {
 		t.Fatalf("answer to an unknown type: %q", a)
 	}
 
@@ -266,7 +266,9 @@ func TestReviewCommandMatchesTheBranchRuleOfThePullRequest(t *testing.T) {
 	}
 	rig.deliver("issue_comment", commentEvent(2101, "alice", "MEMBER", "@attesttag review", true))
 	rig.drain()
-	if run := lastReview(); run.Status != "posted" || run.RuleLabel != "any → main" || !slices.Equal(keys(run), []string{"general", "security"}) {
+	// The rule's types, and Concurrency, which the diff brought in: it takes a lock away. A command
+	// naming its types, below, gets those and nothing else.
+	if run := lastReview(); run.Status != "posted" || run.RuleLabel != "any → main" || !slices.Equal(keys(run), []string{"general", "security", "concurrency"}) {
 		t.Fatalf("the command's review: %s under %q with %v", run.Status, run.RuleLabel, keys(run))
 	}
 	if _, _, comments, _ := rig.gh.snapshot(); len(comments) == 0 || !strings.Contains(comments[0].Body, "Rule: `any → main`") {
@@ -375,7 +377,7 @@ func TestReviewCommandStatusAndHelp(t *testing.T) {
 	rig.deliver("issue_comment", commentEvent(802, "alice", "MEMBER", "@attesttag", true))
 	a := rig.answers()
 	if len(a) != 2 || !strings.Contains(a[0], "Not reviewed yet") || !strings.Contains(a[1], "`@attesttag full review`") ||
-		!strings.Contains(a[1], "Review types here: `general`, `security`, `tests`, `performance`, `release`") ||
+		!strings.Contains(a[1], "Review types here: `general`, `security`, `tests`, `performance`, `concurrency`, `release`") ||
 		!strings.Contains(a[1], "`@attesttag pause`") || !strings.Contains(a[1], "`@attesttag resume`") {
 		t.Fatalf("status before a review, and help: %q", a)
 	}
