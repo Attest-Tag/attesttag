@@ -104,7 +104,7 @@ from a reply is only ever proposed: it does nothing until somebody turns it on i
 `reviews.view` reads reviews and `reviews.manage` tunes them — review types and their rules,
 strictness, instructions, which repositories are reviewed in *Shadow* — and starts one by hand. What
 posts, spends or reaches further needs `connections.manage` as well: *Live*, reviewing every push,
-forks, the context repositories a review may read, the model, what one review may spend, *Fixes*
+forks, the context repositories a review may read and their automatic choice turned on, the model, what one review may spend, *Fixes*
 turned on — which lets a fix job push to a pull request's branch when somebody who can push asks —
 the chat channel reviews are announced in — which carries private repositories' findings to whoever reads it
 — a branch rule that posts live, reviews every push, names a model or a channel, adding repositories
