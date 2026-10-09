@@ -294,6 +294,13 @@ type reviewPlan struct {
 	// withoutLabelTypes to start again from.
 	ruleKeys  []string
 	ruleLabel string
+	// auto is whether types the diff matches may join the review (review_auto.go): only a review whose
+	// types the branch rule chose. Types a person named are the ones asked for — a label's own review
+	// and a try are named too — and a review that runs the release summary is a merge of pull requests
+	// that had their own reviews, and their own automatic types, on the way in: over a release-sized
+	// diff an automatic type would match nearly everything and double the largest review's cost for
+	// what those reviews already had the chance to say. And not when the settings turn them off.
+	auto bool
 	// What GitHub said of the pull request when the plan was made, for the channel's announcement
 	// of the review (review_notify.go): its title and its branches.
 	title, base, head string
@@ -331,6 +338,7 @@ func planReview(eff review.Effective, pull *githubPull, named []string, post rev
 		for _, l := range labels {
 			p.withLabel(l)
 		}
+		p.auto = p.eff.AutoTypes && !slices.Contains(p.keys, reviewReleaseType)
 	}
 	p.post = p.eff.Mode
 	switch post {
@@ -1475,6 +1483,7 @@ type reviewTypeRunJSON struct {
 	Key     string `json:"key"`
 	Summary string `json:"summary,omitempty"`
 	Skipped string `json:"skipped,omitempty"`
+	Auto    bool   `json:"auto,omitempty"` // the diff brought it in (review_auto.go)
 }
 
 func checkpointOf(out *reviewOutcome, skipped []review.TypeRun) *reviewCheckpoint {
@@ -1485,7 +1494,7 @@ func checkpointOf(out *reviewOutcome, skipped []review.TypeRun) *reviewCheckpoin
 		Model: out.Model, TokensIn: int64(out.Total.In), TokensOut: int64(out.Total.Out), TokensCached: int64(out.Total.CachedIn),
 		CostUSD: out.Total.CostUSD, NotReviewed: []reviewNotReviewed{}}
 	for _, t := range append(slices.Clone(out.TypeRuns), skipped...) {
-		c.Types = append(c.Types, reviewTypeRunJSON{Key: t.Key, Summary: t.Summary, Skipped: t.Skipped})
+		c.Types = append(c.Types, reviewTypeRunJSON{Key: t.Key, Summary: t.Summary, Skipped: t.Skipped, Auto: t.Auto})
 	}
 	for _, f := range out.NotReviewed {
 		c.NotReviewed = append(c.NotReviewed, reviewNotReviewed{Path: f.Path, Reason: f.Reason})
@@ -1545,6 +1554,15 @@ func reviewCacheKey(out *reviewOutcome, configHash string, specs []reviewTypeSpe
 	if out.SkillsHash != "" {
 		// Likewise only when a type read skills: what they said, at the commits they were read at.
 		parts = append(parts, "skills:"+out.SkillsHash)
+	}
+	if len(out.AutoTypes) > 0 {
+		// And only when the diff brought a type in, each at its version: an organisation's copy edited
+		// since is another review. Which ones it brought in follows from the commits and the settings.
+		auto := make([]string, 0, len(out.AutoTypes))
+		for _, s := range out.AutoTypes {
+			auto = append(auto, s.Key+"@"+strconv.Itoa(s.Version))
+		}
+		parts = append(parts, "auto:"+strings.Join(auto, ","))
 	}
 	return reviewHash(parts...)
 }
@@ -1742,6 +1760,7 @@ func (b *Bot) processReview(work, lane context.Context, h *reviewHold) {
 		if out, ck, ok = b.reviewWork(work, lane, h, pr, pull, plan, specs, skippedTypes, opts); !ok {
 			return
 		}
+		specs = slices.Concat(specs, out.AutoTypes)
 	}
 	b.publishReview(work, lane, h, pr, gh, plan, specs, ck, out)
 }
@@ -1808,6 +1827,12 @@ func (b *Bot) reviewWork(work, lane context.Context, h *reviewHold, pr *ReviewPR
 	r.Types, r.RuleLabel, r.ConfigHash = reviewRunTypes(specs), plan.label, configHash
 	spec := reviewSpec{OrgID: r.OrgID, InstallationID: r.InstallationID, Repo: pr.Repo, PR: pr.Number, Pull: pull,
 		Settings: plan.eff, Types: specs, Prior: prior, FromScratch: opts.Full}
+	if plan.auto && !reviewTry(r) {
+		if spec.Auto, err = reviewAutoTypes(work, b.store, r.OrgID, plan.keys); err != nil {
+			b.reviewRunError(work, lane, h, err)
+			return nil, nil, false
+		}
+	}
 	if opts.Scope == reviewScopeSinceLast && pr.LastReviewedSHA != "" {
 		spec.LastReviewedSHA = pr.LastReviewedSHA
 		json.Unmarshal([]byte(pr.FileHashes), &spec.PriorFileHashes) // written only by finishReviewRun
@@ -1872,6 +1897,9 @@ func (b *Bot) reviewWork(work, lane context.Context, h *reviewHold, pr *ReviewPR
 		b.endReviewRun(lane, h, ReviewRunResult{Status: "skipped", Score: -1, Error: "nothing_to_review: every changed file is ignored, binary or generated"})
 		return nil, nil, false
 	}
+	// Recorded under every type it ran, the ones its diff brought in too: a run resumed into its post,
+	// a summary rendered again and a label's review asking what this head already ran all read them.
+	r.Types = reviewRunTypes(slices.Concat(specs, out.AutoTypes))
 	ck := checkpointOf(out, skippedTypes)
 	ck.Resolved = reviewResolvedOf(out, pr.Repo)
 	if plan.post == review.ModeLive && !reviewTry(r) {

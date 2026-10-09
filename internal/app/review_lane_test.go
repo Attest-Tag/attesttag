@@ -553,7 +553,9 @@ func TestReviewLaneShadowWritesNothing(t *testing.T) {
 // that stops it.
 func TestReviewLaneTakenOverRunPostsOnce(t *testing.T) {
 	ctx := context.Background()
-	rig := newLaneRig(t, totalsFixture(), `{"mode":"live"}`)
+	// General alone, so its passes are the finder's calls: without auto_types the lock the diff takes
+	// away would bring Concurrency in too.
+	rig := newLaneRig(t, totalsFixture(), `{"mode":"live","auto_types":false}`)
 	saved := reviewRunTouchEvery
 	t.Cleanup(func() { reviewRunTouchEvery = saved })
 	reviewRunTouchEvery = time.Hour

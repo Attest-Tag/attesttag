@@ -2817,7 +2817,7 @@ func (b *Bot) handleReviewRun(w http.ResponseWriter, r *http.Request) {
 		entry := map[string]any{"key": t.Key, "version": t.Version}
 		for _, ct := range ck.Types {
 			if ct.Key == t.Key {
-				entry["summary"], entry["skipped"] = ct.Summary, ct.Skipped
+				entry["summary"], entry["skipped"], entry["auto"] = ct.Summary, ct.Skipped, ct.Auto
 			}
 		}
 		types = append(types, entry)
@@ -3143,7 +3143,7 @@ func (b *Bot) reviewSameState(ctx context.Context, orgID, installation int64, re
 		return nil, false
 	}
 	specs, _, err := resolveReviewTypes(ctx, b.store, orgID, plan.keys)
-	if err != nil || !slices.Equal(reviewRunTypes(specs), last.Types) {
+	if err != nil || !slices.Equal(reviewRunTypes(specs), reviewChosenTypes(last)) {
 		return nil, false
 	}
 	return last, true

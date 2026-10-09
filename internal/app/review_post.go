@@ -127,7 +127,7 @@ func (b *Bot) reviewSummaryState(ctx context.Context, r *ReviewRun, pr *ReviewPR
 		st.PausedAfter = reviewAutoPauseAfter
 	}
 	for _, t := range ck.Types {
-		st.Types = append(st.Types, review.TypeRun{Key: t.Key, Summary: t.Summary, Skipped: t.Skipped})
+		st.Types = append(st.Types, review.TypeRun{Key: t.Key, Summary: t.Summary, Skipped: t.Skipped, Auto: t.Auto})
 	}
 	st.Skills = reviewSkillsRead(ck)
 	for _, f := range ck.NotReviewed {

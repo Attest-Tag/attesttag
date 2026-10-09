@@ -1070,7 +1070,7 @@ func TestReviewAPIListsEveryBuiltinType(t *testing.T) {
 		keys = append(keys, ty["key"].(string))
 		used[ty["key"].(string)] = ty["used_by"].(float64)
 	}
-	if want := []string{"general", "security", "tests", "performance", "release"}; !slices.Equal(keys, want) {
+	if want := []string{"general", "security", "tests", "performance", "concurrency", "release"}; !slices.Equal(keys, want) {
 		t.Errorf("types listed %v, want %v", keys, want)
 	}
 	if used["performance"] != 1 || used["tests"] != 1 || used["security"] != 0 {

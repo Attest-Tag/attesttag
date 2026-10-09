@@ -78,6 +78,38 @@ const (
 	reviewRereviewMaxP2 = 1
 )
 
+// A run's time grows with its work. Its money does not: max $ is the organisation's to set, and a
+// large pull request the organisation can afford should not then be cut short by the clock, which
+// at a flat six minutes timed out on releases of a few dozen files. The finder's wall is the
+// engine's finderWall (six minutes) for up to four finder passes — a pass is one type over one unit
+// — and an eighth of it (45 seconds) more for each pass past four, two of which run at once, up to
+// twice the wall: twelve minutes, reached at twelve passes. The verifier's is verifyWall (four
+// minutes) for up to eight verifications and a sixteenth of it (15 seconds) for each past eight,
+// four at once, up to eight minutes. Proportions of the engine's walls, so a test that shrinks
+// those shrinks these. Nothing around a run bounds its time: the lane renews its lease for as long
+// as it works.
+const (
+	reviewWallFreePasses   = 4
+	reviewWallPassShare    = 8 // finderWall / this, for each pass past the free ones
+	reviewWallFreeVerifies = 8
+	reviewWallVerifyShare  = 16 // verifyWall / this, for each verification past the free ones
+	reviewWallMaxFactor    = 2
+)
+
+// reviewFinderBudget is the finder's wall for a run of passes finder passes.
+func reviewFinderBudget(wall time.Duration, passes int) time.Duration {
+	return reviewScaledWall(wall, passes, reviewWallFreePasses, reviewWallPassShare)
+}
+
+// reviewVerifyBudget is the verifier's wall for a run that verifies n candidates.
+func reviewVerifyBudget(wall time.Duration, n int) time.Duration {
+	return reviewScaledWall(wall, n, reviewWallFreeVerifies, reviewWallVerifyShare)
+}
+
+func reviewScaledWall(wall time.Duration, n, free, share int) time.Duration {
+	return min(wall+time.Duration(max(n-free, 0))*(wall/time.Duration(share)), reviewWallMaxFactor*wall)
+}
+
 const (
 	reviewSubmitTool  = "submit_review"
 	reviewVerdictTool = "submit_verdict"
@@ -133,6 +165,9 @@ type reviewTypeSpec struct {
 	Version int
 	Model   string
 	MaxUSD  float64
+	// Automatic is a type the run added because the diff matched its pattern (review_auto.go): it
+	// reads only the units that match, and the summary marks it.
+	Automatic bool
 }
 
 // resolveReviewTypes turns type keys — a branch rule's, or a command's — into the rubrics to run, in
@@ -227,6 +262,9 @@ type reviewSpec struct {
 	// Settings are the effective settings, with the matched branch rule applied (WithRule).
 	Settings review.Effective
 	Types    []reviewTypeSpec
+	// Auto are the types that join the run when its diff matches their pattern (reviewAutoTypes),
+	// decided once the files are read; nil adds none.
+	Auto []reviewTypeSpec
 	// Prior is the pull request's findings from earlier runs: open and disputed ones are what a new
 	// finding would duplicate, withdrawn ones what it may not be raised as again.
 	Prior []*ReviewFinding
@@ -327,6 +365,9 @@ type reviewOutcome struct {
 	// (review_resolve.go): moved, fixed, outdated, or a claim found still present. Only the ones
 	// that change something are here.
 	Resolutions []*reviewResolution
+	// AutoTypes are the types of spec.Auto the diff brought in, run after the spec's own: the lane
+	// records the run, and posts its summary, under both.
+	AutoTypes []reviewTypeSpec
 	// Model is the finder's model, for review_runs.model; Usage is every call's, by model, for the
 	// lane to log with LogUsageBy, and Total their sum.
 	Model string
@@ -561,6 +602,7 @@ func (r *reviewRun) run(ctx context.Context) error {
 		return reviewFail(review.FailGitHub, err)
 	}
 	r.prepare(files, truncated)
+	r.addAutoTypes()
 	r.openContextRepos(ctx)
 	r.readContext(ctx)
 	r.readSkills(ctx)
@@ -942,17 +984,13 @@ type reviewFound struct {
 // collects what they submitted. A model failure fails the run: a review whose finder could not
 // answer has nothing to say, and must not say "nothing found".
 func (r *reviewRun) findAll(ctx context.Context) ([]reviewFound, error) {
-	fctx, cancel := context.WithTimeout(ctx, r.e.finderWall)
+	fctx, cancel := context.WithTimeout(ctx, reviewFinderBudget(r.e.finderWall, r.finderPasses()))
 	defer cancel()
+	defer r.markAutoRuns()
 	var found []reviewFound
 	for i := range r.spec.Types {
 		ts := &r.spec.Types[i]
-		var files []*reviewFile
-		for _, f := range r.reviewable {
-			if ts.Covers(f.Path) {
-				files = append(files, f)
-			}
-		}
+		files := r.typeFiles(ts)
 		if len(files) == 0 {
 			r.out.TypeRuns = append(r.out.TypeRuns, review.TypeRun{Key: ts.Key, Skipped: "no changed files in its scope"})
 			continue
@@ -961,7 +999,7 @@ func (r *reviewRun) findAll(ctx context.Context) ([]reviewFound, error) {
 		if err != nil {
 			return nil, reviewFail(review.FailModel, err)
 		}
-		units, tooLarge := reviewSplit(files)
+		units, tooLarge := r.typeUnits(ts, files)
 		for _, f := range tooLarge {
 			r.unread(f.Path, "too large")
 		}
@@ -1048,6 +1086,37 @@ func (r *reviewRun) findAll(ctx context.Context) ([]reviewFound, error) {
 		return nil, reviewFail(review.FailTimeout, errors.New("no finder pass finished in time"))
 	}
 	return found, nil
+}
+
+// typeFiles are the reviewable files a type looks at, in rank order.
+func (r *reviewRun) typeFiles(ts *reviewTypeSpec) []*reviewFile {
+	var files []*reviewFile
+	for _, f := range r.reviewable {
+		if ts.Covers(f.Path) {
+			files = append(files, f)
+		}
+	}
+	return files
+}
+
+// typeUnits are a type's finder passes over its files: every unit, or for a type the diff brought in,
+// the units the diff matched it in (reviewAutoUnits).
+func (r *reviewRun) typeUnits(ts *reviewTypeSpec, files []*reviewFile) (units []*reviewUnit, tooLarge []*reviewFile) {
+	units, tooLarge = reviewSplit(files)
+	if ts.Automatic {
+		units = reviewAutoUnits(ts, units)
+	}
+	return units, tooLarge
+}
+
+// finderPasses is how many finder passes the run's types will make, which its time grows with.
+func (r *reviewRun) finderPasses() int {
+	n := 0
+	for i := range r.spec.Types {
+		units, _ := r.typeUnits(&r.spec.Types[i], r.typeFiles(&r.spec.Types[i]))
+		n += len(units)
+	}
+	return n
 }
 
 // errReviewBudget is a pass that never started because the money was gone.

@@ -177,6 +177,10 @@ type Settings struct {
 	// to be fixed by a commit pushed to its branch (a fix box ticked, `@bot fix`). Off, the
 	// comments carry no box and the command is answered with a refusal.
 	Fixes *bool `json:"fixes,omitempty"`
+	// AutoTypes is whether a review whose types a branch rule chose also runs the types whose
+	// pattern its diff matches (Type.Auto), such as Concurrency and state on a change that touches
+	// async code. Off, a review runs its rule's types and its labels', and nothing else.
+	AutoTypes *bool `json:"auto_types,omitempty"`
 
 	Instructions   []string `json:"instructions,omitempty"`    // what the team wants checked, one per entry
 	ExcludeAuthors []string `json:"exclude_authors,omitempty"` // login globs never reviewed automatically
@@ -218,6 +222,7 @@ func Defaults() Settings {
 		Notify:        ptr(NotifyChannel{}),
 		NotifyOn:      ptr(NotifyEvents()),
 		Fixes:         ptr(true),
+		AutoTypes:     ptr(true),
 		BranchRules:   []BranchRule{{Types: []string{DefaultType}}},
 	}
 }
@@ -254,6 +259,10 @@ type Effective struct {
 	// changes a comment's last lines, not what a review finds, and switching it must not make every
 	// cached review a stranger. The console reads it left out as off.
 	Fixes bool `json:"fixes,omitzero"`
+	// AutoTypes counts in Hash only when it is off, so the built-in settings hash what they did
+	// before the setting existed and turning it off still makes a review another review. The
+	// console reads it left out as off.
+	AutoTypes bool `json:"auto_types,omitzero"`
 
 	Instructions   []string `json:"instructions"`
 	ExcludeAuthors []string `json:"exclude_authors"`
@@ -302,6 +311,7 @@ func Resolve(chain []LevelSettings) Effective {
 		pick(&e.MaxUSD, s.MaxUSD, "max_usd", lv, e.Source)
 		pick(&e.Notify, s.Notify, "notify", lv, e.Source)
 		pick(&e.Fixes, s.Fixes, "fixes", lv, e.Source)
+		pick(&e.AutoTypes, s.AutoTypes, "auto_types", lv, e.Source)
 		if s.NotifyOn != nil {
 			// A copy, and never nil: an empty set is "nothing", where nil would read as every event.
 			e.NotifyOn, e.Source["notify_on"] = append([]NotifyEvent{}, *s.NotifyOn...), lv
@@ -471,7 +481,15 @@ func (e Effective) Hash() string {
 	for i := range e.BranchRules {
 		e.BranchRules[i].Notify = nil
 	}
-	b, err := json.Marshal(e)
+	// Automatic types are hashed only when they are off. On is the default, and leaving it out then
+	// keeps the bytes what they were before there was a setting; off adds a field, so a review with
+	// them is never answered from one without.
+	noAuto := !e.AutoTypes
+	e.AutoTypes = false
+	b, err := json.Marshal(struct {
+		Effective
+		NoAutoTypes bool `json:"no_auto_types,omitzero"`
+	}{e, noAuto})
 	if err != nil {
 		// Only a NaN or an infinity in MaxUSD can fail here, and Validate refuses both; a
 		// fallback that still distinguishes settings beats a constant hash that would make two
@@ -485,8 +503,8 @@ func (e Effective) Hash() string {
 // SettingFields lists every setting by its JSON name, in declaration order.
 func SettingFields() []string {
 	return []string{"mode", "trigger", "drafts", "forks", "strictness", "max_comments",
-		"comment_header", "model", "max_usd", "notify", "notify_on", "fixes", "instructions", "exclude_authors",
-		"review_bots", "ignore_paths", "context_repos", "branch_rules"}
+		"comment_header", "model", "max_usd", "notify", "notify_on", "fixes", "auto_types", "instructions",
+		"exclude_authors", "review_bots", "ignore_paths", "context_repos", "branch_rules"}
 }
 
 // ChangedFields lists the JSON names of the settings that differ between two versions of one

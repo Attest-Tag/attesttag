@@ -574,7 +574,7 @@ func (r *reviewRun) verifyAll(ctx context.Context, cands []*reviewCandidate) ([]
 	}
 	todo = todo[:n]
 
-	vctx, cancel := context.WithTimeout(ctx, r.e.verifyWall)
+	vctx, cancel := context.WithTimeout(ctx, reviewVerifyBudget(r.e.verifyWall, len(todo)))
 	defer cancel()
 	verdicts := make([]*reviewVerdict, len(todo))
 	errs := make([]error, len(todo))

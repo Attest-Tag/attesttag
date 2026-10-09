@@ -107,7 +107,8 @@ func TestReviewE2EConsoleSettingsToAPostedReview(t *testing.T) {
 	for _, ty := range run.Types {
 		keys = append(keys, ty.Key)
 	}
-	if run.Status != "posted" || run.Trigger != "open" || run.RuleLabel != "any → testing" || !slices.Equal(keys, []string{"general", "security"}) {
+	// The rule's two, and Concurrency after them: the change takes a lock away, which brings it in.
+	if run.Status != "posted" || run.Trigger != "open" || run.RuleLabel != "any → testing" || !slices.Equal(keys, []string{"general", "security", "concurrency"}) {
 		t.Fatalf("run = %s, trigger %s, rule %q, types %v", run.Status, run.Trigger, run.RuleLabel, keys)
 	}
 	var finders []string
@@ -117,7 +118,7 @@ func TestReviewE2EConsoleSettingsToAPostedReview(t *testing.T) {
 		}
 	}
 	slices.Sort(finders)
-	if !slices.Equal(finders, []string{"general", "security"}) {
+	if !slices.Equal(finders, []string{"concurrency", "general", "security"}) {
 		t.Errorf("the finder ran for %v", finders)
 	}
 	posts, reviews, comments, _ := rig.gh.snapshot()
@@ -129,8 +130,8 @@ func TestReviewE2EConsoleSettingsToAPostedReview(t *testing.T) {
 		t.Fatalf("%d issue comments; want the one summary", len(comments))
 	}
 	summary := comments[0].Body
-	for _, want := range []string{"Confidence 3/5", "open: General 1 · Security 0", "Rule: `any → testing`",
-		"<summary>Code</summary>"} {
+	for _, want := range []string{"Confidence 3/5", "Reviewed as General, Security and Concurrency and state (auto)",
+		"open: General 1 · Security 0", "Rule: `any → testing`", "<summary>Code</summary>"} {
 		if !strings.Contains(summary, want) {
 			t.Errorf("the summary lacks %q:\n%s", want, summary)
 		}
@@ -149,7 +150,7 @@ func TestReviewE2EConsoleSettingsToAPostedReview(t *testing.T) {
 	}
 	h := listed[0].(map[string]any)
 	if h["id"] != run.PublicID || h["post"] != "live" || h["status"] != "posted" || h["rule"] != "any → testing" ||
-		h["findings"] != float64(1) || len(h["types"].([]any)) != 2 {
+		h["findings"] != float64(1) || len(h["types"].([]any)) != 3 {
 		t.Errorf("History shows %v", h)
 	}
 }

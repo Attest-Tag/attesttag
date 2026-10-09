@@ -560,6 +560,9 @@ type TypeRun struct {
 	Summary string
 	// Skipped says why the type did not run, e.g. "budget"; empty when it ran.
 	Skipped string
+	// Auto is a type no rule or person chose: the diff matched its pattern (Type.Auto), and the
+	// summary says so after its name, so nobody looks for the rule that added it.
+	Auto bool
 }
 
 // NotReviewedFile is a changed file the review did not read, and why: "binary", "too large",
@@ -935,11 +938,16 @@ func (ctx RenderContext) entries(fs []SummaryFinding, p *linkPolicy) string {
 	return strings.Join(parts, "\n\n")
 }
 
-// typeNames2 is the names of the types that ran, in order.
+// typeNames2 is the names of the types that ran, in order, one its diff brought in marked
+// "(auto)": "General, Security and Concurrency and state (auto)".
 func (ctx RenderContext) typeNames2(ran []TypeRun, p *linkPolicy) []string {
 	names := make([]string, 0, len(ran))
 	for _, tr := range ran {
-		names = append(names, ctx.typeName(tr.Key, p, htmlInlineMode))
+		name := ctx.typeName(tr.Key, p, htmlInlineMode)
+		if tr.Auto {
+			name += " (auto)"
+		}
+		names = append(names, name)
 	}
 	return names
 }

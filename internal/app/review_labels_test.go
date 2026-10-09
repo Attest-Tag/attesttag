@@ -17,7 +17,9 @@ import (
 // on both dialects.
 
 // securityLabelRules is a live repository where the label security-review adds Security to General.
-const securityLabelRules = `{"mode":"live","branch_rules":[{"labels":["security-review"],"types":["security"]},{"types":["general"]}]}`
+// Automatic types are off: these are about the types labels add, and the fixture's diff, which takes
+// a lock away, would bring Concurrency into every review besides (review_auto_test.go).
+const securityLabelRules = `{"mode":"live","auto_types":false,"branch_rules":[{"labels":["security-review"],"types":["security"]},{"types":["general"]}]}`
 
 func withLabels(labels ...string) func(pr map[string]any) {
 	return func(pr map[string]any) {

@@ -14,8 +14,8 @@ import (
 )
 
 // Type is a review type: a rubric one finder pass is run against. General, Security, Tests,
-// Performance and Release ship in the binary (types/*.md); an organisation edits a copy of one,
-// or writes its own, in the console, and the app hands the result here in this shape.
+// Performance, Concurrency and Release ship in the binary (types/*.md); an organisation edits a
+// copy of one, or writes its own, in the console, and the app hands the result here in this shape.
 type Type struct {
 	// Key is the short name a branch rule and "@bot review <key>" use, e.g. "security".
 	Key  string
@@ -34,6 +34,13 @@ type Type struct {
 	// Skills are folders in GitHub repositories the finder follows besides the rules (SkillLink),
 	// cited as S1, S2… The app reads them; the type only says where they are.
 	Skills []SkillLink
+	// Auto is a regular expression (RE2) over a pull request's changed lines and changed paths. A
+	// review whose types a branch rule chose runs this type as well when its diff matches, on the
+	// parts of the diff that do (AutoMatch): a rubric whose subject can be recognised in the diff
+	// should not depend on somebody remembering to add it to every rule. Empty is a type that runs
+	// only when it is chosen. Only a built-in carries one; an organisation's copy of a built-in
+	// keeps the built-in's.
+	Auto string
 }
 
 // TypeRule is one line the finder is asked to check.
@@ -76,6 +83,9 @@ const (
 	maxOwnKeyLen  = 30
 	maxTypeGlobs  = 20
 	maxTypeGlob   = 200
+	// An auto pattern is a few dozen alternatives; one longer than this is a list of words that
+	// belongs in a rule.
+	MaxTypeAutoLen = 1000
 )
 
 // RuleID is the id the i-th rule is cited by: "R1" for the first. It is the rule's place in
@@ -108,7 +118,7 @@ func (r TypeRule) Covers(path string) bool {
 var builtinFiles embed.FS
 
 // builtinOrder is the order the built-ins are offered in: the default first.
-var builtinOrder = []string{DefaultType, "security", "tests", "performance", "release"}
+var builtinOrder = []string{DefaultType, "security", "tests", "performance", "concurrency", "release"}
 
 var builtins = sync.OnceValue(func() []Type {
 	out := make([]Type, 0, len(builtinOrder))
@@ -164,6 +174,50 @@ func (t Type) clone() Type {
 	return t
 }
 
+// autoRes holds the compiled auto patterns, by their text. Only the built-ins carry one, so it
+// holds a handful; compiling one again for every changed file of every review would be the waste.
+var autoRes sync.Map // string → *regexp.Regexp
+
+func (t Type) autoRe() *regexp.Regexp {
+	if t.Auto == "" {
+		return nil
+	}
+	if re, ok := autoRes.Load(t.Auto); ok {
+		return re.(*regexp.Regexp)
+	}
+	re, err := regexp.Compile(t.Auto)
+	if err != nil {
+		// ValidateType refuses such a pattern, so this is a type nobody validated: it brings
+		// itself into no review rather than into every one.
+		return nil
+	}
+	autoRes.Store(t.Auto, re)
+	return re
+}
+
+// AutoMatch reports whether a changed file brings the type into a review by itself: the type looks
+// at the file, and its Auto matches the file's path, the path it was renamed from, or one of its
+// added or deleted lines. A deleted line counts as much as an added one — a change that takes a
+// lock or an await away is as much this type's business as one that adds one — and a context line
+// does not: it did not change.
+func (t Type) AutoMatch(f File) bool {
+	re := t.autoRe()
+	if re == nil || !t.Covers(f.Path) {
+		return false
+	}
+	if re.MatchString(f.Path) || (f.PrevPath != "" && re.MatchString(f.PrevPath)) {
+		return true
+	}
+	for _, h := range f.Hunks {
+		for _, l := range h.Lines {
+			if l.Kind != ' ' && re.MatchString(l.Text) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // ruleLine is a rule in a type file: "- [P1] text" or "- [P1; paths: a/**, b/**] text". The
 // text may start on the next, indented, line, when the bracket is long.
 var ruleLine = regexp.MustCompile(`^- \[([^\]]*)\](?:\s+(.*))?$`)
@@ -176,6 +230,8 @@ var ruleLine = regexp.MustCompile(`^- \[([^\]]*)\](?:\s+(.*))?$`)
 //	strictness: medium
 //	inline: P1
 //	paths: src/**, lib/**
+//	auto: \bexec\.Command\b|\bos/exec\b
+//	auto: \bsubprocess\b
 //	purpose: What this review is for, running on over as many lines as it
 //	needs; a blank line starts a new paragraph.
 //
@@ -184,7 +240,9 @@ var ruleLine = regexp.MustCompile(`^- \[([^\]]*)\](?:\s+(.*))?$`)
 //	  continues on lines indented under it.
 //
 // key, name and purpose are required; strictness, inline (the least severe finding posted
-// inline) and paths are optional, as is a rule's paths.
+// inline), paths and auto are optional, as is a rule's paths. auto is the one key that may be
+// given more than once: its lines are one pattern, each an alternative, because a pattern of a
+// few dozen alternatives on one line is one nobody can read.
 //
 // It is strict — an unknown key, a line that is neither a rule nor a rule's continuation — so
 // a typo in a rubric is an error in a test and not a rule silently missing from every review.
@@ -221,7 +279,7 @@ func ParseType(text string) (Type, error) {
 			if !ok {
 				return Type{}, fmt.Errorf("line %d: want \"key: value\" before the purpose, got %q", at, clip(line))
 			}
-			if seen[k] {
+			if seen[k] && k != "auto" {
 				return Type{}, fmt.Errorf("line %d: %s is set twice", at, k)
 			}
 			seen[k] = true
@@ -240,13 +298,23 @@ func ParseType(text string) (Type, error) {
 				t.InlineMinSeverity = sev
 			case "paths":
 				t.PathGlobs = splitGlobs(v)
+			case "auto":
+				// Each line compiled on its own first, so a mistake is reported on the line it is on.
+				// Joined at the top level with "|", each stays the alternative it was, whatever it holds.
+				if _, err := regexp.Compile(v); err != nil || v == "" {
+					return Type{}, fmt.Errorf("line %d: auto: want a regular expression, got %q", at, clip(v))
+				}
+				if t.Auto != "" {
+					t.Auto += "|"
+				}
+				t.Auto += v
 			case "purpose":
 				inBody = true
 				if v != "" {
 					para = append(para, v)
 				}
 			default:
-				return Type{}, fmt.Errorf("line %d: unknown key %q (want key, name, strictness, inline, paths or purpose)", at, clip(k))
+				return Type{}, fmt.Errorf("line %d: unknown key %q (want key, name, strictness, inline, paths, auto or purpose)", at, clip(k))
 			}
 		case strings.HasPrefix(line, "- ["):
 			if !inRules {
@@ -345,6 +413,14 @@ func ValidateType(t Type) error {
 	}
 	if err := validateGlobs(t.PathGlobs); err != nil {
 		bad("paths: %v", err)
+	}
+	if t.Auto != "" {
+		// RE2, so no pattern can make matching it against a diff slow, whatever it says.
+		if utf8.RuneCountInString(t.Auto) > MaxTypeAutoLen {
+			bad("auto must be at most %d characters", MaxTypeAutoLen)
+		} else if _, err := regexp.Compile(t.Auto); err != nil {
+			bad("auto is not a regular expression: %v", err)
+		}
 	}
 	if len(t.Rules) > MaxTypeRules {
 		bad("at most %d rules, got %d; split the type in two", MaxTypeRules, len(t.Rules))

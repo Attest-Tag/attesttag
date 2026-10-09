@@ -27,7 +27,7 @@ func TestBuiltinTypes(t *testing.T) {
 			}
 		}
 	}
-	if !slices.Equal(keys, []string{"general", "security", "tests", "performance", "release"}) {
+	if !slices.Equal(keys, []string{"general", "security", "tests", "performance", "concurrency", "release"}) {
 		t.Errorf("built-in keys = %v; the default must come first", keys)
 	}
 	if types[0].Key != DefaultType {

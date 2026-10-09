@@ -259,6 +259,12 @@ or *off*; its menu's **Code review settings…** and **Set review** in the selec
 | Comment header | none | text above every inline comment, up to 400 characters |
 | Model | Advanced | the default model, the advanced one, or one offered to channels; it verifies every finding, and finds them for every type without a model of its own |
 | Max $ per review | $1.00 | $0.10 to $5.00, verification included ([money](#money-and-budgets)) |
+| Automatic types | on | whether a type whose pattern the diff matches, such as Concurrency and state, joins a review its branch rule chose ([automatic types](#types-that-join-a-review-by-themselves)). Not in the console's form yet: `auto_types` through `PUT /api/review-settings/{id}` |
+
+### The lists, the channel and branch rules
+
+| setting | built-in default | what it is |
+|---|---|---|
 | Instructions | none | what the team wants checked, one entry each, put in the prompt as the team's criteria |
 | Authors to skip | none | GitHub logins or globs (`release-bot`, `*-ci`) never reviewed without somebody asking |
 | Bots to review | none | the bots whose pull requests are reviewed without anybody asking: a login with or without `[bot]` (`dependabot`, `renovate[bot]`), a glob, or `*` for every bot. Any other bot's pull request is skipped; one this App opened — a [fix job](fix-jobs.md)'s — is reviewed like a person's, once it is out of draft. The authors to skip still apply |
@@ -292,7 +298,7 @@ rules the finder checks the change against. Each type runs a finder pass of its 
 candidates then go through one set of checks and one verifier, a problem two types both raise
 becomes one finding carrying both names, and the result is still one review and one summary; when
 more than one type ran, each finding names its types and a line under *Open findings* counts the
-open findings per type. Five ship built in:
+open findings per type. Six ship built in:
 
 | type | key | looks for | inline comments |
 |---|---|---|---|
@@ -300,11 +306,37 @@ open findings per type. Five ship built in:
 | Security | `security` | missing authentication or authorisation, data crossing between tenants, injection, secrets, server-side request forgery, unsafe deserialisation, open redirects, cross-site scripting, cookies and sessions, CORS, cryptography, webhooks, dependency and CI changes | P0 to P2 |
 | Tests | `tests` | new branches no test reaches, tests that cannot fail, assertions removed or weakened, expected values edited to match a bug, missing negative cases, tests that depend on time, order or each other, mocks that no longer match | P0 to P2 |
 | Performance | `performance` | queries and remote calls repeated in a loop, unbounded reads, lists and loops, queries and migrations no index serves, quadratic work on a busy path, expensive work repeated, needless re-renders, blocking work on a hot path | P0 to P2 |
+| Concurrency and state | `concurrency` | requests racing, out-of-order responses, state read after an await, timers and effects outliving their screen, locks, cancellation, retries, check-then-act. Joins by itself (below) | P0 to P2 |
 | Release summary | `release` | a large merge into a production branch: what ships by area, migrations, configuration, deploy order, old and new versions running side by side, rollback. The summary is the result; only a P0 is commented on inline | P0 only |
 
 General runs when nothing says otherwise. A type's key is the word branch rules, the Start review
 dialog and commands use: `@<app> review security`. Each type's findings below its inline minimum
 are listed in the summary under *More notes*.
+
+### Types that join a review by themselves
+
+A built-in may carry an `auto:` pattern, a regular expression matched against the pull request's
+changed lines — added and deleted alike, since a change that takes a lock or an `await` away is as
+much its business as one that adds one — and its changed paths. Concurrency and state is the one
+that does: async and await, promises, timers, debounce and throttle, effects and refs, abort
+signals, asyncio, threads, goroutines and channels, locks and atomics, workers, queues and retries,
+subscriptions and websockets, sagas and logics.
+
+When the diff matches, the type runs as well as the ones the branch rule chose, after them, and
+only over the parts of the diff that match — a unit of files at a time, so the file beside a
+matching one is read too. The summary names it `Concurrency and state (auto)`, and the run is
+recorded under it. It joins:
+
+- a review whose types the branch rule chose, its labels' included — on opening, on a push, or
+  `@<app> review` with no types;
+- not a review whose types somebody named (`@<app> review security`, Start review with types, a
+  label's own review, Try on a PR), which runs those and nothing else;
+- not a review that runs the Release summary: the pull requests in a release had their own reviews,
+  and over a release-sized diff the pattern matches nearly everything;
+- not when *Automatic types* is off in the settings, nor when the organisation turned the type off.
+
+An organisation's edited copy keeps the built-in's pattern. It spends from the same *Max $ per
+review*, and since it runs last it is the first to go without when the money or the time runs out.
 
 ### Editing a type and its rules
 
@@ -935,7 +967,8 @@ $0.15. The Start review dialog estimates one pull request's range before anythin
 | Reviews a day | 8 on one pull request and 40 on one repository, counting commands, console starts and automatic reviews alike; past that a review is skipped as `throttle` |
 | Commands | 10 an hour from one person; a full review once per commit a day |
 | Replies answered | 3 in one thread, 20 on one pull request a day, 20 an hour from one person (5 from somebody who is not one of the repository's people) |
-| Files read | the 80 most relevant changed files; the rest are listed as not reviewed, which caps the score |
+| Files read | the 150 changed files most worth reading; the rest are listed as not reviewed, which caps the score. Source comes first, then tests, then stylesheets, SVGs, stories, fixtures, mocks and translations, then docs, then lockfiles. Within each, a path naming where a bug costs most (auth, sessions, payments, migrations, models, stores, state, hooks, APIs, handlers, workers, queues, jobs, the database, caches, locks and the like) counts like eight times the changed lines |
+| Review time | finding: 6 minutes for up to 4 passes (one type over one unit of about 40,000 tokens of diff), 45 seconds more for each pass past four, at most 12 minutes; verifying: 4 minutes for up to 8 findings, 15 seconds more for each past eight, at most 8 minutes. *Max $ per review* still bounds the money |
 | Inline comments | *Max comments* (8 by default, at most 20), of which at most 3 are P2s; a review of a later head adds at most one new P2 |
 | Pre-existing findings | 2 listed per review |
 | Context repositories | 5 read per review |
@@ -944,7 +977,7 @@ $0.15. The Start review dialog estimates one pull request's range before anythin
 | Automatic reviews | 5 on one pull request, then paused until `@<app> resume` |
 | Fixes | one job running on a pull request at a time, 6 a day on one pull request, 5 an hour from one person |
 | Branch rules | 20 per level; 10 types and 10 labels per rule, a label up to 50 characters |
-| Review types | 40 rules each, 400 characters per rule |
+| Review types | 40 rules each, 400 characters per rule; an `auto:` pattern up to 1,000 characters |
 | Settings lists | 50 entries each, 400 characters per entry |
 | Webhook inbox | 4,096 deliveries waiting for the deployment, 64 per organisation |
 
@@ -1021,6 +1054,11 @@ shadow, silence is the design.
   it, once an hour at most.
 - **GitHub's rate limit** puts the run back for the time GitHub gives, and what the model found is
   posted then without being paid for again.
+- **Files listed as not reviewed** say why: `too many files` past the 150 read, `timeout` when the
+  finder's [time](#limits-and-throttles) ran out before a pass reached them, `budget` when *Max $ per
+  review* did, and `too large` for one file bigger than a unit on its own. Each caps the score at 4.
+  A type that never started for the same reasons is listed there too; an automatic one, running
+  last, is the first to go.
 
 ## Self-hosting
 
