@@ -158,8 +158,8 @@ func (rig *laneRig) serve(fx reviewPRFixture) {
 	}))
 	f.mux.HandleFunc("GET /repos/acme/web/git/trees/{sha}", perms(readPerms, func(w http.ResponseWriter, r *http.Request) {
 		var tree []map[string]any
-		for p := range g.content[r.PathValue("sha")] {
-			tree = append(tree, map[string]any{"path": p, "type": "blob"})
+		for p, c := range g.content[r.PathValue("sha")] {
+			tree = append(tree, map[string]any{"path": p, "type": "blob", "sha": gitBlobSHA(c)})
 		}
 		json.NewEncoder(w).Encode(map[string]any{"tree": tree, "truncated": false})
 	}))
@@ -895,7 +895,8 @@ func TestReviewLanePushReviewsTheLastHeadOfABurst(t *testing.T) {
 
 	const headD = "dddddddddddddddddddddddddddddddddddddddd"
 	for _, sha := range []string{reviewHeadC, headD} {
-		rig.gh.pushTo(sha, totalsFixture().files, totalsFixture().head)
+		files, head := pushedTotals(sha)
+		rig.gh.pushTo(sha, files, head)
 		rig.deliver("pull_request", prEvent("synchronize", 7, sha))
 	}
 	var pushes []*ReviewRun
@@ -1116,7 +1117,8 @@ func TestReviewLaneABurstOfPushesStillReviewsItsLastHead(t *testing.T) {
 	for i := range reviewRunsPerPRDay + 2 {
 		sha := fmt.Sprintf("%040d", i+1)
 		heads = append(heads, sha)
-		rig.gh.pushTo(sha, totalsFixture().files, totalsFixture().head)
+		files, head := pushedTotals(sha)
+		rig.gh.pushTo(sha, files, head)
 		rig.deliver("pull_request", prEvent("synchronize", 7, sha))
 	}
 	if pr := rig.pr(7); pr.SkipReason == "throttle" {

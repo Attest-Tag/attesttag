@@ -197,9 +197,9 @@ proxy and report the HTTP status.
 The Workspaces page has a **Repositories** section on the organisation, on each workspace and on
 every channel. *Connect repo* reaches GitHub one of two ways: through a GitHub App installation,
 where the account's admin chose the repositories at GitHub and nothing is pasted (attaching an
-installation to an attest_tag organisation for the first time takes the account's owner — for a
-GitHub organisation, someone with admin on every repository the installation covers; a member who
-can only see it is refused), or with an access token, pasted or reused from a repository already saved. It lists what the installation or
+installation to an attest_tag organisation for the first time takes the account's owner to approve
+it — for a GitHub organisation, someone with admin on every repository the installation covers; a
+member or collaborator who can only see it is refused), or with an access token, pasted or reused from a repository already saved. It lists what the installation or
 token can reach, you tick one or several (or type `owner/name` for one GitHub will not list), and
 the server checks each against GitHub before storing it as a `github` connection in the
 `Repositories` bundle (created on demand, GitHub tool pack on) — one connection per repository,

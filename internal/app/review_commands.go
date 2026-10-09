@@ -420,13 +420,12 @@ func (c *reviewCommandCall) pause(ctx context.Context, pause bool) error {
 		return err
 	}
 	c.audit(ctx, "resumed", map[string]any{"was_paused": row.Paused, "auto_reviews": row.AutoReviews})
+	after := b.reviewPauseCeiling(ctx, d.OrgID, d.InstallationID, c.repo)
 	if !row.Paused {
-		return c.answer(ctx, fmt.Sprintf("Automatic reviews of this pull request were not paused. They pause by themselves after %d; "+
-			"the count starts again from now.", reviewAutoPauseAfter))
+		return c.answer(ctx, reviewNotPausedText(after))
 	}
 	resync()
-	return c.answer(ctx, fmt.Sprintf("Resumed: this pull request is reviewed by itself again, up to %d more times before they pause. "+
-		"`@%s review` reviews the head now.", reviewAutoPauseAfter, c.slug))
+	return c.answer(ctx, reviewResumedText(after, c.slug))
 }
 
 // where decides whether anything is written to this pull request: whether its review is posted
@@ -587,6 +586,8 @@ func reviewSkipSentence(reason string) string {
 		return "No branch rule covers this pull request's branches."
 	case "paused":
 		return "Automatic reviews of this pull request are paused; a member of the organisation can resume them, and a review anybody asks for still runs."
+	case reviewSkipUnchanged:
+		return "The last push left this pull request's own changes as they were when last reviewed (the base branch merged in, or a rebase), so there was nothing new to review."
 	case "plan":
 		return "attest_tag code review is not turned on for this organisation's account, so nothing here is reviewed. " +
 			"An admin of its attest_tag account can see why in the console."
@@ -638,7 +639,7 @@ func reviewHelpText(slug string, keys []string) string {
 		"for members of the organisation, once per commit a day.\n", slug)
 	fmt.Fprintf(&b, "- `@%s status` says what the score is and why, from what is stored.\n", slug)
 	fmt.Fprintf(&b, "- `@%s pause` stops the reviews nobody asks for on this pull request, on opening and on a push, "+
-		"and `@%s resume` starts them again: for members of the organisation. They pause by themselves after %d, "+
+		"and `@%s resume` starts them again: for members of the organisation. They pause by themselves after %d unless the settings say otherwise, "+
 		"and a review somebody asks for still runs.\n", slug, slug, reviewAutoPauseAfter)
 	fmt.Fprintf(&b, "- `@%s fix` has attest_tag fix the open findings and push the commit to this pull request's branch; "+
 		"`@%s fix p0 p1` fixes those severities only. For people who can push to the repository, when its review settings allow fixes.\n", slug, slug)
@@ -761,7 +762,7 @@ func (b *Bot) reviewStatusText(ctx context.Context, orgID int64, repo string, n 
 	if pr.Paused {
 		why := "a member paused them"
 		if pr.PausedAuto {
-			why = fmt.Sprintf("they pause by themselves after %d", reviewAutoPauseAfter)
+			why = fmt.Sprintf("they pause by themselves after %d", pr.AutoReviews)
 		}
 		add("Automatic reviews are paused: %s. `@%s resume` starts them again; `@%s review` reviews the head now.", why, slug, slug)
 	}
