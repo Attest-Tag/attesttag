@@ -48,6 +48,35 @@ It never:
   `@` mentions are defused, images are removed, and links survive only into the pull request's own
   repository and the context repositories the review was allowed to read.
 
+### What a review reads
+
+Before any model is asked, Go builds what the finder is shown: the diff with its lines numbered, the
+head's code around each change, a map of the repository, the instruction files at the base, and two
+sections from the repository itself:
+
+- **Past fixes in these files**: for up to 12 changed source files, their last ten commits on the
+  base branch, keeping those whose subject says fix, revert, hotfix, bug, regression, incident, race,
+  leak, crash, rollback or security, at most 15 lines. Earlier fixes show what broke there before,
+  and the finder checks that the change does not undo or repeat one.
+- **Documentation you can read**: up to 20 Markdown paths at the base near the changed code, under
+  `docs/`, `doc/`, `documentation/`, `adr/` or `decisions/` and beside a changed file or above it,
+  leaving out changelogs and licences. Paths only; the finder reads what bears on the change.
+
+A commit is shown as its hash, date, subject and pull request number, never its author.
+
+The finder then reads with tools that cannot write: `read_file` (the head, the base or a context
+repository), `list_files`, `grep` (a regular expression over every text file of the head, the pull
+request's own changes included), `find_code` (GitHub's code search, which sees default branches
+only) and `file_history` (a file's last ten commits on the base branch). The verifier has all but
+`list_files`.
+
+The first `grep` of a review downloads the head once, as GitHub's archive of that commit, with the
+read-only token, and keeps its text files of up to 512 KB in memory until the review ends. Ignored,
+generated and vendored paths, `node_modules`, `dist`, `build`, minified files, lockfiles and binaries
+are left out. Past 120 MB downloaded, 80 MB of text or 60,000 files the copy stops where it got to,
+and every grep says it searched part of the repository; a head that cannot be downloaded is said to
+be, and `read_file` and `find_code` still work.
+
 ## Setting it up
 
 Four steps. The first two are done once per deployment by whoever runs it, and on the hosted
@@ -936,6 +965,7 @@ $0.15. The Start review dialog estimates one pull request's range before anythin
 | Commands | 10 an hour from one person; a full review once per commit a day |
 | Replies answered | 3 in one thread, 20 on one pull request a day, 20 an hour from one person (5 from somebody who is not one of the repository's people) |
 | Files read | the 80 most relevant changed files; the rest are listed as not reviewed, which caps the score |
+| Lookups | 40 greps, 5 code searches and 20 file histories per review, beyond the 12 histories read up front ([what a review reads](#what-a-review-reads)) |
 | Inline comments | *Max comments* (8 by default, at most 20), of which at most 3 are P2s; a review of a later head adds at most one new P2 |
 | Pre-existing findings | 2 listed per review |
 | Context repositories | 5 read per review |

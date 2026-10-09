@@ -837,7 +837,7 @@ func reviewHash(parts ...string) string {
 
 // reviewTagText matches anything that could be read as one of the prompt's own section tags.
 // code covers code_then and code_now, and diff the resolution check's diff_now (review_resolve.go).
-var reviewTagText = regexp.MustCompile(`(?i)<(\s*/?\s*(?:pr_data|pr_diff|head_file|repo_map|repository_conventions|team_instructions|prior_findings|candidate|code|diff|finding|review_criteria|review_skills|skill))`)
+var reviewTagText = regexp.MustCompile(`(?i)<(\s*/?\s*(?:pr_data|pr_diff|head_file|repo_map|repo_docs|past_fixes|repository_conventions|team_instructions|prior_findings|candidate|code|diff|finding|review_criteria|review_skills|skill))`)
 
 // untrusted defuses text a stranger wrote before it goes between the prompt's tags, so a pull
 // request cannot close its own section and open one that reads like ours.

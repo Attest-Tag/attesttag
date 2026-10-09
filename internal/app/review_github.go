@@ -218,6 +218,10 @@ var reviewRoutes = []reviewRoute{
 	// Whether somebody may have a fix pushed to the pull request's branch (review_fix.go): their
 	// permission on this repository, a read every installation token may make (Metadata).
 	{"GET", "collaborators/{login}/permission", nil, ""},
+	// grep's copy of the head (review_grep.go), an archive of one commit and never of a branch; and
+	// a file's commits on the base branch (review_history.go). Both read contents, as review_read may.
+	{"GET", "tarball/{sha}", nil, ""},
+	{"GET", "commits", []string{"sha", "path", "per_page"}, ""},
 }
 
 // reviewCheckRoutes are the review's check run, and go out under the token for checks alone
