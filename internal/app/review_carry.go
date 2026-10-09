@@ -51,17 +51,16 @@ const (
 )
 
 // reviewCarrySettled are the statuses a finding on a merged pull request can be settled in, which a
-// review of the same code is told not to raise again. Acknowledged — a finding a team accepts as it
-// is — is spelled out rather than named: a status a finding may be given elsewhere, carried here the
-// day it exists, and until then held by no row.
+// review of the same code is told not to raise again — acknowledged among them, a finding the team
+// accepted as a known risk in its thread.
 var reviewCarrySettled = []review.FindingStatus{review.FindingWithdrawn, review.FindingFixed, review.FindingResolved,
-	review.FindingStatus("acknowledged")}
+	review.FindingAcknowledged}
 
 // reviewCarryDeclined reports whether a settled finding was argued away rather than put right: the
 // ones Go drops a repeat of, as it drops one withdrawn on the pull request itself. A fixed one is only
 // told to the finder: the same problem raised about code that changed since may be the fix undone.
 func reviewCarryDeclined(s review.FindingStatus) bool {
-	return s == review.FindingWithdrawn || s == review.FindingStatus("acknowledged")
+	return s == review.FindingWithdrawn || s == review.FindingAcknowledged
 }
 
 // reviewCarryIn is what the lane found for a review to carry forward (reviewSpec.Carry).

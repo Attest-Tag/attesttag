@@ -260,7 +260,7 @@ or *off*; its menu's **Code review settings…** and **Set review** in the selec
 | Comment header | none | text above every inline comment, up to 400 characters |
 | Model | Advanced | the default model, the advanced one, or one offered to channels; it verifies every finding, and finds them for every type without a model of its own |
 | Max $ per review | $1.00 | $0.10 to $5.00, verification included ([money](#money-and-budgets)) |
-| Automatic types | on | whether a type whose pattern the diff matches, such as Concurrency and state, joins a review its branch rule chose ([automatic types](#types-that-join-a-review-by-themselves)). Not in the console's form yet: `auto_types` through `PUT /api/review-settings/{id}` |
+| Automatic types | on | whether a type whose pattern the diff matches, such as Concurrency and state, joins a review its branch rule chose ([automatic types](#types-that-join-a-review-by-themselves)). *Types that join by themselves* under Branch rules; `auto_types` in the API |
 
 ### The lists, the channel and branch rules
 
@@ -271,7 +271,7 @@ or *off*; its menu's **Code review settings…** and **Set review** in the selec
 | Bots to review | none | the bots whose pull requests are reviewed without anybody asking: a login with or without `[bot]` (`dependabot`, `renovate[bot]`), a glob, or `*` for every bot. Any other bot's pull request is skipped; one this App opened — a [fix job](fix-jobs.md)'s — is reviewed like a person's, once it is out of draft. The authors to skip still apply |
 | Paths to ignore | none | path globs left out of every review (`dist/**`, `**/*.snap`) |
 | Context repositories | none | the organisation's other repositories connected through the App, which the review may read, and quote, for contracts that cross them — up to five per review ([context repositories](#context-repositories)) |
-| Automatic context repositories | on | `context_repos_auto`: with no context repositories named, read up to five other repositories of the same connection that are in code review, the most recently reviewed first; set through the API |
+| When none are named | on | `context_repos_auto`: with no context repositories named, read up to five other repositories of the same connection that are in code review, the most recently reviewed first |
 | Channel | none | the chat channel each review and the merge are announced in ([announcements](#announcements-in-a-chat-channel)) |
 | Notify on | all four | which events that channel hears of: *Started*, *Finished*, *Failed or not run*, *Merged* |
 | Branch rules | General and Security on every branch | [branch rules](#branch-rules) |
@@ -281,7 +281,7 @@ or *off*; its menu's **Code review settings…** and **Set review** in the selec
 Changing the settings needs `reviews.manage`, which the built-in admin and editor roles hold;
 `reviews.view` reads them, and the viewer role holds that. What posts, spends or reaches further
 needs `connections.manage` as well, which only admin holds: *Live*, *every push*, forks, context
-repositories and their automatic choice turned on, the model, max $, *Fixes* turned on, the channel reviews are announced in (not *Notify on*, which only
+repositories and their automatic choice turned on, a higher *Pause after* (or 0), the model, max $, *Fixes* turned on, the channel reviews are announced in (not *Notify on*, which only
 picks what it hears), a branch rule that posts live, reviews every push or names a model or a
 channel, adding repositories, and code review's budgets. It
 is judged on what a change makes effective at every repository and branch under the level changed,
@@ -346,7 +346,7 @@ the review goes on.
 
 A review may read, and quote, the organisation's other repositories, for contracts that cross them:
 the frontend calling what the backend changed. *Context repositories* names them. A repository that
-names none reads, unless `context_repos_auto` is set to `false`, up to five other repositories of
+names none reads, unless *When none are named* is set to *None* (`context_repos_auto: false`), up to five other repositories of
 its own connection that are in code review, the most recently reviewed first. Turning the automatic
 choice back on needs `connections.manage`, as naming one does.
 

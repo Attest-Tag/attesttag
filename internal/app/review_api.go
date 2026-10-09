@@ -768,6 +768,11 @@ func reviewTierReach(changed []string, before, after review.Effective, byField b
 	if after.ContextReposAuto && !before.ContextReposAuto {
 		add("context_repos_auto")
 	}
+	// A higher ceiling on automatic reviews, or none (0), is more reviews nobody asked for, each paid
+	// for, as reviewing every push is; lowering it asks nothing more.
+	if b, a := before.AutoPause(), after.AutoPause(); a != b && (a == 0 || (b != 0 && a > b)) {
+		add("auto_pause_after")
+	}
 	if before.Model != after.Model {
 		add("model")
 	}

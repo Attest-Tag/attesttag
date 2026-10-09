@@ -52,6 +52,26 @@ export const DRAFTS: Choice<"yes" | "no">[] = [
   { value: "yes", label: "Review drafts", hint: "Drafts are reviewed like any other pull request." },
 ];
 
+export const AUTO_TYPES: Choice<"yes" | "no">[] = [
+  {
+    value: "yes",
+    label: "Add them",
+    hint: "A type whose pattern the diff matches — Concurrency and state on async code — runs beside the rule's, on the parts it matches.",
+  },
+  { value: "no", label: "Only the rule's types", hint: "A review runs the types its branch rule and labels chose, and nothing else." },
+];
+
+export const CONTEXT_AUTO: Choice<"yes" | "no">[] = [
+  {
+    value: "yes",
+    label: "The connection's other repositories",
+    hint: "With none named, up to five of this connection's other repositories in code review, the most recently reviewed first.",
+  },
+  { value: "no", label: "None", hint: "Only the repositories named here are read." },
+];
+
+export const DEFAULT_AUTO_PAUSE_AFTER = 10;
+
 export const FIXES: Choice<"yes" | "no">[] = [
   {
     value: "yes",
