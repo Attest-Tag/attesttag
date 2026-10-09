@@ -271,7 +271,7 @@ or *off*; its menu's **Code review settings…** and **Set review** in the selec
 | Bots to review | none | the bots whose pull requests are reviewed without anybody asking: a login with or without `[bot]` (`dependabot`, `renovate[bot]`), a glob, or `*` for every bot. Any other bot's pull request is skipped; one this App opened — a [fix job](fix-jobs.md)'s — is reviewed like a person's, once it is out of draft. The authors to skip still apply |
 | Paths to ignore | none | path globs left out of every review (`dist/**`, `**/*.snap`) |
 | Context repositories | none | the organisation's other repositories connected through the App, which the review may read, and quote, for contracts that cross them — up to five per review ([context repositories](#context-repositories)) |
-| When none are named | on | `context_repos_auto`: with no context repositories named, read up to five other repositories of the same connection that are in code review, the most recently reviewed first |
+| When none are named | off | `context_repos_auto`: with no context repositories named, read up to five other repositories of the same connection that are in code review, the most recently reviewed first |
 | Channel | none | the chat channel each review and the merge are announced in ([announcements](#announcements-in-a-chat-channel)) |
 | Notify on | all four | which events that channel hears of: *Started*, *Finished*, *Failed or not run*, *Merged* |
 | Branch rules | General and Security on every branch | [branch rules](#branch-rules) |
@@ -320,8 +320,10 @@ leaves the rest to the others, and a longer one is cut with a mark that says so.
 The lines in them that tell somebody what to do — a list item or a sentence saying *must*, *never*,
 *always*, *do not*, *avoid*, *prefer*, *should*, *required* or *use … instead* — also become
 **repository rules**, `C1`, `C2`…, up to 40 of up to 300 characters, shared between the files the
-same way. A finding may rest on one, naming and style included; it cites the rule's id, is at most
-P2, and its comment quotes the rule and its file under *Why this was flagged*. Like a type's rules
+same way. A finding may rest on one, naming and style included; it cites the rule's id, and its
+comment quotes the rule and its file under *Why this was flagged*. A rule says that something is a
+finding, not how bad it is: a convention resting on repository rules alone is at most P2, and a bug
+or a security hole one also forbids is as severe as its consequence. Like a type's rules
 they are criteria: nothing in an instruction file changes how the review is done, what it may read,
 or where it posts.
 
@@ -335,9 +337,10 @@ started it — the pull request's author, somebody else or a bot — its first c
 replies. Another tool's note on the conversation is kept, cut shorter and listed last, and a
 command to the App is left out.
 
-A problem raised there that the author answered as intended, declined, not a bug or tracked
-elsewhere is not raised again, unless the code at the head contradicts the answer; one raised and
-left unanswered may be. The verifier is shown the threads about the finding's file and the
+A problem raised there that the author or a member answered as intended, declined, not a bug or
+tracked elsewhere is not raised again, unless the code at the head contradicts the answer; one raised
+and left unanswered may be. The author of a pull request from a fork, or anybody GitHub counts as
+no one of the repository's, is named as an outside contributor, and their answer settles nothing. The verifier is shown the threads about the finding's file and the
 conversation, with the pull request's title and description, as the author's account of the change
 and never as evidence of what the code does. A discussion GitHub will not list is read as none, and
 the review goes on.
@@ -346,9 +349,11 @@ the review goes on.
 
 A review may read, and quote, the organisation's other repositories, for contracts that cross them:
 the frontend calling what the backend changed. *Context repositories* names them. A repository that
-names none reads, unless *When none are named* is set to *None* (`context_repos_auto: false`), up to five other repositories of
-its own connection that are in code review, the most recently reviewed first. Turning the automatic
-choice back on needs `connections.manage`, as naming one does.
+names none reads only itself, unless *When none are named* is set to *The connection's other
+repositories* (`context_repos_auto`): then up to five other repositories of its own connection that
+are in code review, the most recently reviewed first. It is off until somebody turns it on, since a
+finding may quote what it read and a collaborator of one private repository is not always one of
+the other; turning it on needs `connections.manage`, as naming a repository does.
 
 Either way only the organisation's App connections are read, each at the commit its default branch
 pointed at when the review began, and a private one never for a pull request in a public repository,
@@ -400,6 +405,8 @@ open findings per type. Six ship built in:
 | Performance | `performance` | queries and remote calls repeated in a loop, unbounded reads, lists and loops, queries and migrations no index serves, quadratic work on a busy path, expensive work repeated, needless re-renders, blocking work on a hot path | P0 to P2 |
 | Concurrency and state | `concurrency` | requests racing, out-of-order responses, state read after an await, timers and effects outliving their screen, locks, cancellation, retries, check-then-act. Joins by itself (below) | P0 to P2 |
 | Release summary | `release` | a large merge into a production branch: what ships by area, migrations, configuration, deploy order, old and new versions running side by side, rollback. The summary is the result; only a P0 is commented on inline | P0 only |
+
+### Which types run
 
 General and Security run when nothing says otherwise: the built-in fallback rule names both, and a
 rule a team writes without types runs General. A type's key is the word branch rules, the Start review
@@ -654,8 +661,8 @@ is the one a settings level or a branch rule sets, else the type's own. Two kind
 
 The finder is asked for every real problem it can name a trigger and a consequence for, the smaller
 ones as P2 — a new branch no test reaches, a read with no bound — and not to pad the list; an empty
-list is still the answer for a sound change. A finding resting only on repository rules is held to
-P2, and the verifier may lower a severity, never raise it. What was dropped and why — refuted,
+list is still the answer for a sound change. A convention resting only on repository rules is held
+to P2, and the verifier may lower a severity, never raise it. What was dropped and why — refuted,
 uncertain, or confirmed below the threshold — is listed with the run in **History**.
 
 ### The summary comment
@@ -672,7 +679,12 @@ that. Go renders it from what the database holds, so it changes the moment a fin
   follow-ups its description names, and **Open findings**, worst
   first, each linked to its comment, marked open, disputed, or claimed fixed in a commit, and with
   the lines of code it points at folded under *Code*;
-- when more than one type ran, a line naming the types and how many open findings each raised;
+- when more than one type ran, a line naming the types and how many open findings each raised.
+
+#### Below the open findings
+
+Folded sections follow, each only when it has something in it:
+
 - *Outside the diff*, *More notes*, *Beside a masked credential*, *In unchanged files* (P0s only),
   *Notes* (said and never scored — a credential-shaped string in a test fixture) and *Pre-existing*
   (not introduced by this pull request, never scored, at most two);
@@ -772,10 +784,14 @@ in them reviewed twice, and the second time worst: hundreds of files past the ca
 out of time, and problems answered on the feature pull request raised again. So before a review
 reads anything, it looks for reviews that already read this pull request's files: the reviews of
 the organisation's other pull requests in the same repository that merged in the last 30 days, at
-the head each was last reviewed at, at most 20 of them. Each one's tree at that head is read once,
-and a changed file whose blob here is the blob that review read was **reviewed earlier**:
+the head each was last reviewed at, at most 20 of them. A changed file whose change here — the lines
+this pull request adds to it and removes — is the change that review read was **reviewed
+earlier**. The same contents at the two heads would not do: that review read its own diff, and a
+commit nobody reviewed that changed the file too would ride along unread; its lines make the change
+here another one, and the file is read. A review type that ran on part of the earlier change —
+one the diff brought in, or one a pass of which ran out of time or money — vouches for nothing:
 
-- it is left out of the review for every review type that earlier review ran — a type it did not
+- it is left out of the review for every review type that earlier review ran whole — a type it did not
   run has not read the file, and still does here — and listed under *Reviewed earlier, unchanged
   since*, linked to the pull request that read it. It is not *Not reviewed*, does not cap the score,
   and takes no place under the 80-file cap;
@@ -785,11 +801,13 @@ and a changed file whose blob here is the blob that review read was **reviewed e
 - what was settled on those pull requests — withdrawn after discussion, fixed, resolved — is told
   to the finder as not to be raised again, and a finding repeating one withdrawn there is dropped.
 
+### When every file was reviewed earlier
+
 A pull request every file of which was reviewed earlier gets its summary with no finder pass, saying
 so — its first review at no cost at all; a later one still checks whether its own earlier findings
 were fixed ([above](#when-a-push-fixes-a-finding)). Only what somebody was shown counts — a live review carries from posted
 reviews only — and a full review (`@<app> full review`) carries nothing: it looks again at everything.
-Any pull request can carry, not only a release: what matters is the blob, not the branch.
+Any pull request can carry, not only a release: what matters is the change, not the branch.
 
 ## Commands
 
@@ -1178,6 +1196,15 @@ recheck, holds $0.15, and a question $0.10. The Start review dialog estimates on
 | Commands | 10 an hour from one person; a full review once per commit a day |
 | Replies answered | 3 in one thread, 20 on one pull request a day, 20 an hour from one person (5 from somebody who is not one of the repository's people) |
 | Questions answered | 5 an hour from one person, 20 on one pull request a day |
+| Automatic reviews | *Pause after* on one pull request, 10 unless set, then paused until `@<app> resume`; a push that leaves the diff alone is neither reviewed nor counted, and a fix claimed in a thread lets one push through ([pausing](#pushes-the-pause-does-not-count)) |
+| A push review | waits 90 seconds for the next push; a label's review waits as long |
+| Fixes | one job running on a pull request at a time, 6 a day on one pull request, 5 an hour from one person |
+| Webhook inbox | 4,096 deliveries waiting for the deployment, 64 per organisation |
+
+### What one review reads and says
+
+| limit | value |
+|---|---|
 | Files read | the 150 changed files most worth reading; counted after those reviewed earlier in a merged pull request are left out; the rest are listed as not reviewed, which caps the score. Source comes first, then tests, then stylesheets, SVGs, stories, fixtures, mocks and translations, then docs, then lockfiles. Within each, a path naming where a bug costs most (auth, sessions, payments, migrations, models, stores, state, hooks, APIs, handlers, workers, queues, jobs, the database, caches, locks and the like) counts like eight times the changed lines |
 | Reviews carried from | the merged pull requests of the last 30 days in the same repository, at most 20 ([release and back-merge pull requests](#release-and-back-merge-pull-requests)) |
 | Lookups | 40 greps, 5 code searches and 20 file histories per review, beyond the 12 histories read up front ([lookups](#lookups-past-fixes-and-documentation)) |
@@ -1185,14 +1212,15 @@ recheck, holds $0.15, and a question $0.10. The Start review dialog estimates on
 | Inline comments | *Max comments* (8 by default, at most 20), of which at most 3 are P2s; a review of a later head adds at most one new P2 |
 | Pre-existing findings | 2 listed per review |
 | Context repositories | 5 read per review |
-| Skills | 5 per type; 20 files, three folders deep and 256 KB read from one skill; 24,000 characters of a type's skills given to its finder; 30 reads an hour of public repositories without credentials, and 120 Checks an hour, per organisation |
-| A push review | waits 90 seconds for the next push; a label's review waits as long |
-| Automatic reviews | *Pause after* on one pull request, 10 unless set, then paused until `@<app> resume`; a push that leaves the diff alone is neither reviewed nor counted, and a fix claimed in a thread lets one push through ([pausing](#pushes-the-pause-does-not-count)) |
-| Fixes | one job running on a pull request at a time, 6 a day on one pull request, 5 an hour from one person |
+
+### What a team can set
+
+| limit | value |
+|---|---|
 | Branch rules | 20 per level; 10 types and 10 labels per rule, a label up to 50 characters |
 | Review types | 40 rules each, 400 characters per rule; an `auto:` pattern up to 1,000 characters |
 | Settings lists | 50 entries each, 400 characters per entry |
-| Webhook inbox | 4,096 deliveries waiting for the deployment, 64 per organisation |
+| Skills | 5 per type; 20 files, three folders deep and 256 KB read from one skill; 24,000 characters of a type's skills given to its finder; 30 reads an hour of public repositories without credentials, and 120 Checks an hour, per organisation |
 
 ## Pull requests from forks
 

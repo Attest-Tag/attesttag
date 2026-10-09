@@ -14,6 +14,65 @@ Versions follow [semantic versioning](https://semver.org). Before 1.0 that means
   down migrations, so back the database up before a minor upgrade: going back means restoring
   that backup.
 
+## Unreleased
+
+Code review finds more of what is wrong, says less of what is not, and listens to the pull request
+it is on. No migration. Two defaults change what a review runs, so read **Upgrading** below.
+→ [Code review](guide/code-review.md)
+
+**It reads more before it speaks.** → [What a review reads](guide/code-review.md#what-a-review-reads)
+
+- **The repository's own rules are criteria.** The lines in its instruction files that say *must*,
+  *never*, *always*, *avoid* or *use … instead* become repository rules, `C1`, `C2`…, which a finding
+  may cite — naming and style included; a convention resting on them alone is at most P2. It now also reads `CONTRIBUTING.md`,
+  `.cursor/rules/*.mdc`, `.github/instructions/*.instructions.md`, `.cursorrules`, `.windsurfrules`
+  and the Markdown files the root instruction files link to, still at the base commit.
+- **What was said on the pull request.** Its inline threads and conversation reach the finder and
+  the verifier: a problem the author already answered as intended or tracked elsewhere is not raised
+  again. The verifier now sees the title and description, as intent, never as evidence.
+- **grep over the head, and history.** `grep` searches every text file of the pull request's head,
+  its own changes included, from one download of the head per review; `file_history` lists a file's
+  last commits on the base branch, and each pass is shown the past fixes and reverts in the files it
+  reads and the documentation near them.
+- **Other repositories, when a level says so.** *When none are named* lets a review with no context
+  repositories named read up to five other repositories of the same connection that are in code
+  review. It is off until an admin turns it on.
+
+**It looks where bugs are.** → [Review types](guide/code-review.md#review-types)
+
+- **A Concurrency and state review**, built in, which joins a review by itself where the diff touches
+  async code, locks, timers, queues or retries, and reads only those parts.
+- **Riskiest files first.** Up to 150 changed files, ranked by where a bug costs most rather than by
+  kind, with the time to read them growing with the pull request.
+- **Every real problem, the small ones as P2.** The finder is no longer told that saying nothing is
+  the safe answer, and a P2 that cites a rule is confirmed at the type's own threshold.
+
+**Release and back-merge pull requests reuse earlier reviews.** A changed file a merged pull
+request's review read — the same lines added and removed — is not read again; what that review left open is listed,
+and what was settled there is not raised again. A pull request whose every file was reviewed that
+way is answered without a model call. → [Release and back-merge pull requests](guide/code-review.md#release-and-back-merge-pull-requests)
+
+**Threads and commands.** → [Commands](guide/code-review.md#commands)
+
+- **Acknowledged.** Replying that a finding is intended, known or tracked elsewhere accepts it: it
+  leaves the score and is listed apart, with the reason. A P0 or P1 takes whoever may withdraw one.
+- **Withdrawn, not downgraded,** when a reply shows its trigger cannot happen, and no verdict is
+  repeated to somebody who said nothing new.
+- **Questions.** `@attesttag <question>` on a pull request is answered from its code and its review.
+- **The words people type.** `score`, `start the review`, `re-review`, a bare mention and
+  `recheck` in a finding's thread all do what they say, and a refused command says why.
+
+**Automatic reviews pause later.** After 10 automatic reviews rather than 5, set per level as
+*Pause after*; a push that leaves the diff as it was is not counted, and a push after somebody says a
+finding is fixed is reviewed even when paused.
+
+### Upgrading
+
+- **The fallback branch rule runs General and Security.** A level with no branch rules of its own
+  reviewed with General alone; it now runs both, which roughly doubles what such a review costs.
+  Give the level a rule with the types you want to keep it as it was.
+- **Automatic types are on.** Turn *Types that join by themselves* off to run only a rule's types.
+
 ## 0.3.0 (2026-10-06)
 
 The first release with images: `ghcr.io/attest-tag/attesttag:0.3.0` for linux/amd64 and

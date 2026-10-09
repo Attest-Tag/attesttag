@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"attesttag/internal/review"
 )
@@ -276,14 +277,34 @@ func TestReviewGrepFitsInAToolResult(t *testing.T) {
 // A pattern that matches nothing at all matches every line once, and no line past the last newline.
 func TestReviewGrepLinesCountsLinesOnce(t *testing.T) {
 	var got []int
-	grepLines("a\nbb\n\nc\n", regexp.MustCompile(`(?m)x*`), func(n int, _ string) { got = append(got, n) })
+	grepLines(context.Background(), "a\nbb\n\nc\n", regexp.MustCompile(`(?m)x*`), func(n int, _ string) { got = append(got, n) })
 	if !slices.Equal(got, []int{1, 2, 3, 4}) {
 		t.Errorf("an empty match counted lines %v, want 1-4", got)
 	}
 	got = nil
-	grepLines("one two two\nthree\ntwo", regexp.MustCompile(`(?m)two`), func(n int, _ string) { got = append(got, n) })
+	grepLines(context.Background(), "one two two\nthree\ntwo", regexp.MustCompile(`(?m)two`), func(n int, _ string) { got = append(got, n) })
 	if !slices.Equal(got, []int{1, 3}) {
 		t.Errorf("matched lines %v, want 1 and 3, each once", got)
+	}
+}
+
+// A pattern that runs to the end of whatever it is matched against — [^;]* in code with no
+// semicolons — is matched a line at a time, so a large file takes as long as reading it once; and a
+// search whose time is up stops.
+func TestReviewGrepLinesStaysLinearAndStopsOnTime(t *testing.T) {
+	text := strings.Repeat("foo := bar(baz) // no semicolons here at all\n", 12_000) // ~500 KB
+	start := time.Now()
+	n := 0
+	grepLines(context.Background(), text, regexp.MustCompile(`foo[^;]*`), func(int, string) { n++ })
+	if n != 12_000 || time.Since(start) > 2*time.Second {
+		t.Errorf("%d lines matched in %s", n, time.Since(start))
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	n = 0
+	grepLines(ctx, text, regexp.MustCompile(`foo`), func(int, string) { n++ })
+	if n >= 12_000 {
+		t.Errorf("a search whose time was up matched all %d lines", n)
 	}
 }
 

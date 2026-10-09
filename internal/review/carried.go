@@ -119,7 +119,7 @@ func (ctx RenderContext) carriedSections(s SummaryState, p *linkPolicy) []string
 		for _, n := range prs {
 			refs = append(refs, ctx.prRef(n, p))
 		}
-		body := "<sub>Read by the review of " + joinNames(refs) + " at exactly the contents they have here, so not read " +
+		body := "<sub>Read by the review of " + joinNames(refs) + " with exactly the change they make here, so not read " +
 			"again, and not counted as unreviewed.</sub>\n\n" + strings.Join(lines, "\n")
 		out = append(out, section(false, fmt.Sprintf("Reviewed earlier, unchanged since (%s, in %s)",
 			plural(len(files), "file", "files"), carriedHeadingRefs(prs)), body))

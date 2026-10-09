@@ -563,8 +563,10 @@ func (r *reviewRun) qaTools() []openai.ChatCompletionToolUnionParam {
 func (r *reviewRun) qaPrompt(spec reviewQASpec) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Repository %s, pull request #%d, head %s, base %s.\n\n", r.repo, spec.PR, shortSHA(r.head), shortSHA(r.base))
-	body, _ := cutRunes(strings.TrimSpace(spec.Pull.Body), reviewQABodyChars)
-	fmt.Fprintf(&b, "<pr_data>\nTitle: %s\nDescription:\n%s\n</pr_data>\n", untrusted(oneLine(spec.Pull.Title)), untrusted(body))
+	// Masked as the review masks them: a key pasted into a description is no more the model's to see
+	// for being asked about than for being reviewed.
+	body, _ := cutRunes(strings.TrimSpace(redact(spec.Pull.Body)), reviewQABodyChars)
+	fmt.Fprintf(&b, "<pr_data>\nTitle: %s\nDescription:\n%s\n</pr_data>\n", untrusted(oneLine(redact(spec.Pull.Title))), untrusted(body))
 	fmt.Fprintf(&b, "\n<review>\n%s</review>\n", spec.Standing)
 	b.WriteString("\n<pr_diff>\n")
 	left := reviewQADiffChars

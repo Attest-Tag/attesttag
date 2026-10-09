@@ -547,11 +547,11 @@ func (ix *reviewHeadIndex) search(ctx context.Context, repo string, re *regexp.R
 		if !grepGlob(glob, f.path) {
 			continue
 		}
-		if searched++; searched%256 == 0 && ctx.Err() != nil {
+		if searched++; ctx.Err() != nil {
 			break
 		}
 		hit := false
-		grepLines(f.text, re, func(n int, line string) {
+		grepLines(ctx, f.text, re, func(n int, line string) {
 			total++
 			hit = true
 			if len(shown) >= limit || size >= budget {
@@ -597,26 +597,27 @@ func (ix *reviewHeadIndex) search(ctx context.Context, repo string, re *regexp.R
 	return b.String()
 }
 
-// grepLines calls hit with the number and text of every line of text that re matches, once a line.
-// re may match across a newline; the line it starts on is the one counted. Nothing after a final
-// newline is a line, so a pattern that matches nothing at all does not invent one there.
-func grepLines(text string, re *regexp.Regexp, hit func(n int, line string)) {
-	pos, n := 0, 1
-	for pos < len(text) {
-		loc := re.FindStringIndex(text[pos:])
-		if loc == nil {
+// grepLines calls hit with the number and text of every line of text that re matches, once a line,
+// and stops when ctx is done. A pattern is matched against one line at a time: matched against the
+// rest of the file, a pattern that runs to its end ([^;]* in code with no semicolons, (?s).*) scanned
+// the remainder again after every match, and a long file took minutes; a line's match is linear in
+// the line. So, as in grep, a match never spans a newline. Nothing after a final newline is a line.
+func grepLines(ctx context.Context, text string, re *regexp.Regexp, hit func(n int, line string)) {
+	for n, pos := 1, 0; pos < len(text); n++ {
+		if n%4096 == 0 && ctx.Err() != nil {
 			return
 		}
-		m := pos + loc[0]
-		n += strings.Count(text[pos:m], "\n")
-		from := strings.LastIndexByte(text[:m], '\n') + 1
-		to := strings.IndexByte(text[m:], '\n')
-		if to < 0 {
-			hit(n, text[from:])
+		end := strings.IndexByte(text[pos:], '\n')
+		line := text[pos:]
+		if end >= 0 {
+			line = text[pos : pos+end]
+		}
+		if re.MatchString(line) {
+			hit(n, line)
+		}
+		if end < 0 {
 			return
 		}
-		to += m
-		hit(n, text[from:to])
-		pos, n = to+1, n+1
+		pos += end + 1
 	}
 }

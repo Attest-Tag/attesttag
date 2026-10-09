@@ -16,14 +16,15 @@ import (
 // of them: the findings an author fixes within minutes of being told. Numbered, they are criteria a
 // finding can rest on and a reader can check, while the file they came from stays text a stranger
 // may have written — which is why they are read at the base commit, and why a finding resting on
-// one alone is at most RepoRuleCap.
+// one alone, as a convention, is at most RepoRuleCap.
 type RepoRule struct {
 	ID     string `json:"id"`
 	Text   string `json:"text"`
 	Source string `json:"source"` // the file it was read from, at the base commit
 }
 
-// RepoRuleCap is the most severe a finding resting only on repository rules may be. A rule's own
+// RepoRuleCap is the most severe a convention finding resting only on repository rules may be. A
+// bug or a hole a rule also forbids is judged on its consequence instead. A rule's own
 // words could claim any severity, and the file is not the team's console, where a rule's cap is set
 // by somebody with the permission to set it.
 const RepoRuleCap = P2

@@ -55,7 +55,7 @@ func reviewAutoTypes(ctx context.Context, st *Store, orgID int64, have []string)
 func (r *reviewRun) addAutoTypes() {
 	for _, ts := range r.spec.Auto {
 		if slices.ContainsFunc(r.spec.Types, func(have reviewTypeSpec) bool { return have.Key == ts.Key }) ||
-			!slices.ContainsFunc(r.reviewable, func(f *reviewFile) bool { return ts.AutoMatch(f.File) }) {
+			!slices.ContainsFunc(r.reviewable, func(f *reviewFile) bool { return reviewAutoMatches(&ts, f) }) {
 			continue
 		}
 		ts.Automatic = true
@@ -72,11 +72,19 @@ func (r *reviewRun) addAutoTypes() {
 func reviewAutoUnits(ts *reviewTypeSpec, units []*reviewUnit) []*reviewUnit {
 	var out []*reviewUnit
 	for _, u := range units {
-		if slices.ContainsFunc(u.files, func(f *reviewFile) bool { return ts.AutoMatch(f.File) }) {
+		if slices.ContainsFunc(u.files, func(f *reviewFile) bool { return reviewAutoMatches(ts, f) }) {
 			out = append(out, u)
 		}
 	}
 	return out
+}
+
+// reviewAutoMatches reports whether f brings ts in: a source file (reviewTier's first tier) whose
+// path or changed lines match ts's pattern. The words an automatic type looks for are as common in a
+// lockfile ("node_modules/async"), a README ("retry the upload") or a translation ("subscription") as
+// in code, and a whole pass of a type about code over those is money spent on nothing.
+func reviewAutoMatches(ts *reviewTypeSpec, f *reviewFile) bool {
+	return f.tier == 0 && ts.AutoMatch(f.File)
 }
 
 // reviewChosenTypes are a run's types less the ones its diff brought in: the types it was asked for,

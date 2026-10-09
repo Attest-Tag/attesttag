@@ -197,7 +197,10 @@ type Settings struct {
 	// repositories of its connection that are in code review, the most recently reviewed first. A
 	// bug in a pull request often sits across the line between two of a team's repositories — the
 	// frontend calling what the backend changed — and a list somebody has to think of first is a
-	// list nobody keeps. Context repositories named here win over the automatic choice.
+	// list nobody keeps. Context repositories named here win over the automatic choice. Off unless
+	// turned on: a finding quotes what it read, and a collaborator of one private repository is not
+	// always one of the other, so reading past the repository is somebody's decision, made where
+	// naming a context repository is (connections.manage).
 	ContextReposAuto *bool `json:"context_repos_auto,omitempty"`
 
 	BranchRules []BranchRule `json:"branch_rules,omitempty"`
@@ -241,7 +244,7 @@ func Defaults() Settings {
 		AutoTypes:     ptr(true),
 		BranchRules:   []BranchRule{{Types: DefaultRuleTypes()}},
 
-		ContextReposAuto: ptr(true),
+		ContextReposAuto: ptr(false),
 
 		AutoPauseAfter: ptr(DefaultAutoPauseAfter),
 	}
@@ -301,9 +304,9 @@ type Effective struct {
 	ReviewBots     []string `json:"review_bots,omitzero"` // omitzero for Hash's sake, as Notify: adding it missed no cached review
 	IgnorePaths    []string `json:"ignore_paths"`
 	ContextRepos   []string `json:"context_repos"`
-	// ContextReposAuto is on unless a level turns it off. omitzero, and hashed as its opposite
-	// (Hash), so the bytes hashed for settings that leave it alone are what they were before it
-	// existed; the console reads it left out as off, as it reads Fixes.
+	// ContextReposAuto is off unless a level turns it on. omitzero, so the bytes hashed for settings
+	// that leave it alone are what they were before it existed; the console reads it left out as off,
+	// as it reads Fixes.
 	ContextReposAuto bool `json:"context_repos_auto,omitzero"`
 
 	BranchRules []BranchRule `json:"branch_rules"`
@@ -524,8 +527,8 @@ func (e Effective) IgnoresPath(path string) bool { return MatchAny(e.IgnorePaths
 // the bots let through and the ceiling on automatic reviews, which decide whether a review runs, not
 // what it finds.
 //
-// The automatic choice of context repositories does change what a review reads, so it is hashed —
-// as its opposite, "manual", which is false and left out wherever nobody turned the choice off.
+// The automatic choice of context repositories does change what a review reads, so it is hashed:
+// left out while off, as it is unless somebody turned it on.
 func (e Effective) Hash() string {
 	e.Source = nil
 	e.Notify, e.NotifyOn, e.Fixes = NotifyChannel{}, nil, false
@@ -534,16 +537,15 @@ func (e Effective) Hash() string {
 	for i := range e.BranchRules {
 		e.BranchRules[i].Notify = nil
 	}
-	// Automatic types and the automatic choice of context repositories are hashed only when they are
-	// off. On is the default, and leaving it out then keeps the bytes what they were before there was
-	// a setting; off adds a field, so a review with them is never answered from one without.
-	noAuto, manual := !e.AutoTypes, !e.ContextReposAuto
-	e.AutoTypes, e.ContextReposAuto = false, false
+	// Automatic types are hashed only when they are off. On is the default, and leaving it out then
+	// keeps the bytes what they were before there was a setting; off adds a field, so a review with
+	// them is never answered from one without.
+	noAuto := !e.AutoTypes
+	e.AutoTypes = false
 	hashed := struct {
 		Effective
-		NoAutoTypes        bool `json:"no_auto_types,omitzero"`
-		ContextReposManual bool `json:"context_repos_manual,omitzero"`
-	}{e, noAuto, manual}
+		NoAutoTypes bool `json:"no_auto_types,omitzero"`
+	}{e, noAuto}
 	b, err := json.Marshal(hashed)
 	if err != nil {
 		// Only a NaN or an infinity in MaxUSD can fail here, and Validate refuses both; a

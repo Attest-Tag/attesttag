@@ -933,7 +933,7 @@ func (s *Store) reviewTypesWhere(ctx context.Context, orgID, prID int64, head st
 	if head == "" {
 		return nil, nil
 	}
-	rows, err := s.db.QueryContext(ctx, `select types_json from review_runs
+	rows, err := s.db.QueryContext(ctx, `select types_json, coalesce(outcome_json,'') from review_runs
 		where org_id=? and review_pr_id=? and kind='review' and head_sha=? and id<>? and (`+cond+`)`, orgID, prID, head, except)
 	if err != nil {
 		return nil, err
@@ -941,14 +941,21 @@ func (s *Store) reviewTypesWhere(ctx context.Context, orgID, prID int64, head st
 	defer rows.Close()
 	var out []string
 	for rows.Next() {
-		var raw string
-		if err := rows.Scan(&raw); err != nil {
+		var raw, outcome string
+		if err := rows.Scan(&raw, &outcome); err != nil {
 			return nil, err
 		}
 		var types []ReviewRunType
 		json.Unmarshal([]byte(raw), &types) // written only by this file
+		// A type the diff brought in read only the parts its pattern matched, so it has not reviewed
+		// the head as a review asked for that type would (reviewChosenTypes).
+		var ck struct {
+			Types []reviewTypeRunJSON `json:"types"`
+		}
+		json.Unmarshal([]byte(outcome), &ck) // the run's checkpoint, written by the lane
 		for _, t := range types {
-			if !slices.Contains(out, t.Key) {
+			auto := slices.ContainsFunc(ck.Types, func(c reviewTypeRunJSON) bool { return c.Auto && c.Key == t.Key })
+			if !auto && !slices.Contains(out, t.Key) {
 				out = append(out, t.Key)
 			}
 		}

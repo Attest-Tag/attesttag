@@ -171,12 +171,18 @@ func (r *reviewRun) check(ctx context.Context, found reviewFound) *reviewCandida
 
 // citeRules keeps the rule ids a finding cites that are rules of its type, on and about its file,
 // or rules this run read from the repository's instruction files, and holds its severity to the most
-// severe they allow: a finding may be no more severe than the rule it rests on. A repository rule
-// allows review.RepoRuleCap; an id that names nothing this run has is dropped, so a comment never
-// says it rests on a rule nobody can find.
+// severe its type's rules allow: a finding may be no more severe than the rule it rests on. An id
+// that names nothing this run has is dropped, so a comment never says it rests on a rule nobody can
+// find.
+//
+// A repository rule says that something is a finding, not how bad it is: a convention finding that
+// rests on repository rules alone is held to review.RepoRuleCap, and anything else — a SQL injection
+// the repository's "always parameterise queries" also forbids — is as severe as its consequence,
+// which the verifier judges. Capped whatever it was, the better a team wrote its rules down the more
+// of its worst findings would be posted as minor ones.
 func (r *reviewRun) citeRules(f *review.Finding, ts *reviewTypeSpec) {
 	var keep []string
-	allowed := -1
+	allowed, repoOnly := -1, false
 	for _, id := range f.RuleIDs {
 		id = strings.ToUpper(strings.TrimSpace(id))
 		if strings.HasPrefix(id, "S") {
@@ -189,9 +195,7 @@ func (r *reviewRun) citeRules(f *review.Finding, ts *reviewTypeSpec) {
 		if review.RepoRuleID(id) {
 			if _, ok := review.FindRepoRule(r.repoRules, id); ok && !slices.Contains(keep, id) {
 				keep = append(keep, id)
-				if capRank := sevRank(review.RepoRuleCap); allowed < 0 || capRank < allowed {
-					allowed = capRank
-				}
+				repoOnly = repoOnly || allowed < 0
 			}
 			continue
 		}
@@ -200,6 +204,7 @@ func (r *reviewRun) citeRules(f *review.Finding, ts *reviewTypeSpec) {
 			continue
 		}
 		keep = append(keep, id)
+		repoOnly = false
 		capRank := 0
 		if rule.SeverityCap.Valid() {
 			capRank = sevRank(rule.SeverityCap)
@@ -209,6 +214,9 @@ func (r *reviewRun) citeRules(f *review.Finding, ts *reviewTypeSpec) {
 		}
 	}
 	f.RuleIDs = keep
+	if repoOnly && allowed < 0 && f.Category == review.CategoryConvention {
+		allowed = sevRank(review.RepoRuleCap)
+	}
 	if allowed >= 0 && f.Severity.Valid() && sevRank(f.Severity) < allowed {
 		f.Severity = []review.Severity{review.P0, review.P1, review.P2}[allowed]
 	}
@@ -339,7 +347,10 @@ func fitAnchor(hunks []review.Hunk, side review.Side, start, line int) (from, to
 	if line < 1 || start < 1 || start > line {
 		return 0, 0, false
 	}
-	best := 0
+	// The hunk that shows the finding's own line wins: the comment belongs where it points, and a
+	// range that only strays into another hunk is narrowed to the part of it around that line. Only
+	// when no hunk shows the line does the largest visible overlap stand in for it.
+	best, own := 0, false
 	for _, h := range hunks {
 		lo, n := h.NewStart, h.NewLines
 		if side == review.Left {
@@ -351,12 +362,15 @@ func fitAnchor(hunks []review.Hunk, side review.Side, start, line int) (from, to
 			continue
 		}
 		s, e := max(start, lo), min(line, lo+n-1)
-		if s > e || e-s+1 < best {
+		if s > e || !review.ValidAnchor([]review.Hunk{h}, side, s, e) {
 			continue
 		}
-		if review.ValidAnchor([]review.Hunk{h}, side, s, e) {
-			from, to, ok, best = s, e, true, e-s+1
+		mine := e == line
+		switch {
+		case own && !mine, !own && !mine && e-s+1 < best, own && mine && e-s+1 < best:
+			continue
 		}
+		from, to, ok, best, own = s, e, true, e-s+1, own || mine
 	}
 	return from, to, ok
 }

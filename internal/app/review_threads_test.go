@@ -128,7 +128,7 @@ func TestReviewReplyRefutedTriggerWithdrawsAndNamesTheNarrowerCase(t *testing.T)
 	a := rig.botAnswers(f)
 	if len(a) != 1 || !strings.HasPrefix(a[0], "**Withdrawn.**") ||
 		!strings.Contains(a[0], "A narrower case may remain: A caller outside the package could still call Add without the lock.") ||
-		!strings.Contains(a[0], "`@attesttag review` checks the head for it.") {
+		!strings.Contains(a[0], "`@attesttag full review` on the pull request's conversation looks at the head again for it.") {
 		t.Fatalf("the answer = %q", a)
 	}
 	sys := rig.model.requests("reply")[0].System

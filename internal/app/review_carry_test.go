@@ -1,40 +1,48 @@
 package app
 
 import (
+	"cmp"
 	"context"
-	"crypto/sha1"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
 	"attesttag/internal/review"
 )
 
-// Carrying reviews forward, end to end on the lane: a merged pull request reviewed at a head that
-// holds a file at the same blob as this one's head lends that file its review, and what it left
-// open or settled on it. What these pin: only a file the earlier review read, at exactly the blob
-// it has here, is left out; a pull request every file of which was read that way costs no model
-// call; what is still open there is listed and named in the risk line but never scored; what was
-// argued away there is not raised again; and none of it crosses organisations. They run on both
-// dialects.
+// Carrying reviews forward, end to end on the lane: a merged pull request whose review read the very
+// change this one makes to a file lends that file its review, and what it left open or settled on
+// it. What these pin: only a file the earlier review read, with exactly the change it has here, is
+// left out — a change that differs, by a commit nobody reviewed or anything else, is read again; a
+// review type that ran on part of it, or ran out of time or money, vouches for nothing; a pull
+// request every file of which was read that way costs no model call; what is still open there is
+// listed and named in the risk line but never scored; what was argued away there is not raised
+// again; and none of it crosses organisations. They run on both dialects.
 
-// gitBlobSHA is the blob id git gives content, as the trees API lists it.
-func gitBlobSHA(content string) string {
-	h := sha1.New()
-	fmt.Fprintf(h, "blob %d\x00%s", len(content), content)
-	return hex.EncodeToString(h.Sum(nil))
+// prPatchHash is the change a fixture's pull request makes to path, as a review records it.
+func prPatchHash(fx reviewPRFixture, path string) string {
+	for _, f := range fx.files {
+		if f["filename"] == path {
+			patch, _ := f["patch"].(string)
+			return review.PatchHash(review.File{Path: path, Patch: patch})
+		}
+	}
+	return ""
 }
 
 // carrySource is a merged pull request's review as the carry reads it: what it read and ran.
 type carrySource struct {
 	number  int
 	head    string
-	read    []string // changed files at that head a pass read
-	notRead []string // changed files no pass finished
+	read    []string          // changed files at that head a pass read
+	changes map[string]string // the change it read in a file (review.PatchHash); another one when not given
+	notRead []string          // changed files no pass finished
 	types   []string
-	shadow  bool // recorded in shadow, not posted
+	cut     []string // types that ran out of time or money on a pass
+	auto    []string // types the diff brought in
+	shadow  bool     // recorded in shadow, not posted
 }
 
 // mergedReview records acme/web#src.number as merged after a review at src.head, in org, and
@@ -48,10 +56,10 @@ func mergedReview(t *testing.T, st *Store, org int64, src carrySource) (*ReviewP
 	}
 	ck := reviewCheckpoint{FileHashes: map[string]string{}, NotReviewed: []reviewNotReviewed{}}
 	for _, k := range src.types {
-		ck.Types = append(ck.Types, reviewTypeRunJSON{Key: k})
+		ck.Types = append(ck.Types, reviewTypeRunJSON{Key: k, Cut: slices.Contains(src.cut, k), Auto: slices.Contains(src.auto, k)})
 	}
 	for _, p := range append(append([]string{}, src.read...), src.notRead...) {
-		ck.FileHashes[p] = "h:" + p
+		ck.FileHashes[p] = cmp.Or(src.changes[p], "another change to "+p)
 	}
 	for _, p := range src.notRead {
 		ck.NotReviewed = append(ck.NotReviewed, reviewNotReviewed{Path: p, Reason: "budget"})
@@ -131,26 +139,23 @@ const (
 	laterGo   = "package totals\n\n// Reset sets the running total back to nothing.\nfunc (t *Totals) Reset() { t.mu.Lock(); t.value = 0; t.mu.Unlock() }\n"
 )
 
-// A changed file a merged pull request's review read at the blob it has here is left out of the
-// finder's passes and listed as reviewed earlier; one whose blob differs, one that review did not
-// change, and one it did not finish reading are all read again. The file carried is not unreviewed,
-// so the score is not capped for it.
-func TestReviewCarriesFilesAnEarlierReviewReadAtTheSameBlob(t *testing.T) {
+// A changed file a merged pull request's review read with the change it has here is left out of the
+// finder's passes and listed as reviewed earlier; one whose change differs there — another commit
+// changed it too, one nobody reviewed — one that review did not change, and one it did not finish
+// reading are all read again. The file carried is not unreviewed, so the score is not capped for it.
+func TestReviewCarriesFilesAnEarlierReviewReadTheSameChangeOf(t *testing.T) {
 	fx := totalsFixture()
 	fx.addFile("src/feature.go", featureGo)
 	fx.addFile("src/later.go", laterGo)
 	rig := newLaneRig(t, fx, `{"mode":"live"}`)
 	rig.confirmLock()
-	// #5 read feature.go as it is here, and later.go as it was before #6 changed it; it never
-	// changed totals.go, which its head holds at this head's blob all the same.
+	// #5 read the change to feature.go this pull request makes, and a change to later.go that is not
+	// all of this one's; it never changed totals.go.
 	mergedReview(t, rig.st, orgID, carrySource{number: 5, head: headFive, read: []string{"src/feature.go", "src/later.go"},
-		types: []string{"general", "security"}})
-	rig.gh.content[headFive] = map[string]string{"src/feature.go": featureGo, "src/later.go": "package totals // older\n",
-		"src/totals.go": totalsHead}
-	// #6 has later.go as it is here, but its review never finished reading it.
+		changes: map[string]string{"src/feature.go": prPatchHash(fx, "src/feature.go")}, types: []string{"general", "security"}})
+	// #6 made later.go's change as it is here, but its review never finished reading it.
 	mergedReview(t, rig.st, orgID, carrySource{number: 6, head: headSix, notRead: []string{"src/later.go"}, read: []string{"src/x.go"},
-		types: []string{"general", "security"}})
-	rig.gh.content[headSix] = map[string]string{"src/later.go": laterGo, "src/x.go": "package x\n"}
+		changes: map[string]string{"src/later.go": prPatchHash(fx, "src/later.go")}, types: []string{"general", "security"}})
 
 	rig.deliver("pull_request", prEvent("opened", 7, reviewHead))
 	rig.drain()
@@ -191,8 +196,7 @@ func TestReviewEveryFileCarriedAsksNoModel(t *testing.T) {
 	rig := newLaneRig(t, totalsFixture(), `{"mode":"live"}`)
 	rig.confirmLock()
 	pr5, run5 := mergedReview(t, rig.st, orgID, carrySource{number: 5, head: headFive, read: []string{"src/totals.go", "src/gone.go"},
-		types: []string{"general", "security"}})
-	rig.gh.content[headFive] = map[string]string{"src/totals.go": totalsHead, "src/gone.go": "package totals\n"}
+		changes: map[string]string{"src/totals.go": prPatchHash(totalsFixture(), "src/totals.go")}, types: []string{"general", "security"}})
 	carriedFinding(t, rig.st, pr5, run5, lockOnTotals(), review.FindingOpen, 555)
 	elsewhere := lockOnTotals()
 	elsewhere.Path, elsewhere.Title = "src/gone.go", "Gone writes without the lock"
@@ -211,7 +215,7 @@ func TestReviewEveryFileCarriedAsksNoModel(t *testing.T) {
 	summary := rig.lastSummary()
 	for _, want := range []string{
 		"Confidence 5/5",
-		"Every changed file this review would read was reviewed in #5 at exactly the contents it has here",
+		"Every changed file this review would read was reviewed in #5 with exactly the change it makes here",
 		"Still open on the merged pull request this code came in with: **Add writes the total without the lock** (P1, [#5](https://github.com/acme/web/pull/5)).",
 		"Open from merged pull requests (1)",
 		"[Add writes the total without the lock](https://github.com/acme/web/pull/5#discussion_r555)",
@@ -232,16 +236,36 @@ func TestReviewEveryFileCarriedAsksNoModel(t *testing.T) {
 	}
 }
 
+// A type that ran out of time or money on a pass of the earlier review, or one the diff brought in
+// and ran on the parts it matched, vouches for no file whole: a file is carried only for the types
+// that read all of it, and the rest read it again.
+func TestReviewCarryTrustsOnlyTypesThatReadTheWholeChange(t *testing.T) {
+	fx := totalsFixture()
+	rig := newLaneRig(t, fx, `{"mode":"live","auto_types":false}`)
+	rig.confirmLock()
+	mergedReview(t, rig.st, orgID, carrySource{number: 5, head: headFive, read: []string{"src/totals.go"},
+		changes: map[string]string{"src/totals.go": prPatchHash(fx, "src/totals.go")}, types: []string{"general", "security"},
+		cut: []string{"security"}})
+	rig.deliver("pull_request", prEvent("opened", 7, reviewHead))
+	rig.drain()
+	if got := finderTypes(rig.model.requests("finder")); !slices.Equal(got, []string{"security"}) {
+		t.Errorf("finder passes for %v, want security alone: general read the change on #5, security was cut short", got)
+	}
+	ck := rig.latestCheckpoint()
+	if len(ck.Carried) != 1 || !slices.Equal(ck.Carried[0].Types, []string{"general"}) {
+		t.Errorf("carried = %+v, want totals.go for general alone", ck.Carried)
+	}
+}
+
 // What a merged pull request settled on the code this one changes is told to the finder, and a
 // candidate repeating one argued away there is dropped by Go, as one withdrawn on the pull request
 // itself is: the author answered it once.
 func TestReviewWithdrawnOnAMergedPullRequestIsNotRaisedAgain(t *testing.T) {
 	rig := newLaneRig(t, totalsFixture(), `{"mode":"live"}`)
 	rig.confirmLock()
-	// #5 read totals.go as it was before this pull request changed it again: nothing is carried.
+	// #5 read another change to totals.go than this pull request's: nothing is carried.
 	pr5, run5 := mergedReview(t, rig.st, orgID, carrySource{number: 5, head: headFive, read: []string{"src/totals.go"},
 		types: []string{"general", "security"}})
-	rig.gh.content[headFive] = map[string]string{"src/totals.go": totalsBase}
 	carriedFinding(t, rig.st, pr5, run5, lockOnTotals(), review.FindingWithdrawn, 555)
 	fixed := lockOnTotals()
 	fixed.Title, fixed.Symbol = "Get reads the total twice", "Get"
@@ -276,7 +300,7 @@ func TestReviewWithdrawnOnAMergedPullRequestIsNotRaisedAgain(t *testing.T) {
 		t.Errorf("the repeat was not dropped as withdrawn on #5: %+v", rig.latestCheckpoint().Drops)
 	}
 	if ck := rig.latestCheckpoint(); len(ck.Carried) != 0 || len(ck.CarriedOpen) != 0 {
-		t.Errorf("a file whose blob changed was carried: %+v", ck)
+		t.Errorf("a file whose change differs was carried: %+v", ck)
 	}
 }
 

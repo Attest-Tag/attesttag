@@ -82,7 +82,8 @@ func reviewCommitOf(sha, message, date string) reviewCommit {
 		}
 		subject = subject[:m[0]] + subject[m[1]:]
 	}
-	c.Subject, _ = cutRunes(oneLine(subject), reviewSubjectChars)
+	// Masked like every other text a model is shown: a token pasted into a commit message is one.
+	c.Subject, _ = cutRunes(oneLine(redact(subject)), reviewSubjectChars)
 	return c
 }
 

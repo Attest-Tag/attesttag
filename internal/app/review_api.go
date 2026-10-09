@@ -2816,7 +2816,7 @@ func (b *Bot) handleReviewRun(w http.ResponseWriter, r *http.Request) {
 		"head_sha": pr.HeadSHA, "last_reviewed_sha": pr.LastReviewedSHA, "score": reviewScore(pr.Score), "reviews": pr.ReviewsCount,
 		"skip_reason": pr.SkipReason, "is_fork": pr.IsFork, "is_private": pr.IsPrivate,
 		"url": fmt.Sprintf("https://github.com/%s/pull/%d", pr.Repo, pr.Number)}
-	maps.Copy(prJSON, reviewPausedJSON(pr))
+	maps.Copy(prJSON, reviewPausedJSON(pr, b.reviewCeilingOf(ctx, orgID, pr.Repo)))
 	out["pr"] = prJSON
 	ck, _ := checkpointFrom(run)
 	if ck == nil {
@@ -2889,10 +2889,10 @@ func (b *Bot) handleReviewRun(w http.ResponseWriter, r *http.Request) {
 // reviewPausedJSON is where a pull request stands with its automatic reviews, for the console: paused
 // or not, how many have run towards the pause, the pause's ceiling, and — when paused — whether the
 // ceiling or a person paused them (by: "auto" or "member"), which is what the footer says too. The
-// ceiling is a setting (auto_pause_after); one that paused them is the count it paused them at, as the
-// footer says, and otherwise the built-in one.
-func reviewPausedJSON(pr *ReviewPR) map[string]any {
-	out := map[string]any{"paused": pr.Paused, "auto_reviews": pr.AutoReviews, "auto_pause_after": reviewAutoPauseAfter,
+// ceiling is the repository's setting (auto_pause_after, 0 for none, reviewCeilingOf); one that
+// paused them is the count it paused them at, as the footer says.
+func reviewPausedJSON(pr *ReviewPR, ceiling int) map[string]any {
+	out := map[string]any{"paused": pr.Paused, "auto_reviews": pr.AutoReviews, "auto_pause_after": ceiling,
 		"paused_by": ""}
 	if pr.Paused {
 		out["paused_by"] = "member"
@@ -2901,6 +2901,20 @@ func reviewPausedJSON(pr *ReviewPR) map[string]any {
 		}
 	}
 	return out
+}
+
+// reviewCeilingOf is a repository's auto_pause_after as the console shows it, through the
+// installation it is reviewed through; the built-in ceiling when that cannot be read.
+func (b *Bot) reviewCeilingOf(ctx context.Context, orgID int64, repo string) int {
+	t, err := b.reviewTreeIndex(ctx, orgID)
+	if err != nil {
+		return reviewAutoPauseAfter
+	}
+	installation := t.installationFor(repo)
+	if installation == 0 {
+		return reviewAutoPauseAfter
+	}
+	return b.reviewPauseCeiling(ctx, orgID, installation, repo)
 }
 
 // installationFor is the installation a repository is reviewed through here: the one its own
@@ -3283,6 +3297,7 @@ func (b *Bot) handleReviewPulls(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := make([]map[string]any, 0, len(pulls))
+	ceiling := b.reviewCeilingOf(ctx, orgID, repo)
 	for _, p := range pulls {
 		item := map[string]any{"number": p.Number, "title": p.Title, "author": p.User.Login, "base": p.Base.Ref,
 			"head": p.Head.Ref, "head_sha": p.Head.SHA, "draft": p.Draft, "updated_at": p.UpdatedAt, "url": p.HTMLURL,
@@ -3290,7 +3305,7 @@ func (b *Bot) handleReviewPulls(w http.ResponseWriter, r *http.Request) {
 		if row := prs[p.Number]; row != nil {
 			rv := map[string]any{"score": reviewScore(row.Score), "last_reviewed_sha": row.LastReviewedSHA,
 				"reviewed_head": row.LastReviewedSHA != "" && row.LastReviewedSHA == p.Head.SHA, "skip_reason": row.SkipReason}
-			maps.Copy(rv, reviewPausedJSON(row))
+			maps.Copy(rv, reviewPausedJSON(row, ceiling))
 			if run := last[row.ID]; run != nil {
 				rv["run"], rv["status"] = run.PublicID, run.Status
 			}
@@ -3340,11 +3355,12 @@ func (b *Bot) handleReviewPullResume(w http.ResponseWriter, r *http.Request) {
 		reviewAPIError(w, ErrReviewPRNotFound)
 		return
 	}
+	ceiling := b.reviewCeilingOf(ctx, orgID, repo)
 	if !row.Paused {
-		writeJSON(w, 200, map[string]any{"resumed": false, "pr": reviewPausedJSON(row)})
+		writeJSON(w, 200, map[string]any{"resumed": false, "pr": reviewPausedJSON(row, ceiling)})
 		return
 	}
-	was := reviewPausedJSON(row)
+	was := reviewPausedJSON(row, ceiling)
 	if err := b.store.resumeReviewPR(ctx, orgID, row.ID); err != nil {
 		reviewAPIError(w, err)
 		return
@@ -3360,7 +3376,7 @@ func (b *Bot) handleReviewPullResume(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	row.Paused, row.PausedAuto, row.AutoReviews = false, false, 0
-	writeJSON(w, 200, map[string]any{"resumed": true, "pr": reviewPausedJSON(row)})
+	writeJSON(w, 200, map[string]any{"resumed": true, "pr": reviewPausedJSON(row, ceiling)})
 }
 
 // reviewListPrice is a model's list price as the engine reads one to estimate a verification

@@ -158,8 +158,8 @@ func (rig *laneRig) serve(fx reviewPRFixture) {
 	}))
 	f.mux.HandleFunc("GET /repos/acme/web/git/trees/{sha}", perms(readPerms, func(w http.ResponseWriter, r *http.Request) {
 		var tree []map[string]any
-		for p, c := range g.content[r.PathValue("sha")] {
-			tree = append(tree, map[string]any{"path": p, "type": "blob", "sha": gitBlobSHA(c)})
+		for p := range g.content[r.PathValue("sha")] {
+			tree = append(tree, map[string]any{"path": p, "type": "blob"})
 		}
 		json.NewEncoder(w).Encode(map[string]any{"tree": tree, "truncated": false})
 	}))

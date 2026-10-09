@@ -1538,6 +1538,7 @@ type reviewTypeRunJSON struct {
 	Summary string `json:"summary,omitempty"`
 	Skipped string `json:"skipped,omitempty"`
 	Auto    bool   `json:"auto,omitempty"` // the diff brought it in (review_auto.go)
+	Cut     bool   `json:"cut,omitempty"`  // a pass of it ran out of time or money (review.TypeRun.Cut)
 }
 
 func checkpointOf(out *reviewOutcome, skipped []review.TypeRun) *reviewCheckpoint {
@@ -1549,7 +1550,7 @@ func checkpointOf(out *reviewOutcome, skipped []review.TypeRun) *reviewCheckpoin
 		CostUSD: out.Total.CostUSD, NotReviewed: []reviewNotReviewed{}, Carried: out.Carried, CarriedOpen: out.CarriedOpen}
 	c.RepoRules = out.RepoRules
 	for _, t := range append(slices.Clone(out.TypeRuns), skipped...) {
-		c.Types = append(c.Types, reviewTypeRunJSON{Key: t.Key, Summary: t.Summary, Skipped: t.Skipped, Auto: t.Auto})
+		c.Types = append(c.Types, reviewTypeRunJSON{Key: t.Key, Summary: t.Summary, Skipped: t.Skipped, Auto: t.Auto, Cut: t.Cut})
 	}
 	for _, f := range out.NotReviewed {
 		c.NotReviewed = append(c.NotReviewed, reviewNotReviewed{Path: f.Path, Reason: f.Reason})

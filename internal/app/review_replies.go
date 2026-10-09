@@ -687,9 +687,23 @@ func (b *Bot) replyWork(work, lane context.Context, h *reviewHold, pr *ReviewPR,
 			return nil, false
 		}
 	default:
+		// A pushback the bot chose to say little or nothing to posts nothing, so it leaves BotReplies
+		// where it was; counted here, it still spends one of the thread's verdicts, and a thread that
+		// keeps arguing stops costing a verdict model after reviewThreadAnswers of them.
+		earlier, err := b.threadRuns(work, r, pr, f)
+		if err != nil {
+			b.reviewRunError(work, lane, h, err)
+			return nil, false
+		}
+		quiet := 0
+		for _, e := range earlier {
+			if e.ck.Outcome == outcomeNothingNew || e.ck.Outcome == outcomeQuiet {
+				quiet++
+			}
+		}
 		out, err := b.review.Reply(work, reviewReplySpec{OrgID: r.OrgID, InstallationID: r.InstallationID, Repo: pr.Repo, PR: pr.Number,
 			Pull: pull, Settings: eff, Finding: f, Thread: thread, Reply: *reply, Bot: b.reviewByUs, Authority: authority,
-			Author: pull.User.Login, MayAnswer: f.BotReplies < reviewThreadAnswers, MaxUSD: r.ReservedUSD,
+			Author: pull.User.Login, MayAnswer: f.BotReplies+quiet < reviewThreadAnswers, MaxUSD: r.ReservedUSD,
 			Recheck: !authority(*reply) && !serious})
 		if out != nil {
 			b.logReviewSpend(lane, r, pr, reply.User.Login, out.Usage)
@@ -987,9 +1001,11 @@ func (b *Bot) applyReply(ctx context.Context, r *ReviewRun, pr *ReviewPR, f *Rev
 		}
 		return nil
 	case replyAcknowledge:
-		// A decision, not an argument: nothing for a model to weigh, and the same authority as a
-		// withdrawal, since the finding leaves the score all the same.
-		if !mayChange {
+		// A decision, not an argument: nothing for a model to weigh. Accepting a risk is the team's
+		// call whatever the severity — a P2 taken out of the score by somebody passing by would skip the
+		// second look a stranger's withdrawal of one gets — so it takes a member, or the author of a
+		// pull request from the same repository, as settling a P0 or P1 does.
+		if !member && !author {
 			ck.Outcome = "refused"
 			if mayAnswer {
 				ck.Body = fmt.Sprintf("Thanks — but accepting a %s as a known risk takes a member of this repository or the author "+
@@ -1063,7 +1079,7 @@ func (b *Bot) applyReply(ctx context.Context, r *ReviewRun, pr *ReviewPR, f *Rev
 			if n := modelText(oneLine(ck.Narrower)); n != "" {
 				narrower = "A narrower case may remain: " + strings.TrimRight(n, ".") + "."
 				if slug := b.reviewSlug(); slug != "" {
-					narrower += " `@" + slug + " review` checks the head for it."
+					narrower += " `@" + slug + " full review` on the pull request's conversation looks at the head again for it."
 				}
 			}
 		}

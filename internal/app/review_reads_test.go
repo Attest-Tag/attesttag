@@ -126,6 +126,7 @@ func TestReviewEngineHoldsTheChangeToTheRepositorysRules(t *testing.T) {
 	rig := newReviewRig(t, fx)
 	cites := lockFinding()
 	cites["rule_ids"] = []string{"C2", "C77"}
+	cites["category"] = "convention" // a convention resting on the repository's rule alone
 	rig.model.finder["general"] = func(int, reviewModelReq) reviewModelReply { return submitFindings(cites) }
 	rig.model.verify = confirmAll(72) // medium's threshold: a P2 that cites a rule needs no more
 
@@ -156,8 +157,34 @@ func TestReviewEngineHoldsTheChangeToTheRepositorysRules(t *testing.T) {
 		t.Errorf("a finding resting on a repository rule: %s citing %v; want P2 citing C2", f.Severity, f.RuleIDs)
 	}
 	v := strings.Join(rig.model.requests("verifier")[0].Users, "\n")
-	if !strings.Contains(v, "- C2 (at most P2, from .cursor/rules/go.mdc): Always lock mu before touching value.") {
+	if !strings.Contains(v, "- C2 (a convention resting on it alone is at most P2; from .cursor/rules/go.mdc): Always lock mu before touching value.") {
 		t.Errorf("the verifier was not shown the rule the finding cites:\n%s", v)
+	}
+}
+
+// A repository rule says that something is a finding, not how bad it is: a convention resting on
+// repository rules alone is held to P2, while a security hole or a race that one also forbids keeps
+// the severity of its consequence; a type's own rule still caps whatever cites it.
+func TestReviewRepositoryRuleCapsOnlyConventions(t *testing.T) {
+	general, _ := review.BuiltinType(review.DefaultType)
+	ts := &reviewTypeSpec{Type: general}
+	r := &reviewRun{repoRules: []review.RepoRule{{ID: "C1", Text: "Always parameterise SQL.", Source: "AGENTS.md"}}}
+	for _, tc := range []struct {
+		cat  review.Category
+		sev  review.Severity
+		ids  []string
+		want review.Severity
+	}{
+		{review.CategorySecurity, review.P0, []string{"C1"}, review.P0},
+		{review.CategoryConcurrency, review.P1, []string{"C1"}, review.P1},
+		{review.CategoryConvention, review.P1, []string{"C1"}, review.P2},
+		{review.CategoryConvention, review.P0, []string{"C1", "C9"}, review.P2},
+	} {
+		f := review.Finding{Path: "src/db.go", Category: tc.cat, Severity: tc.sev, RuleIDs: tc.ids}
+		r.citeRules(&f, ts)
+		if f.Severity != tc.want || !slices.Equal(f.RuleIDs, []string{"C1"}) {
+			t.Errorf("%s %s citing %v: %s citing %v, want %s", tc.cat, tc.sev, tc.ids, f.Severity, f.RuleIDs, tc.want)
+		}
 	}
 }
 
@@ -188,7 +215,7 @@ func discussionFixture() (inline, conversation []githubComment) {
 
 func TestReviewDiscussionDigest(t *testing.T) {
 	inline, conversation := discussionFixture()
-	threads := reviewDiscussionOf(inline, conversation, "octocat", "attesttag[bot]")
+	threads := reviewDiscussionOf(inline, conversation, reviewDiscussionWho{author: "octocat", self: "attesttag[bot]"})
 	got := reviewDiscussionDigest(threads, nil)
 	want := "- src/totals.go:12 · other: Add no longer takes the lock; is that safe?\n" +
 		"  ↳ author of the PR: Intended: Add is only called from the single writer goroutine.\n" +
@@ -214,6 +241,30 @@ func TestReviewDiscussionDigest(t *testing.T) {
 	}
 }
 
+// The author of a pull request from outside the repository, and anybody GitHub counts as no one of
+// its, are named so: their "intended" settles nothing. A member is named as one, and on a private
+// repository whoever comments has access.
+func TestReviewDiscussionNamesWhoMaySettle(t *testing.T) {
+	inline := []githubComment{
+		{ID: 1, Body: "The open debug route is a hole.", User: githubUser{Login: "monalisa"}, AuthorAssociation: "MEMBER", Path: "a.go", Line: 3,
+			CreatedAt: "2026-10-01T10:00:00Z"},
+		{ID: 2, Body: "Intended, not a bug.", User: githubUser{Login: "octocat"}, AuthorAssociation: "CONTRIBUTOR", InReplyToID: 1,
+			CreatedAt: "2026-10-01T10:01:00Z"},
+		{ID: 3, Body: "Looks fine to me.", User: githubUser{Login: "passerby"}, AuthorAssociation: "NONE", InReplyToID: 1,
+			CreatedAt: "2026-10-01T10:02:00Z"},
+	}
+	fork := reviewDiscussionDigest(reviewDiscussionOf(inline, nil, reviewDiscussionWho{author: "octocat", outsider: true}), nil)
+	for _, want := range []string{"· member: The open debug route", "↳ author of the PR, an outside contributor: Intended", "↳ other: Looks fine"} {
+		if !strings.Contains(fork, want) {
+			t.Errorf("a fork's discussion lacks %q:\n%s", want, fork)
+		}
+	}
+	same := reviewDiscussionDigest(reviewDiscussionOf(inline, nil, reviewDiscussionWho{author: "octocat", private: true}), nil)
+	if !strings.Contains(same, "↳ author of the PR: Intended") || !strings.Contains(same, "↳ member: Looks fine") {
+		t.Errorf("a private repository's discussion:\n%s", same)
+	}
+}
+
 // Thirty threads, about eight thousand characters, newest first; the last two replies of a thread;
 // and a defused tag, since every word of it is somebody else's.
 func TestReviewDiscussionDigestIsCapped(t *testing.T) {
@@ -227,7 +278,7 @@ func TestReviewDiscussionDigestIsCapped(t *testing.T) {
 				User: githubUser{Login: "octocat"}, InReplyToID: root, CreatedAt: fmt.Sprintf("2026-10-01T10:%02d:%02dZ", i, j+1)})
 		}
 	}
-	threads := reviewDiscussionOf(inline, nil, "octocat", "")
+	threads := reviewDiscussionOf(inline, nil, reviewDiscussionWho{author: "octocat"})
 	if len(threads) != 40 || len(threads[0].Replies) != reviewDiscussionReplies || !strings.HasPrefix(threads[0].Replies[0].Text, "reply 2") {
 		t.Fatalf("threads %d, newest has %+v", len(threads), threads[0].Replies)
 	}
@@ -264,8 +315,9 @@ func TestReviewEngineReadsThePullRequestsDiscussion(t *testing.T) {
 		t.Fatal(err)
 	}
 	u := rig.model.requests("finder")[0].Users[0]
-	for _, s := range []string{"<pr_discussion>\n" + reviewDiscussionRule, "- src/totals.go:12 · other: Add no longer takes the lock",
-		"↳ author of the PR: Intended: Add is only called", "- conversation · other: Please also update the changelog."} {
+	for _, s := range []string{"<pr_discussion>\n" + reviewDiscussionRule, "- src/totals.go:12 · member: Add no longer takes the lock",
+		// The fixture's repository is private, where whoever comments has access.
+		"↳ author of the PR: Intended: Add is only called", "- conversation · member: Please also update the changelog."} {
 		if !strings.Contains(u, s) {
 			t.Errorf("the finder's prompt lacks %q:\n%s", s, u)
 		}
@@ -427,10 +479,16 @@ func contextRig(t *testing.T, fx reviewPRFixture) (*reviewRig, map[string]int) {
 // With none named, a review reads the other repositories of its connection that are in code review,
 // the most recently reviewed first, under the rules a named one is read under: never one removed
 // from code review or on another installation, and never a private one for a public pull request —
-// which one known to be private is not even asked about. Named ones win, and the choice can be off.
+// which one known to be private is not even asked about. Named ones win, and the choice is off
+// unless a level turns it on.
 func TestReviewEngineChoosesContextRepositories(t *testing.T) {
+	auto := func(rig *reviewRig) reviewSpec {
+		spec := rig.spec("general")
+		spec.Settings.ContextReposAuto = true
+		return spec
+	}
 	rig, reads := contextRig(t, totalsFixture()) // a private repository
-	out, err := rig.run(rig.spec("general"))
+	out, err := rig.run(auto(rig))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -444,7 +502,7 @@ func TestReviewEngineChoosesContextRepositories(t *testing.T) {
 	fx := totalsFixture()
 	fx.public = true
 	rig, reads = contextRig(t, fx)
-	if out, _ = rig.run(rig.spec("general")); !slices.Equal(out.ContextRepos, []string{"acme/api"}) {
+	if out, _ = rig.run(auto(rig)); !slices.Equal(out.ContextRepos, []string{"acme/api"}) {
 		t.Errorf("a public pull request reads %v; want the public one only", out.ContextRepos)
 	}
 	if reads["acme/shared"] != 0 || reads["acme/old"] != 0 {
@@ -452,16 +510,14 @@ func TestReviewEngineChoosesContextRepositories(t *testing.T) {
 	}
 
 	rig, _ = contextRig(t, totalsFixture())
-	spec := rig.spec("general")
+	spec := auto(rig)
 	spec.Settings.ContextRepos = []string{"acme/api"}
 	if out, _ = rig.run(spec); !slices.Equal(out.ContextRepos, []string{"acme/api"}) {
 		t.Errorf("named context repositories did not win: %v", out.ContextRepos)
 	}
 	rig, _ = contextRig(t, totalsFixture())
-	spec = rig.spec("general")
-	spec.Settings.ContextReposAuto = false
-	if out, _ = rig.run(spec); len(out.ContextRepos) != 0 {
-		t.Errorf("with the automatic choice off it read %v", out.ContextRepos)
+	if out, _ = rig.run(rig.spec("general")); len(out.ContextRepos) != 0 {
+		t.Errorf("with the automatic choice left as it is built in, off, it read %v", out.ContextRepos)
 	}
 }
 

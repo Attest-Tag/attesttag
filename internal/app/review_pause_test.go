@@ -181,7 +181,7 @@ func TestReviewCommandPauseAndResume(t *testing.T) {
 	}
 	run := rig.runs(7)[len(rig.runs(7))-1] // the opening's review
 	out := api.must(200, "GET", "/api/reviews/"+run.PublicID, api.viewer, nil)
-	if p := out["pr"].(map[string]any); p["paused"] != true || p["paused_by"] != "member" || p["auto_pause_after"] != float64(reviewAutoPauseAfter) {
+	if p := out["pr"].(map[string]any); p["paused"] != true || p["paused_by"] != "member" || p["auto_pause_after"] != float64(5) { // the repository's own ceiling
 		t.Errorf("the API's pull request = %v", p)
 	}
 	rig.deliver("issue_comment", commentEvent(1203, "alice", "MEMBER", "@attesttag pause", true))

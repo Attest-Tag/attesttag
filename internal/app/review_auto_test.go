@@ -184,6 +184,15 @@ func TestReviewAutoTypeReadsOnlyTheUnitsItMatches(t *testing.T) {
 	if got := reviewAutoUnits(ts, units); len(got) != 1 || got[0].files[0].Path != "src/b.ts" {
 		t.Errorf("the units an automatic type reads: %+v", got)
 	}
+	// A lockfile, a README or a translation that says "async" or "retry" brings nothing in: the
+	// pattern is about code.
+	for _, p := range []string{"package-lock.json", "README.md", "src/locales/en.json"} {
+		f := file(p, `"node_modules/async": retry the subscription`)
+		f.tier = reviewTier(p)
+		if reviewAutoMatches(ts, f) {
+			t.Errorf("%s brought Concurrency in", p)
+		}
+	}
 	general, _ := review.BuiltinType(review.DefaultType)
 	r := &reviewRun{reviewable: files, spec: reviewSpec{Types: []reviewTypeSpec{{Type: general}, *ts}}}
 	if n := r.finderPasses(); n != 5 {

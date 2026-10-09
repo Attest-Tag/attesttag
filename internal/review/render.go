@@ -585,6 +585,10 @@ type TypeRun struct {
 	// Auto is a type no rule or person chose: the diff matched its pattern (Type.Auto), and the
 	// summary says so after its name, so nobody looks for the rule that added it.
 	Auto bool
+	// Cut is a type that ran but did not finish every pass it had: one ran out of time or money. A
+	// file another type read is not listed as unread for it, so this is where that is kept, for a
+	// later review deciding what this one read (review_carry.go).
+	Cut bool
 }
 
 // NotReviewedFile is a changed file the review did not read, and why: "binary", "too large",

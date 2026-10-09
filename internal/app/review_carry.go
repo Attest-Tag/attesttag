@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -23,8 +22,9 @@ import (
 // So before a review builds its units, it looks for earlier reviews that already read this pull
 // request's files: the organisation's reviews of other pull requests in the same repository that
 // merged, at the head each was last reviewed at, from the last reviewCarryWindow, at most
-// reviewCarryPRs of them. Each one's tree at that head is read once (the git trees API, recursive),
-// and a changed file whose blob here is the blob that review read is "reviewed in #N":
+// reviewCarryPRs of them, each with the change it read in every file (review.PatchHash). A changed
+// file whose change here — the lines this pull request adds and removes — is the change that review
+// read is "reviewed in #N":
 //
 //   - it is left out of the finder's units for every review type that review ran — a type it did not
 //     run has not read the file, and still does here — and listed in the summary, not as unreviewed,
@@ -70,13 +70,14 @@ type reviewCarryIn struct {
 }
 
 // reviewCarrySource is one earlier review of a merged pull request: the head it read, the review
-// types that ran, and the changed files a pass of it read.
+// types it ran in full, and, for each changed file a pass of it read, the change it read there
+// (review.PatchHash).
 type reviewCarrySource struct {
-	PR    int
-	Run   string // the run's public id
-	Head  string
-	Types []string
-	Files map[string]bool
+	PR     int
+	Run    string // the run's public id
+	Head   string
+	Types  []string
+	Hashes map[string]string
 }
 
 // reviewCarryFinding is a finding said on one of those pull requests, open or settled.
@@ -87,7 +88,7 @@ type reviewCarryFinding struct {
 
 // reviewCarry is what one run carries forward, worked out by carryForward.
 type reviewCarry struct {
-	// typed is, by review type, the files a source ran that type over at the blob they have here, and
+	// typed is, by review type, the files a source ran that type over with the change they have here, and
 	// the pull request it was; whole is the files to review every type covering them was carried for,
 	// which leaveOutCarried takes out of the review.
 	typed map[string]map[string]int
@@ -96,13 +97,6 @@ type reviewCarry struct {
 	from map[string][]int
 	// declined is, by fingerprint, the findings of those pull requests a candidate may not repeat.
 	declined map[string]reviewCarryFinding
-	trees    map[string]reviewBlobs
-}
-
-// reviewBlobs is a commit's tree as the blobs of the paths a run asked about.
-type reviewBlobs struct {
-	blobs     map[string]string
-	truncated bool
 }
 
 // ---- the lane ----
@@ -131,9 +125,12 @@ func (b *Bot) reviewCarryFor(ctx context.Context, r *ReviewRun, pr *ReviewPR, sh
 		if !ok || !commitSHA.MatchString(run.HeadSHA) {
 			continue
 		}
-		src := reviewCarrySource{PR: run.PRNumber, Run: run.PublicID, Head: run.HeadSHA, Files: map[string]bool{}}
+		src := reviewCarrySource{PR: run.PRNumber, Run: run.PublicID, Head: run.HeadSHA, Hashes: map[string]string{}}
+		// A type the diff brought in read only the parts its pattern matched, and one cut short did
+		// not finish every pass it had — and which file was read is kept per file, not per type, so a
+		// file another type read is not listed as unread for it — so neither vouches for a file whole.
 		for _, t := range ck.Types {
-			if t.Skipped == "" {
+			if t.Skipped == "" && !t.Auto && !t.Cut {
 				src.Types = append(src.Types, t.Key)
 			}
 		}
@@ -146,12 +143,12 @@ func (b *Bot) reviewCarryFor(ctx context.Context, r *ReviewRun, pr *ReviewPR, sh
 		for _, f := range ck.Carried {
 			skip[f.Path] = true
 		}
-		for p := range ck.FileHashes {
-			if !skip[p] {
-				src.Files[p] = true
+		for p, h := range ck.FileHashes {
+			if !skip[p] && h != "" {
+				src.Hashes[p] = h
 			}
 		}
-		if len(src.Types) > 0 && len(src.Files) > 0 {
+		if len(src.Types) > 0 && len(src.Hashes) > 0 {
 			in.Sources = append(in.Sources, src)
 		}
 	}
@@ -170,10 +167,14 @@ func (b *Bot) reviewCarryFor(ctx context.Context, r *ReviewRun, pr *ReviewPR, sh
 
 // ---- the engine ----
 
-// carryForward works out, before the files are prepared, which of them earlier reviews read at the
-// blob they have at this head (reviewCarry). Sources are taken newest first, and one is read only
-// while it could still carry something: a source whose reviewed files this pull request does not
-// change, or whose types have all been carried for them already, costs no read.
+// carryForward works out, before the files are prepared, which of them earlier reviews already read
+// the very change of (reviewCarry). A file is carried from a merged pull request when this pull
+// request's change to it — the lines it adds and removes — is the change that pull request's review
+// read there, nothing more and nothing less (review.PatchHash). The same contents at the two heads
+// would not do: that review read its own diff, not the file, and a commit nobody reviewed — pushed
+// straight to the branch, or merged while reviews were paused — that changed the file before it
+// would ride along unread. Its lines, added or removed, make this pull request's change another one.
+// Sources are taken newest first; the comparison needs nothing but what both reviews stored.
 func (r *reviewRun) carryForward(ctx context.Context, files []review.File) {
 	in := r.spec.Carry
 	if in == nil || len(in.Sources) == 0 || len(files) == 0 {
@@ -181,41 +182,18 @@ func (r *reviewRun) carryForward(ctx context.Context, files []review.File) {
 	}
 	c := &r.carry
 	c.typed, c.whole, c.from = map[string]map[string]int{}, map[string]int{}, map[string][]int{}
-	c.declined, c.trees = map[string]reviewCarryFinding{}, map[string]reviewBlobs{}
-	want := map[string]bool{}
-	for _, f := range files {
-		want[f.Path] = true
-	}
-	var head *reviewBlobs
+	c.declined = map[string]reviewCarryFinding{}
 	for _, src := range in.Sources {
-		var todo []review.File
 		for _, f := range files {
-			if src.Files[f.Path] && len(r.carryable(src, f.Path)) > 0 {
-				todo = append(todo, f)
-			}
-		}
-		if len(todo) == 0 {
-			continue
-		}
-		if head == nil {
-			t, err := r.blobsAt(ctx, r.head, want)
-			if err != nil {
-				slog.Warn("code review: the head's tree was not read; nothing is carried forward", "repo", r.repo, "pr", r.spec.PR, "err", err)
-				return
-			}
-			head = &t
-		}
-		then, err := r.blobsAt(ctx, src.Head, want)
-		if err != nil {
-			slog.Warn("code review: an earlier review's tree was not read; nothing is carried from it", "repo", r.repo,
-				"pr", r.spec.PR, "from", src.PR, "err", err)
-			continue
-		}
-		for _, f := range todo {
-			if !sameBlob(f, *head, then) {
+			h := review.PatchHash(f)
+			if h == "" || src.Hashes[f.Path] != h {
 				continue
 			}
-			for _, k := range r.carryable(src, f.Path) {
+			kinds := r.carryable(src, f.Path)
+			if len(kinds) == 0 {
+				continue
+			}
+			for _, k := range kinds {
 				if c.typed[k] == nil {
 					c.typed[k] = map[string]int{}
 				}
@@ -260,49 +238,6 @@ func (r *reviewRun) carriedWhole(p string) (int, bool) {
 		}
 	}
 	return pr, covered
-}
-
-// sameBlob reports whether f is at this head what it was at the head an earlier review read. A file
-// this pull request removes is the same when that head did not have it either, provided neither tree
-// was cut short: a path missing from a truncated tree may be past the cut.
-func sameBlob(f review.File, head, then reviewBlobs) bool {
-	now, inHead := head.blobs[f.Path]
-	was, inThen := then.blobs[f.Path]
-	if f.Status == "removed" {
-		return !inHead && !inThen && !head.truncated && !then.truncated
-	}
-	return inHead && inThen && now != "" && now == was
-}
-
-// blobsAt is a commit's tree as path → blob for the paths in want, read once per run: a release's
-// sources share heads, and the head itself is compared with every one of them. Only the wanted
-// paths are kept, so twenty trees of a large repository cost twenty reads, not twenty copies.
-func (r *reviewRun) blobsAt(ctx context.Context, sha string, want map[string]bool) (reviewBlobs, error) {
-	if t, ok := r.carry.trees[sha]; ok {
-		return t, nil
-	}
-	if !commitSHA.MatchString(sha) {
-		return reviewBlobs{}, fmt.Errorf("%q is not a commit", sha)
-	}
-	var tree struct {
-		Truncated bool `json:"truncated"`
-		Tree      []struct {
-			Path string `json:"path"`
-			Type string `json:"type"`
-			SHA  string `json:"sha"`
-		} `json:"tree"`
-	}
-	if err := r.gh.getJSON(ctx, "git/trees/"+sha, url.Values{"recursive": {"1"}}, proxyMaxRead, &tree); err != nil {
-		return reviewBlobs{}, err
-	}
-	t := reviewBlobs{blobs: map[string]string{}, truncated: tree.Truncated}
-	for _, e := range tree.Tree {
-		if e.Type == "blob" && want[e.Path] {
-			t.blobs[e.Path] = strings.ToLower(e.SHA)
-		}
-	}
-	r.carry.trees[sha] = t
-	return t, nil
 }
 
 // carryFindings sorts the sources' findings into what this run does with them: one still open on a
@@ -386,7 +321,7 @@ func (r *reviewRun) typeFiles(ts *reviewTypeSpec) ([]*reviewFile, review.TypeRun
 }
 
 // sayCarried writes the summary of a review that read no file because every one left to review had
-// been read before, at the same contents, by the same review types: no finder ran to write one, and
+// been read before, with the same change, by the same review types: no finder ran to write one, and
 // a summary with none would read as a review that looked and found nothing to say.
 func (r *reviewRun) sayCarried() {
 	if len(r.carry.whole) == 0 || r.out.Summary != "" {
@@ -413,7 +348,7 @@ func (r *reviewRun) sayCarried() {
 		where = strings.Join(refs[:len(refs)-1], ", ") + " or " + refs[len(refs)-1]
 	}
 	r.out.Summary = "Every changed file this review would read was reviewed in " + where +
-		" at exactly the contents it has here, so none was read again."
+		" with exactly the change it makes here, so none was read again."
 }
 
 // carriedPrompt is what the finder is told of the decisions on the merged pull requests this code

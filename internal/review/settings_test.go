@@ -18,8 +18,8 @@ func TestResolveWithNothingSetIsTheBuiltInDefaults(t *testing.T) {
 	if len(e.BranchRules) != 1 || !e.BranchRules[0].Fallback() || !slices.Equal(e.BranchRules[0].Types, []string{DefaultType, "security"}) {
 		t.Errorf("default branch rules = %+v, want one fallback running %s and security", e.BranchRules, DefaultType)
 	}
-	if !e.ContextReposAuto {
-		t.Error("the automatic choice of context repositories is off by default")
+	if e.ContextReposAuto {
+		t.Error("the automatic choice of context repositories is on by default")
 	}
 	for _, field := range SettingFields() {
 		if e.Source[field] != LevelDefault {
@@ -47,7 +47,10 @@ func TestEveryFieldHasOneNameEverywhere(t *testing.T) {
 
 	var eff map[string]json.RawMessage
 	// With a channel: a zero one is left out of the JSON (Effective.Notify).
-	raw, _ = json.Marshal(Resolve([]LevelSettings{{LevelConnection, Settings{Notify: &NotifyChannel{Team: "T1", Channel: "C1"}}}}))
+	// With a channel, and the automatic context repositories on: a zero one of either is left out of
+	// the JSON (Effective.Notify, Effective.ContextReposAuto).
+	raw, _ = json.Marshal(Resolve([]LevelSettings{{LevelConnection, Settings{Notify: &NotifyChannel{Team: "T1", Channel: "C1"},
+		ContextReposAuto: ptr(true)}}}))
 	json.Unmarshal(raw, &eff)
 	delete(eff, "source")
 
@@ -361,15 +364,15 @@ func TestEffectiveHashIsPinned(t *testing.T) {
 	if got := Resolve([]LevelSettings{{LevelConnection, s}}).Hash(); got != rules {
 		t.Errorf("a rule list with channels hashes %s, want the same as without", got)
 	}
-	// The automatic context repositories are on unless turned off: saying so changes nothing, and
-	// turning them off changes what a review reads, so it is another review.
-	s.ContextReposAuto = ptr(true)
+	// The automatic context repositories are off unless turned on: saying so changes nothing, and
+	// turning them on changes what a review reads, so it is another review.
+	s.ContextReposAuto = ptr(false)
 	if got := Resolve([]LevelSettings{{LevelConnection, s}}).Hash(); got != rules {
 		t.Errorf("context_repos_auto set to its default hashes %s, want the same as unset", got)
 	}
-	s.ContextReposAuto = ptr(false)
+	s.ContextReposAuto = ptr(true)
 	if got := Resolve([]LevelSettings{{LevelConnection, s}}).Hash(); got == rules {
-		t.Error("context_repos_auto turned off hashes the same as on; a review that reads less would be answered from one that read more")
+		t.Error("context_repos_auto turned on hashes the same as off; a review that reads more would be answered from one that read less")
 	}
 }
 

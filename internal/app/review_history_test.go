@@ -34,6 +34,11 @@ func TestReviewCommitOfKeepsNoPerson(t *testing.T) {
 			t.Errorf("reviewCommitOf(%q) = %+v, want subject %q and PR %d", tc.message, c, tc.subject, tc.pr)
 		}
 	}
+	// A credential pasted into a subject is masked, as anything else a model reads is.
+	tok := "ghp_" + strings.Repeat("A1b2", 9)
+	if c := reviewCommitOf(sha, "Rotate the token "+tok, ""); strings.Contains(c.Subject, tok) {
+		t.Errorf("a token in a subject reached the model: %q", c.Subject)
+	}
 	long := reviewCommitOf(sha, strings.Repeat("é", 300), "")
 	if n := len([]rune(long.Subject)); n > reviewSubjectChars || n == 0 {
 		t.Errorf("a long subject was kept at %d characters", n)
