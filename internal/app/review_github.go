@@ -705,6 +705,9 @@ type githubComment struct {
 	Line                int        `json:"line,omitempty"`
 	Side                string     `json:"side,omitempty"`
 	CommitID            string     `json:"commit_id,omitempty"`
+	// OriginalLine is where a comment was made, on the commit it was made on. GitHub gives no line
+	// for a comment whose code has changed since, and the discussion still names where it was.
+	OriginalLine int `json:"original_line,omitempty"`
 }
 
 // Reviews lists the pull request's reviews, to find one a run posted before it could record it.
@@ -736,6 +739,16 @@ func (c *reviewGitHub) knowInline(list []githubComment) {
 		c.inline[cm.ID] = true
 	}
 	c.mu.Unlock()
+}
+
+// Discussion reads what has been said on the pull request so far — the inline threads on its diff and
+// its conversation — for a review to take into account (review_discussion.go). Either half may fail
+// on its own and the other is still returned with the error: what was said is context, and a review
+// that could not read it is a review with less context, not a failed one.
+func (c *reviewGitHub) Discussion(ctx context.Context) (inline, conversation []githubComment, err error) {
+	inline, _, errInline := c.ReviewComments(ctx)
+	conversation, _, errIssue := c.IssueComments(ctx)
+	return inline, conversation, errors.Join(errInline, errIssue)
 }
 
 // IssueComments lists the pull request's conversation, and records each comment as on it.

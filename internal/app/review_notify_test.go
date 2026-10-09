@@ -567,7 +567,7 @@ func TestReviewNotifyStartEditsTheMessageWithoutAReply(t *testing.T) {
 	if len(roots) != 1 || len(edits) != 1 || edits[0].ts != roots[0].ts || len(replies) != 1 {
 		t.Fatalf("the first review: roots %+v, edits %+v, replies %+v", roots, edits, replies)
 	}
-	if !strings.HasSuffix(roots[0].text, "\n`feature` → `main` · not reviewed\nReviewing `aaaaaaa` (General)…") {
+	if !strings.HasSuffix(roots[0].text, "\n`feature` → `main` · not reviewed\nReviewing `aaaaaaa` (General, Security)…") {
 		t.Errorf("the start's message:\n%s", roots[0].text)
 	}
 	if strings.Contains(edits[0].text, "Reviewing") || !strings.Contains(edits[0].text, "3 P1 open") {
@@ -586,7 +586,7 @@ func TestReviewNotifyStartEditsTheMessageWithoutAReply(t *testing.T) {
 	if len(chat.roots()) != 1 || len(edits) != 2 || len(replies) != 1 {
 		t.Fatalf("the re-review: %d messages of their own, edits %+v, replies %+v; want a start's edit and the result's", len(chat.roots()), edits, replies)
 	}
-	for _, want := range []string{"· last reviewed `aaaaaaa` · Confidence 2/5\nReviewing `ccccccc` (General)…\n3 P1 open", "• **P1** " + sqlTitle} {
+	for _, want := range []string{"· last reviewed `aaaaaaa` · Confidence 2/5\nReviewing `ccccccc` (General, Security)…\n3 P1 open", "• **P1** " + sqlTitle} {
 		if !strings.Contains(edits[0].text, want) {
 			t.Errorf("the re-review's start lacks %q:\n%s", want, edits[0].text)
 		}
@@ -633,7 +633,7 @@ func TestReviewNotifyAFailurePutsTheMessageBackAndReplies(t *testing.T) {
 			t.Fatalf("failed %v: the run = %s %q", failedOn, failed.Status, failed.Error)
 		}
 		edits, replies := chat.since(len(before), replied)
-		if len(chat.roots()) != 1 || len(edits) != 2 || !strings.Contains(edits[0].text, "Reviewing `aaaaaaa` (General)…") {
+		if len(chat.roots()) != 1 || len(edits) != 2 || !strings.Contains(edits[0].text, "Reviewing `aaaaaaa` (General, Security)…") {
 			t.Fatalf("failed %v: roots %d, edits %+v", failedOn, len(chat.roots()), edits)
 		}
 		back := edits[1].text
@@ -858,7 +858,7 @@ func (rig *laneRig) startedThenPutBack(chat *notifyChat) *ReviewRun {
 	g.mu.Unlock()
 	run := rig.runs(7)[0]
 	roots := chat.roots()
-	if run.Status != "queued" || len(roots) != 1 || !strings.HasSuffix(roots[0].text, "Reviewing `aaaaaaa` (General)…") ||
+	if run.Status != "queued" || len(roots) != 1 || !strings.HasSuffix(roots[0].text, "Reviewing `aaaaaaa` (General, Security)…") ||
 		rig.pr(7).NotifyLast != "start:"+run.PublicID {
 		rig.t.Fatalf("put back: run %s, roots %+v, last %q", run.Status, roots, rig.pr(7).NotifyLast)
 	}

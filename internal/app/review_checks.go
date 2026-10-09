@@ -169,8 +169,10 @@ func (r *reviewRun) check(ctx context.Context, found reviewFound) *reviewCandida
 }
 
 // citeRules keeps the rule ids a finding cites that are rules of its type, on and about its file,
-// and holds its severity to the most severe they allow: a finding may be no more severe than the
-// rule it rests on.
+// or rules this run read from the repository's instruction files, and holds its severity to the most
+// severe they allow: a finding may be no more severe than the rule it rests on. A repository rule
+// allows review.RepoRuleCap; an id that names nothing this run has is dropped, so a comment never
+// says it rests on a rule nobody can find.
 func (r *reviewRun) citeRules(f *review.Finding, ts *reviewTypeSpec) {
 	var keep []string
 	allowed := -1
@@ -180,6 +182,15 @@ func (r *reviewRun) citeRules(f *review.Finding, ts *reviewTypeSpec) {
 			// A skill the run read: it caps nothing, and is kept for the comment to name.
 			if r.skillReadable(ts, id) && !slices.Contains(keep, id) {
 				keep = append(keep, id)
+			}
+			continue
+		}
+		if review.RepoRuleID(id) {
+			if _, ok := review.FindRepoRule(r.repoRules, id); ok && !slices.Contains(keep, id) {
+				keep = append(keep, id)
+				if capRank := sevRank(review.RepoRuleCap); allowed < 0 || capRank < allowed {
+					allowed = capRank
+				}
 			}
 			continue
 		}
@@ -628,6 +639,21 @@ func (r *reviewRun) verifyAll(ctx context.Context, cands []*reviewCandidate) ([]
 	return kept, nil
 }
 
+// reviewUncitedP2Margin is what a P2 that cites no rule needs over the strictness's threshold.
+const reviewUncitedP2Margin = 10
+
+// reviewNeeds is the verifier confidence a finding of severity sev needs at a strictness's threshold
+// (accept says why each is what it is).
+func reviewNeeds(threshold int, sev review.Severity, citesRule bool) int {
+	switch {
+	case sev == review.P0:
+		return max(threshold, 85)
+	case sev == review.P2 && !citesRule:
+		return threshold + reviewUncitedP2Margin
+	}
+	return threshold
+}
+
 func cmpBool(a, b bool) int {
 	switch {
 	case a == b:
@@ -639,9 +665,12 @@ func cmpBool(a, b bool) int {
 }
 
 // accept applies a verdict. A finding stands only when the verifier confirmed it at the confidence
-// the strictness asks for — more for a P0, which says "do not merge", and for a P2 that cites no rule,
-// which is the easiest kind of noise to produce. The verifier may bring the severity down and move
-// the lines within the diff; it may not make a finding more severe.
+// the strictness asks for — at least 85 for a P0, which says "do not merge", and ten more for a P2
+// that cites no rule, which is the easiest kind of noise to produce. A P2 that cites one — a
+// criteria rule, a skill, a repository rule — passes where any other finding does: the rule says
+// the team wants it said. A flat 85 for every P2 without a rule dropped the real small ones — a new
+// branch no test reaches, an unbounded read — with the noise. The verifier may bring the severity
+// down and move the lines within the diff; it may not make a finding more severe.
 func (r *reviewRun) accept(ctx context.Context, c *reviewCandidate, v *reviewVerdict) bool {
 	c.verifierConf = min(max(v.Confidence, 0), 100)
 	switch v.Verdict {
@@ -658,10 +687,7 @@ func (r *reviewRun) accept(ctx context.Context, c *reviewCandidate, v *reviewVer
 	if s, err := review.ParseSeverity(v.Severity); err == nil && sevRank(s) > sevRank(c.Severity) {
 		c.Severity = s
 	}
-	need := strictnessThreshold(r.strictness(c.ts))
-	if c.Severity == review.P0 || (c.Severity == review.P2 && len(c.RuleIDs) == 0) {
-		need = max(need, 85)
-	}
+	need := reviewNeeds(strictnessThreshold(r.strictness(c.ts)), c.Severity, len(c.RuleIDs) > 0)
 	if c.verifierConf < need {
 		r.dropC(c, "low_confidence", fmt.Sprintf("confirmed at %d, and this needs %d: %s", c.verifierConf, need, v.Reason), "")
 		return false
@@ -774,11 +800,40 @@ func (r *reviewRun) finish(kept []*reviewCandidate) {
 			break
 		}
 	}
-	r.out.Risk = "No blocking issues found."
-	for _, f := range r.out.Findings {
-		if f.Scored() {
-			r.out.Risk = fmt.Sprintf("%s: %s (%s:%d).", f.Severity, f.Title, f.Path, f.Line)
+	r.out.Risk = r.riskLine()
+}
+
+// riskLine is the run's one sentence on what stands in the way of merging: the worst finding open on
+// the pull request once this run is done — its own, or a P0 or P1 an earlier review raised that it
+// left standing. A re-review that found nothing new under an open P1 must not say "No blocking
+// issues found" beside the comment that says otherwise. Earlier P2s are not named over this run's:
+// the line names what blocks, and a carried minor note does not.
+func (r *reviewRun) riskLine() string {
+	var worst *review.Finding
+	carried := false
+	for i := range r.out.Findings {
+		if f := &r.out.Findings[i]; f.Scored() {
+			worst = &f.Finding
 			break
 		}
 	}
+	for _, p := range r.spec.Prior {
+		if p.Kind == reviewKindNote || p.PreExisting || (p.Severity != review.P0 && p.Severity != review.P1) {
+			continue
+		}
+		now := r.standing(p) // nil for one this run found fixed or gone, or that was withdrawn
+		if now == nil {
+			continue
+		}
+		if worst == nil || sevRank(now.Severity) < sevRank(worst.Severity) {
+			worst, carried = &now.Finding, true
+		}
+	}
+	switch {
+	case worst == nil:
+		return "No blocking issues found."
+	case carried:
+		return fmt.Sprintf("%s: %s (%s:%d), open from an earlier review.", worst.Severity, worst.Title, worst.Path, worst.Line)
+	}
+	return fmt.Sprintf("%s: %s (%s:%d).", worst.Severity, worst.Title, worst.Path, worst.Line)
 }

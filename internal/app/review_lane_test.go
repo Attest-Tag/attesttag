@@ -597,8 +597,15 @@ func TestReviewLaneTakenOverRunPostsOnce(t *testing.T) {
 	if fs, _ := rig.st.ReviewFindings(ctx, orgID, run.ReviewPRID); len(fs) != 1 {
 		t.Errorf("%d findings stored; the old holder must store none", len(fs))
 	}
-	if n := len(rig.model.requests("finder")); n != 2 {
-		t.Errorf("%d finder calls, want one per lane", n)
+	// The built-in rule runs General and Security, each its own pass: General's are the ones scripted.
+	general := 0
+	for _, q := range rig.model.requests("finder") {
+		if q.Type == "general" {
+			general++
+		}
+	}
+	if general != 2 {
+		t.Errorf("%d General finder calls, want one per lane", general)
 	}
 }
 
