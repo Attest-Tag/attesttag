@@ -539,6 +539,10 @@ type SummaryState struct {
 	// before they paused by themselves; 0 is a pause somebody asked for.
 	Paused      bool
 	PausedAfter int
+	// Carried are the changed files earlier reviews of merged pull requests read at the same contents,
+	// which this review left out, and CarriedOpen what those reviews left open on them (carried.go).
+	Carried     []CarriedFile
+	CarriedOpen []CarriedFinding
 }
 
 // SkillRead is a skill a run followed: its name, from its SKILL.md or its folder, and where it was
@@ -625,7 +629,8 @@ const maxSummaryRows = 25
 //	<details open> Summary · Open findings (n) </details>
 //	<details> a section per review type, when more than one ran </details>
 //	<details> Outside the diff · More notes · Beside a masked credential · In unchanged files ·
-//	          Notes · Pre-existing · Not reviewed · Possibly outdated · Fixed · Outdated </details>
+//	          Notes · Pre-existing · Open from merged pull requests · Reviewed earlier ·
+//	          Not reviewed · Possibly outdated · Fixed · Outdated </details>
 //	<sub>Reviews (n) · Last reviewed abc1234 · …</sub>
 //	<!-- attest_tag:state sha=… score=… open=… -->
 //
@@ -695,6 +700,9 @@ func RenderSummary(s SummaryState, ctx RenderContext) string {
 		lead := riskSentence(open)
 		if status == ReviewDone && score == 4 && Score(plain, true, false) == 5 {
 			lead += " " + capReason(s)
+		}
+		if c := ctx.carriedRisk(s, p); c != "" {
+			lead += " " + c
 		}
 		blocks = append(blocks, lead)
 	}
@@ -767,6 +775,7 @@ func RenderSummary(s SummaryState, ctx RenderContext) string {
 		body := ctx.entries(pre, p) + "\n\n<sub>Not introduced by this pull request, so not scored.</sub>"
 		blocks = append(blocks, section(false, fmt.Sprintf("Pre-existing (%d)", len(pre)), body))
 	}
+	blocks = append(blocks, ctx.carriedSections(s, p)...)
 	if nr := ctx.notReviewed(s, p); nr != "" {
 		blocks = append(blocks, nr)
 	}

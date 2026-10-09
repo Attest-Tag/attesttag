@@ -88,6 +88,7 @@ func (r *reviewRun) checkAll(ctx context.Context, found []reviewFound) []*review
 			r.dropC(c, "duplicate", "already open on this pull request", p.PublicID)
 		case w != nil:
 			r.dropC(c, "withdrawn", "withdrawn after discussion on this pull request", w.PublicID)
+		case r.carriedDecided(c):
 		case r.minorUnchanged(c):
 			r.dropC(c, "rereview", "a minor finding on a file unchanged since the last review", "")
 		default:

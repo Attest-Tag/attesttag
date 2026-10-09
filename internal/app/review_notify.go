@@ -548,7 +548,7 @@ func reviewSkipWhy(pr *ReviewPR, reason string) string {
 		return "the organisation's code review budget is spent for now"
 	case "paused":
 		if pr.PausedAuto {
-			return fmt.Sprintf("automatic reviews of this pull request paused after %d; one somebody asks for still runs", reviewAutoPauseAfter)
+			return fmt.Sprintf("automatic reviews of this pull request paused after %d; one somebody asks for still runs", pr.AutoReviews)
 		}
 		return "automatic reviews of this pull request are paused; one somebody asks for still runs"
 	case "plan":

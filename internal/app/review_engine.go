@@ -243,6 +243,9 @@ type reviewSpec struct {
 	// hash, the context repositories' commits). True ends the run with errReviewCached, having
 	// spent nothing on a model. Nil asks nothing.
 	Cached func(out *reviewOutcome) bool
+	// Carry is what earlier reviews of merged pull requests in the same repository read and decided,
+	// which this one takes forward (review_carry.go); nil carries nothing.
+	Carry *reviewCarryIn
 }
 
 // errReviewCached is a run that stopped because Cached said its answer already exists.
@@ -327,6 +330,11 @@ type reviewOutcome struct {
 	// (review_resolve.go): moved, fixed, outdated, or a claim found still present. Only the ones
 	// that change something are here.
 	Resolutions []*reviewResolution
+	// Carried are the changed files earlier reviews of merged pull requests read at the blob they have
+	// here, which this run left out, and CarriedOpen what those reviews left open on them
+	// (review_carry.go).
+	Carried     []review.CarriedFile
+	CarriedOpen []review.CarriedFinding
 	// Model is the finder's model, for review_runs.model; Usage is every call's, by model, for the
 	// lane to log with LogUsageBy, and Total their sum.
 	Model string
@@ -403,6 +411,8 @@ type reviewRun struct {
 	// branches has access to it).
 	listCut  bool
 	outsider bool
+	// carry is what this run takes forward from earlier reviews (review_carry.go).
+	carry reviewCarry
 
 	money reviewMoney
 
@@ -560,6 +570,7 @@ func (r *reviewRun) run(ctx context.Context) error {
 		}
 		return reviewFail(review.FailGitHub, err)
 	}
+	r.carryForward(ctx, files)
 	r.prepare(files, truncated)
 	r.openContextRepos(ctx)
 	r.readContext(ctx)
@@ -588,6 +599,7 @@ func (r *reviewRun) run(ctx context.Context) error {
 		return err
 	}
 	r.finish(r.consolidate(ctx, verified))
+	r.sayCarried()
 	for _, res := range r.resolutions {
 		if res.revert && res.Status == "" {
 			res.At = nil // still fixed: where its lines are now is nothing to it
@@ -745,6 +757,7 @@ func (r *reviewRun) prepare(files []review.File, truncated bool) {
 	}
 	reviewRank(r.reviewable)
 	r.out.Reviewable = len(r.reviewable)
+	r.reviewable = r.leaveOutCarried(r.reviewable)
 	if len(r.reviewable) > reviewMaxFiles {
 		for _, f := range r.reviewable[reviewMaxFiles:] {
 			f.skip = "too many files"
@@ -947,14 +960,9 @@ func (r *reviewRun) findAll(ctx context.Context) ([]reviewFound, error) {
 	var found []reviewFound
 	for i := range r.spec.Types {
 		ts := &r.spec.Types[i]
-		var files []*reviewFile
-		for _, f := range r.reviewable {
-			if ts.Covers(f.Path) {
-				files = append(files, f)
-			}
-		}
+		files, none := r.typeFiles(ts)
 		if len(files) == 0 {
-			r.out.TypeRuns = append(r.out.TypeRuns, review.TypeRun{Key: ts.Key, Skipped: "no changed files in its scope"})
+			r.out.TypeRuns = append(r.out.TypeRuns, none)
 			continue
 		}
 		model, err := r.typeModel(ctx, ts)
@@ -1349,6 +1357,7 @@ func (r *reviewRun) unitPrompt(ctx context.Context, u *reviewUnit) string {
 		}
 		b.WriteString("</prior_findings>\n")
 	}
+	b.WriteString(r.carriedPrompt())
 	return b.String()
 }
 

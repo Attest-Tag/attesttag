@@ -254,6 +254,7 @@ or *off*; its menu's **Code review settings…** and **Set review** in the selec
 | Drafts | skip drafts | *Skip drafts* or *Review drafts*: whether a draft is reviewed without anybody asking |
 | Forks | when a member asks | *When a member asks* or *Never* ([forks](#pull-requests-from-forks)) |
 | Fixes | fix when asked | *Fix when asked* or *Never*: whether somebody who can push may have a finding fixed on the pull request ([fixing a finding](#fixing-a-finding-on-the-pull-request)) |
+| Pause after | 10 | automatic reviews of a pull request before they pause; 0 never ([pausing](#pausing-automatic-reviews)) |
 | Strictness | medium | how sure the verifier must be to keep a finding: 60, 70 or 85 out of 100 for low, medium and high |
 | Max comments | 8 | inline comments per review, 1 to 20; the rest are listed in the summary |
 | Comment header | none | text above every inline comment, up to 400 characters |
@@ -531,6 +532,9 @@ that. Go renders it from what the database holds, so it changes the moment a fin
 - *Outside the diff*, *More notes*, *Beside a masked credential*, *In unchanged files* (P0s only),
   *Notes* (said and never scored — a credential-shaped string in a test fixture) and *Pre-existing*
   (not introduced by this pull request, never scored, at most two);
+- **Open from merged pull requests** and **Reviewed earlier, unchanged since**: what the review took
+  from the merged pull requests the code came in with, neither scored
+  ([release and back-merge pull requests](#release-and-back-merge-pull-requests));
 - **Not reviewed**: the changed files it did not read — binary, generated, ignored, too large, or
   past the money — and any review type that did not run, with why;
 - **Possibly outdated**: findings in files that changed after the reviewed commit, kept off the
@@ -616,6 +620,33 @@ request each fixed finding's thread gets *Fixed in `abc1234`* and is then resolv
 ([threads](#threads-resolved-on-github)), and a claim the check refuted gets *Still present at
 `abc1234`* once. The channel's reply counts them: "2 fixed, 1 open".
 
+## Release and back-merge pull requests
+
+A team that merges its feature pull requests into an integration branch, then opens a release (that
+branch into the production one) and afterwards a back-merge (the other way), would have every change
+in them reviewed twice, and the second time worst: hundreds of files past the caps, the core ones
+out of time, and problems answered on the feature pull request raised again. So before a review
+reads anything, it looks for reviews that already read this pull request's files: the reviews of
+the organisation's other pull requests in the same repository that merged in the last 30 days, at
+the head each was last reviewed at, at most 20 of them. Each one's tree at that head is read once,
+and a changed file whose blob here is the blob that review read was **reviewed earlier**:
+
+- it is left out of the review for every review type that earlier review ran — a type it did not
+  run has not read the file, and still does here — and listed under *Reviewed earlier, unchanged
+  since*, linked to the pull request that read it. It is not *Not reviewed*, does not cap the score,
+  and takes no place under the 80-file cap;
+- what that review left open on it is listed under *Open from merged pull requests*, linked to its
+  thread: not posted again and not scored, though a P0 or P1 among them is named in the summary's
+  first sentence, since it ships with this pull request;
+- what was settled on those pull requests — withdrawn after discussion, fixed, resolved — is told
+  to the finder as not to be raised again, and a finding repeating one withdrawn there is dropped.
+
+A pull request every file of which was reviewed earlier gets its summary with no finder pass, saying
+so — its first review at no cost at all; a later one still checks whether its own earlier findings
+were fixed ([above](#when-a-push-fixes-a-finding)). Only what somebody was shown counts — a live review carries from posted
+reviews only — and a full review (`@<app> full review`) carries nothing: it looks again at everything.
+Any pull request can carry, not only a release: what matters is the blob, not the branch.
+
 ## Commands
 
 A comment on a pull request whose first line (not blank, not quoted) starts with the App's handle
@@ -650,13 +681,14 @@ with what it came to.
 ### Pausing automatic reviews
 
 A pull request's automatic reviews — when it opens, on each push where *When* is every push, and
-the catch-up's — pause by themselves after five. The sixth is not run: the pull request records
-`paused`, the summary's footer says *Automatic reviews paused after 5 — `@<app> resume`*, and
-nothing else is posted. `@<app> pause` pauses them sooner and `@<app> resume` starts them again,
-with the count back at nothing; both are for owners and members of the organisation, like a full
-review, and are audited. A review somebody asks for — a command, the console — runs whether they
-are paused or not, and is not counted; a label's does not run while they are. `status` says when
-they are paused and why.
+the catch-up's — pause by themselves after *Pause after* of them: ten unless the settings say
+otherwise (`auto_pause_after`, where 0 never pauses them). The one past it is not run: the pull
+request records `paused`, the summary's footer says *Automatic reviews paused after 10 —
+`@<app> resume`*, and nothing else is posted. `@<app> pause` pauses them sooner and `@<app> resume`
+starts them again, with the count back at nothing; both are for owners and members of the
+organisation, like a full review, and are audited. A review somebody asks for — a command, the
+console — runs whether they are paused or not, and is not counted; a label's does not run while they
+are. `status` says when they are paused and why.
 
 In the console a paused pull request says *Paused* in a review's detail and in its repository's list
 of open pull requests — which lists it even when its head was reviewed — with **Resume** for
@@ -664,6 +696,23 @@ of open pull requests — which lists it even when its head was reviewed — wit
 follows. The API is `paused`, `paused_by` (`auto` or `member`) and `auto_reviews` on
 `GET /api/reviews/{id}` and `GET /api/review-pulls`, and `POST /api/review-pulls/resume` with
 `{"repo": "owner/name", "pr": 7}`.
+
+### Pushes the pause does not count
+
+The pull requests pushed to most are the ones with the most to find, so two kinds of push are not
+held to the count:
+
+- **A push that leaves the pull request's own diff alone** — every changed file's added and removed
+  lines as its last review read them, which is how merging the base branch in, or a rebase, looks —
+  is not reviewed and not counted; the pull request records `unchanged_diff`. At the ceiling it is
+  not the push that pauses the pull request either.
+- **A fix claimed in a finding's thread**: while the ceiling holds the pause, a reply saying a
+  finding is fixed ("fixed in abc1234", "fixed", "addressed") from somebody with access — one of
+  the repository's own people, the author of a pull request that is not from a fork, or anybody who
+  can comment on a private one — lets one push through. If the push came first, its head is reviewed when
+  the reply is recorded; if not, the next push is. That review checks the claim
+  ([how](#when-a-push-fixes-a-finding)), is not counted, and spends the claim: each claim lets one
+  review through. A claim does not lift a pause a member asked for.
 
 ## Replies in a finding's thread
 
@@ -935,13 +984,14 @@ $0.15. The Start review dialog estimates one pull request's range before anythin
 | Reviews a day | 8 on one pull request and 40 on one repository, counting commands, console starts and automatic reviews alike; past that a review is skipped as `throttle` |
 | Commands | 10 an hour from one person; a full review once per commit a day |
 | Replies answered | 3 in one thread, 20 on one pull request a day, 20 an hour from one person (5 from somebody who is not one of the repository's people) |
-| Files read | the 80 most relevant changed files; the rest are listed as not reviewed, which caps the score |
+| Files read | the 80 most relevant changed files, counted after those reviewed earlier in a merged pull request are left out; the rest are listed as not reviewed, which caps the score |
+| Reviews carried from | the merged pull requests of the last 30 days in the same repository, at most 20 ([release and back-merge pull requests](#release-and-back-merge-pull-requests)) |
 | Inline comments | *Max comments* (8 by default, at most 20), of which at most 3 are P2s; a review of a later head adds at most one new P2 |
 | Pre-existing findings | 2 listed per review |
 | Context repositories | 5 read per review |
 | Skills | 5 per type; 20 files, three folders deep and 256 KB read from one skill; 24,000 characters of a type's skills given to its finder; 30 reads an hour of public repositories without credentials, and 120 Checks an hour, per organisation |
 | A push review | waits 90 seconds for the next push; a label's review waits as long |
-| Automatic reviews | 5 on one pull request, then paused until `@<app> resume` |
+| Automatic reviews | *Pause after* on one pull request, 10 unless set, then paused until `@<app> resume`; a push that leaves the diff alone is neither reviewed nor counted, and a fix claimed in a thread lets one push through ([pausing](#pushes-the-pause-does-not-count)) |
 | Fixes | one job running on a pull request at a time, 6 a day on one pull request, 5 an hour from one person |
 | Branch rules | 20 per level; 10 types and 10 labels per rule, a label up to 50 characters |
 | Review types | 40 rules each, 400 characters per rule |
@@ -997,6 +1047,8 @@ in the console and by `@<app> status`:
 - `own_key_off` — the own model key's *Code reviews* switch is off;
 - `plan` — the organisation's plan does not have code review ([who has it](#who-has-code-review));
 - `paused` — its automatic reviews are paused ([pausing](#pausing-automatic-reviews));
+- `unchanged_diff` — the push left the pull request's own changes as its last review read them,
+  the base branch merged in or a rebase ([pushes the pause does not count](#pushes-the-pause-does-not-count));
 - `installation_mismatch` — the organisation's App connection names the repository under another
   installation: it moved accounts;
 - `removed` — the repository was removed from code review;

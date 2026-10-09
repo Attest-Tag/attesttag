@@ -428,7 +428,7 @@ console pressed anything, and naming the person on GitHub whose word it acted on
   by somebody without the authority to close it (`review.finding_kept`); every rule proposed
   from a reply (`review.rule_proposed`, naming who asked); a closed finding's thread resolved on
   GitHub (`review.thread_resolved`, saying whether it was fixed or withdrawn); a pull request's
-  automatic reviews pausing after five (`review.paused`); and every announcement in a chat channel
+  automatic reviews pausing by themselves (`review.paused`); and every announcement in a chat channel
   (`review.notified`), or one the platform refused (`review.notify_failed`, with its error).
 - **Every `@` command**, with the GitHub login of whoever wrote it as the actor (`review.command`,
   with what it came to — queued, answered, paused, resumed, refused, throttled, and whether it was

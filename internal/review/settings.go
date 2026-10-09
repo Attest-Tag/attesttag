@@ -177,6 +177,11 @@ type Settings struct {
 	// to be fixed by a commit pushed to its branch (a fix box ticked, `@bot fix`). Off, the
 	// comments carry no box and the command is answered with a refusal.
 	Fixes *bool `json:"fixes,omitempty"`
+	// AutoPauseAfter is how many automatic reviews one pull request has before they pause by
+	// themselves (on opening, on a push, found by the catch-up); 0 never pauses them. Each is a review
+	// somebody pays for whether anybody reads it or not, and the pull requests pushed to most are the
+	// ones a ceiling reaches first — too low a one stops reviewing exactly where the bugs are.
+	AutoPauseAfter *int `json:"auto_pause_after,omitempty"`
 
 	Instructions   []string `json:"instructions,omitempty"`    // what the team wants checked, one per entry
 	ExcludeAuthors []string `json:"exclude_authors,omitempty"` // login globs never reviewed automatically
@@ -198,6 +203,10 @@ const (
 	MaxListEntries = 50
 	MaxEntryLen    = 400
 	MaxHeaderLen   = 400
+	// DefaultAutoPauseAfter is the built-in ceiling on a pull request's automatic reviews, and
+	// MaxAutoPauseAfter the highest a level may set; the daily caps stop a busy one long before either.
+	DefaultAutoPauseAfter = 10
+	MaxAutoPauseAfter     = 100
 )
 
 // Defaults is the built-in value of every single-valued setting, the level under the
@@ -219,6 +228,8 @@ func Defaults() Settings {
 		NotifyOn:      ptr(NotifyEvents()),
 		Fixes:         ptr(true),
 		BranchRules:   []BranchRule{{Types: []string{DefaultType}}},
+
+		AutoPauseAfter: ptr(DefaultAutoPauseAfter),
 	}
 }
 
@@ -254,6 +265,10 @@ type Effective struct {
 	// changes a comment's last lines, not what a review finds, and switching it must not make every
 	// cached review a stranger. The console reads it left out as off.
 	Fixes bool `json:"fixes,omitzero"`
+	// AutoPauseAfter is left out of Hash too: when automatic reviews pause decides whether a review
+	// runs, never what it finds. A pointer, so that 0 — never — is said rather than left out; nil, in
+	// an Effective built in code, is the built-in ceiling (AutoPause).
+	AutoPauseAfter *int `json:"auto_pause_after,omitempty"`
 
 	Instructions   []string `json:"instructions"`
 	ExcludeAuthors []string `json:"exclude_authors"`
@@ -302,6 +317,9 @@ func Resolve(chain []LevelSettings) Effective {
 		pick(&e.MaxUSD, s.MaxUSD, "max_usd", lv, e.Source)
 		pick(&e.Notify, s.Notify, "notify", lv, e.Source)
 		pick(&e.Fixes, s.Fixes, "fixes", lv, e.Source)
+		if s.AutoPauseAfter != nil {
+			e.AutoPauseAfter, e.Source["auto_pause_after"] = ptr(*s.AutoPauseAfter), lv
+		}
 		if s.NotifyOn != nil {
 			// A copy, and never nil: an empty set is "nothing", where nil would read as every event.
 			e.NotifyOn, e.Source["notify_on"] = append([]NotifyEvent{}, *s.NotifyOn...), lv
@@ -453,6 +471,15 @@ func (e Effective) ReviewsBot(login string) bool {
 	return false
 }
 
+// AutoPause is how many automatic reviews a pull request has before they pause by themselves; 0 is
+// never.
+func (e Effective) AutoPause() int {
+	if e.AutoPauseAfter == nil {
+		return DefaultAutoPauseAfter
+	}
+	return max(*e.AutoPauseAfter, 0)
+}
+
 // IgnoresPath reports whether a changed file is left out of the review.
 func (e Effective) IgnoresPath(path string) bool { return MatchAny(e.IgnorePaths, path) }
 
@@ -462,11 +489,12 @@ func (e Effective) IgnoresPath(path string) bool { return MatchAny(e.IgnorePaths
 // came from does not change what it does — and so is the channel told about it, and what it is
 // told, at every level and in every rule: pointing the announcements somewhere else changes no
 // review, and must not make the next request on a reviewed head pay for that review again. So are
-// the bots let through, which decide whether a review runs, not what it finds.
+// the bots let through and the ceiling on automatic reviews, which decide whether a review runs, not
+// what it finds.
 func (e Effective) Hash() string {
 	e.Source = nil
 	e.Notify, e.NotifyOn, e.Fixes = NotifyChannel{}, nil, false
-	e.ReviewBots = nil
+	e.ReviewBots, e.AutoPauseAfter = nil, nil
 	e.BranchRules = cloneRules(e.BranchRules)
 	for i := range e.BranchRules {
 		e.BranchRules[i].Notify = nil
@@ -485,7 +513,7 @@ func (e Effective) Hash() string {
 // SettingFields lists every setting by its JSON name, in declaration order.
 func SettingFields() []string {
 	return []string{"mode", "trigger", "drafts", "forks", "strictness", "max_comments",
-		"comment_header", "model", "max_usd", "notify", "notify_on", "fixes", "instructions", "exclude_authors",
+		"comment_header", "model", "max_usd", "notify", "notify_on", "fixes", "auto_pause_after", "instructions", "exclude_authors",
 		"review_bots", "ignore_paths", "context_repos", "branch_rules"}
 }
 
@@ -549,6 +577,9 @@ func (s Settings) Validate() error {
 	}
 	if v := s.MaxUSD; v != nil && (math.IsNaN(*v) || *v < MinMaxUSD || *v > MaxMaxUSD) {
 		bad("max_usd must be between $%.2f and $%.2f", MinMaxUSD, MaxMaxUSD)
+	}
+	if v := s.AutoPauseAfter; v != nil && (*v < 0 || *v > MaxAutoPauseAfter) {
+		bad("auto_pause_after must be between 0 (never) and %d", MaxAutoPauseAfter)
 	}
 	// An empty model is not "inherit" — that is leaving the key out — and would run nothing.
 	if s.Model != nil && !validModelName(*s.Model) {

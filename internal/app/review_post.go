@@ -124,8 +124,11 @@ func (b *Bot) reviewSummaryState(ctx context.Context, r *ReviewRun, pr *ReviewPR
 		InjectionDetected: ck.Injection, Reviews: reviews, ReviewedSHA: r.HeadSHA, HeadSHA: headNow, Rule: r.RuleLabel,
 		CostUSD: ck.CostUSD, Paused: pr.Paused && !reviewTry(r)}
 	if st.Paused && pr.PausedAuto {
-		st.PausedAfter = reviewAutoPauseAfter
+		// The count it paused at: nothing counts towards the pause while it holds (reviewAutoPaused),
+		// and the ceiling itself is a setting that may have moved since.
+		st.PausedAfter = pr.AutoReviews
 	}
+	reviewCarriedState(&st, ck)
 	for _, t := range ck.Types {
 		st.Types = append(st.Types, review.TypeRun{Key: t.Key, Summary: t.Summary, Skipped: t.Skipped})
 	}
@@ -179,8 +182,10 @@ func (b *Bot) publishReview(work, lane context.Context, h *reviewHold, pr *Revie
 		if !reviewTry(r) {
 			// A try leaves the pull request as it found it: the head last reviewed, the file hashes
 			// the next review compares against and the score are the pull request's review's.
+			// One a claimed fix let through a pause is not counted towards it (review_pause.go).
+			o := reviewOptionsOf(r)
 			res.Reviewed = &ReviewPRReviewed{SHA: r.HeadSHA, FileHashes: reviewHashesJSON(ck.FileHashes), Score: score,
-				Automatic: reviewCountsTowardsPause(r.Trigger, reviewOptionsOf(r).BotLabel)}
+				Automatic: reviewCountsTowardsPause(r.Trigger, o.BotLabel) && o.Claim == ""}
 		}
 		if !b.endReviewRun(lane, h, res) {
 			return
@@ -763,6 +768,11 @@ func (b *Bot) processResync(work, lane context.Context, h *reviewHold) {
 	if err != nil || pr == nil {
 		b.reviewRunError(work, lane, h, fmt.Errorf("the pull request could not be read: %v", err))
 		return
+	}
+	if r.Trigger == "reply" {
+		// A fix claimed in a finding's thread may be what lets a paused pull request's head be
+		// reviewed (reviewClaimResume).
+		b.reviewClaimResume(work, r, pr)
 	}
 	last, err := b.store.latestReviewOutcome(work, r.OrgID, pr.ID)
 	if err != nil {

@@ -2878,14 +2878,16 @@ func (b *Bot) handleReviewRun(w http.ResponseWriter, r *http.Request) {
 
 // reviewPausedJSON is where a pull request stands with its automatic reviews, for the console: paused
 // or not, how many have run towards the pause, the pause's ceiling, and — when paused — whether the
-// ceiling or a person paused them (by: "auto" or "member"), which is what the footer says too.
+// ceiling or a person paused them (by: "auto" or "member"), which is what the footer says too. The
+// ceiling is a setting (auto_pause_after); one that paused them is the count it paused them at, as the
+// footer says, and otherwise the built-in one.
 func reviewPausedJSON(pr *ReviewPR) map[string]any {
 	out := map[string]any{"paused": pr.Paused, "auto_reviews": pr.AutoReviews, "auto_pause_after": reviewAutoPauseAfter,
 		"paused_by": ""}
 	if pr.Paused {
 		out["paused_by"] = "member"
 		if pr.PausedAuto {
-			out["paused_by"] = "auto"
+			out["paused_by"], out["auto_pause_after"] = "auto", pr.AutoReviews
 		}
 	}
 	return out
