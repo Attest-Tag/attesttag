@@ -553,7 +553,9 @@ func TestReviewLaneShadowWritesNothing(t *testing.T) {
 // that stops it.
 func TestReviewLaneTakenOverRunPostsOnce(t *testing.T) {
 	ctx := context.Background()
-	rig := newLaneRig(t, totalsFixture(), `{"mode":"live"}`)
+	// General alone, so its passes are the finder's calls: without auto_types the lock the diff takes
+	// away would bring Concurrency in too.
+	rig := newLaneRig(t, totalsFixture(), `{"mode":"live","auto_types":false}`)
 	saved := reviewRunTouchEvery
 	t.Cleanup(func() { reviewRunTouchEvery = saved })
 	reviewRunTouchEvery = time.Hour
@@ -597,8 +599,15 @@ func TestReviewLaneTakenOverRunPostsOnce(t *testing.T) {
 	if fs, _ := rig.st.ReviewFindings(ctx, orgID, run.ReviewPRID); len(fs) != 1 {
 		t.Errorf("%d findings stored; the old holder must store none", len(fs))
 	}
-	if n := len(rig.model.requests("finder")); n != 2 {
-		t.Errorf("%d finder calls, want one per lane", n)
+	// The built-in rule runs General and Security, each its own pass: General's are the ones scripted.
+	general := 0
+	for _, q := range rig.model.requests("finder") {
+		if q.Type == "general" {
+			general++
+		}
+	}
+	if general != 2 {
+		t.Errorf("%d General finder calls, want one per lane", general)
 	}
 }
 
@@ -712,7 +721,7 @@ func TestReviewLaneRefusedAnchorsAreCheckedAgain(t *testing.T) {
 		// With nothing inline, the review that keeps the App among the reviewers says where it went.
 		summary := fmt.Sprintf("[summary comment](https://github.com/acme/web/pull/7#issuecomment-%d)", comments[0].ID)
 		if plain := posts[1]; len(plain["comments"].([]reviewInlineComment)) != 0 ||
-			!strings.Contains(plain["body"].(string), "No comment on the diff: its one open finding is in the "+summary) {
+			!strings.Contains(plain["body"].(string), "Its open finding (1 P1) is listed in the "+summary+", not on the diff.") {
 			t.Errorf("the review after the refusal: %v", plain)
 		}
 		run := rig.runs(7)[0]
@@ -886,7 +895,8 @@ func TestReviewLanePushReviewsTheLastHeadOfABurst(t *testing.T) {
 
 	const headD = "dddddddddddddddddddddddddddddddddddddddd"
 	for _, sha := range []string{reviewHeadC, headD} {
-		rig.gh.pushTo(sha, totalsFixture().files, totalsFixture().head)
+		files, head := pushedTotals(sha)
+		rig.gh.pushTo(sha, files, head)
 		rig.deliver("pull_request", prEvent("synchronize", 7, sha))
 	}
 	var pushes []*ReviewRun
@@ -1107,7 +1117,8 @@ func TestReviewLaneABurstOfPushesStillReviewsItsLastHead(t *testing.T) {
 	for i := range reviewRunsPerPRDay + 2 {
 		sha := fmt.Sprintf("%040d", i+1)
 		heads = append(heads, sha)
-		rig.gh.pushTo(sha, totalsFixture().files, totalsFixture().head)
+		files, head := pushedTotals(sha)
+		rig.gh.pushTo(sha, files, head)
 		rig.deliver("pull_request", prEvent("synchronize", 7, sha))
 	}
 	if pr := rig.pr(7); pr.SkipReason == "throttle" {

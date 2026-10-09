@@ -210,7 +210,8 @@ func TestReviewReplyPushbackWithdrawsAndTheScoreFollows(t *testing.T) {
 }
 
 // keep leaves the finding open; a second pushback that brings nothing new marks it disputed, which
-// still counts in the score.
+// still counts in the score, and is answered with one line rather than the verdict again; the one
+// after that is not answered at all, and neither is the next.
 func TestReviewReplyKeepThenDisputed(t *testing.T) {
 	rig, _, f := newReplyRig(t)
 	rig.model.classify = func(reviewModelReq) reviewModelReply { return classifyAs("pushback", "", "") }
@@ -234,11 +235,24 @@ func TestReviewReplyKeepThenDisputed(t *testing.T) {
 		t.Fatalf("after a second pushback with nothing new: %s, %d answers", got.Status, got.BotReplies)
 	}
 	a = rig.botAnswers(f)
-	if len(a) != 2 || !strings.Contains(a[1], "Marked disputed") || !strings.Contains(a[1], "Score now 3/5") {
+	if len(a) != 2 || a[1] != reviewNothingNew {
 		t.Errorf("the second answer = %q", a)
 	}
 	if pr := rig.pr(7); pr.Score != 3 {
 		t.Errorf("a disputed P1 left the score at %d", pr.Score)
+	}
+	for _, again := range []string{"No, really, it does not matter.", "Still not convinced."} {
+		rig.reply(f, "alice", "MEMBER", again)
+		rig.drain()
+	}
+	if a = rig.botAnswers(f); len(a) != 2 {
+		t.Errorf("pushbacks with nothing new after the one line were answered: %q", a)
+	}
+	if runs := rig.replyRuns(); len(runs) != 4 || runs[0].Status != "noop" || runs[1].Status != "noop" {
+		t.Errorf("reply runs = %+v", runs)
+	}
+	if got := rig.finding(); got.Status != review.FindingDisputed || got.BotReplies != 2 {
+		t.Errorf("after four pushbacks: %s, %d answers", got.Status, got.BotReplies)
 	}
 }
 

@@ -3,6 +3,13 @@
 
 Merge after fixing **Tenant check missing on list query** (P1, `src/totals.ts:L50-52`) and 1 more.
 
+<details><summary>Not reviewed (2 files)</summary>
+
+- `assets/logo.png` — binary
+- `dist/bundle.js` — too large
+
+</details>
+
 <details open><summary>Summary</summary>
 
 Adds per-organisation item lists and a totals refresh.  Thanks @⁠octocat!
@@ -24,13 +31,6 @@ Adds per-organisation item lists and a totals refresh.  Thanks @⁠octocat!
 </details>
 
 - **P2** · General · No test for the empty totals case · [`src/totals.ts:L50-52`](https://github.com/acme/web/blob/c03ddb1a2b3c4d5e6f708192a3b4c5d6e7f80912/src/totals.ts#L50-L52) · claimed fixed in `ab12cd3`
-
-</details>
-
-<details><summary>Not reviewed (2 files)</summary>
-
-- `assets/logo.png` — binary
-- `dist/bundle.js` — too large
 
 </details>
 

@@ -62,15 +62,18 @@ const (
 	reviewRunsPerPRDay   = 8
 	reviewRunsPerRepoDay = 40
 	// Automatic reviews of one pull request — on opening, on a push, found by the catch-up — before
-	// they pause by themselves. A branch that is pushed to all day on a repository reviewed on every
-	// push is paying for a review of each push whether anybody reads them or not; past five, the
-	// next push is more likely the sixth of a long fix than a change somebody wants judged, and
-	// `@… resume` (or any review somebody asks for, which still runs) costs a person one comment.
-	// The daily caps above stay the backstop for everything else.
-	reviewAutoPauseAfter = 5
+	// they pause by themselves, when the settings do not say (auto_pause_after; 0 never pauses). A
+	// branch pushed to all day on a repository reviewed on every push pays for a review of each push
+	// whether anybody reads them or not. But the pull requests pushed to most are also the ones with
+	// the most to find, and a ceiling of five stopped exactly those before their last head was read:
+	// so ten, a push that leaves the pull request's own diff as it was is not counted (it merges the
+	// base in; reviewDiffUnchanged), and a fix claimed in a finding's thread lets the next push
+	// through (review_pause.go). `@… resume`, or any review somebody asks for, costs one comment. The
+	// daily caps above stay the backstop for everything else.
+	reviewAutoPauseAfter = review.DefaultAutoPauseAfter
 	// reviewEngineVersion is in every cache key. Bump it when the engine's judgement changes, so a
 	// pull request reviewed by the old one is not answered from its result.
-	reviewEngineVersion = "1"
+	reviewEngineVersion = "2"
 	// The sticky summary's marker id. One summary per pull request, and the marker's MAC already
 	// binds the organisation, the repository and the number, so the id itself needs to say nothing.
 	reviewSummaryID = "summary"
@@ -155,6 +158,10 @@ type reviewOptions struct {
 	// Label is reviewRequest.Label: the types named are a label's. BotLabel is reviewRequest.BotLabel.
 	Label    string `json:"label,omitempty"`
 	BotLabel bool   `json:"bot_label,omitempty"`
+	// Claim is the reply run whose claim of a fix let this push through a pause the ceiling made
+	// (review_pause.go): carrying it is what spends the claim, and a run that carries one is not
+	// counted towards the pause.
+	Claim string `json:"claim,omitempty"`
 	// Title, Base and Head are the pull request as the request found it: what its chat message is
 	// drawn with, and its branch rule matched on, by whoever ends the run with no read of GitHub in
 	// hand — the queue's cancel, the sweep (noticeStartOrphaned). Each claim reads them afresh.
@@ -217,11 +224,11 @@ func automaticTrigger(t string) bool {
 	return t == "open" || t == "push" || t == "catchup" || t == "label"
 }
 
-// reviewPauseCounts reports whether a review with this trigger counts towards the pause after
-// reviewAutoPauseAfter, and is held back by one: the reviews that come of the pull request simply
-// moving. A label a person put on is a deliberate act on one pull request and is not counted, though
-// a pause holds it back all the same (reviewLabeled) — the pause says the pull request is not
-// reviewed again by itself, and a label is not somebody asking on it.
+// reviewPauseCounts reports whether a review with this trigger counts towards the pause after the
+// settings' auto_pause_after, and is held back by one: the reviews that come of the pull request
+// simply moving. A label a person put on is a deliberate act on one pull request and is not
+// counted, though a pause holds it back all the same (reviewLabeled) — the pause says the pull
+// request is not reviewed again by itself, and a label is not somebody asking on it.
 func reviewPauseCounts(t string) bool { return t == "open" || t == "push" || t == "catchup" }
 
 // reviewCountsTowardsPause is reviewPauseCounts for one request: its trigger's, or a label a bot put
@@ -294,6 +301,13 @@ type reviewPlan struct {
 	// withoutLabelTypes to start again from.
 	ruleKeys  []string
 	ruleLabel string
+	// auto is whether types the diff matches may join the review (review_auto.go): only a review whose
+	// types the branch rule chose. Types a person named are the ones asked for — a label's own review
+	// and a try are named too — and a review that runs the release summary is a merge of pull requests
+	// that had their own reviews, and their own automatic types, on the way in: over a release-sized
+	// diff an automatic type would match nearly everything and double the largest review's cost for
+	// what those reviews already had the chance to say. And not when the settings turn them off.
+	auto bool
 	// What GitHub said of the pull request when the plan was made, for the channel's announcement
 	// of the review (review_notify.go): its title and its branches.
 	title, base, head string
@@ -331,6 +345,7 @@ func planReview(eff review.Effective, pull *githubPull, named []string, post rev
 		for _, l := range labels {
 			p.withLabel(l)
 		}
+		p.auto = p.eff.AutoTypes && !slices.Contains(p.keys, reviewReleaseType)
 	}
 	p.post = p.eff.Mode
 	switch post {
@@ -442,8 +457,9 @@ func reviewPRFacts(repo string, p *githubPull) ReviewPRFacts {
 //     not a draft unless drafts are on, its author is not a bot and not on the exclude list;
 //  6. a fork's pull request is reviewed only when a person asked, and not even then with forks off;
 //  7. for an opening, a push, the catch-up or a label a bot put on: the pull request's automatic
-//     reviews are not paused, by somebody or by having had reviewAutoPauseAfter of them
-//     (reviewAutoPaused) — asked once the request is known not to be one already queued or done;
+//     reviews are not paused, by somebody or by having had the settings' auto_pause_after of them
+//     (reviewAutoPaused), unless a fix claimed in a finding's thread lets a push through — asked
+//     once the request is known not to be one already queued or done;
 //  8. on the organisation's own model key, the key's reviews switch is on;
 //  9. at least one of the review types it would get is on;
 //  10. the money: max_usd reserved against credit, the month, review's month and review's day;
@@ -586,7 +602,7 @@ func (b *Bot) enqueueReview(ctx context.Context, orgID int64, repo string, pr in
 			scope = reviewScopeSinceLast
 		}
 	}
-	// A full review is told apart by its key, so the once-a-day check (reviewFullRunsSince) can find
+	// A full review is told apart by its key, so the once-a-day check (reviewLastFullRun) can find
 	// it, and keeps the mark when the key moves on below.
 	prefix := reviewKeyTrigger(req.Trigger)
 	if req.Full {
@@ -621,13 +637,16 @@ func (b *Bot) enqueueReview(ctx context.Context, orgID int64, repo string, pr in
 	// under a new id, a ready_for_review at a head reviewed already, the catch-up beside the opening's
 	// delivery — asks for no review, and at the ceiling would otherwise pause the pull request for a
 	// sixth review nobody was going to run.
+	claim := ""
 	if automatic && reviewCountsTowardsPause(req.Trigger, req.BotLabel) && req.Inline == nil {
-		if s, err := b.reviewAutoPaused(ctx, orgID, req.InstallationID, row, req.Trigger); err != nil {
+		s, c, err := b.reviewAutoPaused(ctx, orgID, req.InstallationID, row, plan.eff, req.Trigger)
+		if err != nil {
 			return nil, err
 		} else if s != nil {
 			tell(plan.eff, s)
 			return skip(s)
 		}
+		claim = c
 	}
 	maxUSD := plan.eff.MaxUSD
 	if err := b.reviewBudgetRoom(ctx, orgID, maxUSD, 0); err != nil {
@@ -657,7 +676,7 @@ func (b *Bot) enqueueReview(ctx context.Context, orgID int64, repo string, pr in
 		return skip(s)
 	}
 	o := reviewOptions{Post: req.Post, AllowLive: req.AllowLive, Scope: scope, Full: req.Full, Inline: req.Inline, Label: req.Label,
-		BotLabel: req.BotLabel, Title: cutAtRune(pull.Title, 512), Base: pull.Base.Ref, Head: pull.Head.Ref}
+		BotLabel: req.BotLabel, Title: cutAtRune(pull.Title, 512), Base: pull.Base.Ref, Head: pull.Head.Ref, Claim: claim}
 	if plan.named {
 		o.Types = plan.keys
 	}
@@ -762,32 +781,64 @@ func reviewAuditEvent(pr *ReviewPR, runID string, details map[string]any) AuditE
 }
 
 // reviewAutoPaused is the pause at the gate, for a review nobody asked for: a pull request somebody
-// paused, or one that has had reviewAutoPauseAfter automatic reviews, which this request then pauses
-// — the one write that says so, conditional on it not being paused yet, so of two requests racing
-// one pauses it, audits it and has the summary's footer say so, rendered again for nothing. Nothing
-// else is posted: the footer is where a reader of the pull request looks for why a push was not
-// reviewed, and a comment saying it would be the notification nobody wanted five of already.
-func (b *Bot) reviewAutoPaused(ctx context.Context, orgID, installationID int64, pr *ReviewPR, trigger string) (*reviewSkip, error) {
-	if pr.Paused {
-		return &reviewSkip{"paused", "automatic reviews of this pull request are paused"}, nil
-	}
-	if pr.AutoReviews < reviewAutoPauseAfter {
-		return nil, nil
-	}
-	paused, err := b.store.pauseReviewPR(ctx, orgID, pr.ID, true)
-	if err != nil {
-		return nil, err
-	}
-	pr.Paused = true
-	if paused {
-		pr.PausedAuto = true
-		b.auditSystem(ctx, orgID, "review.paused", reviewAuditEvent(pr, "", map[string]any{"after": pr.AutoReviews, "by": "code review"}))
-		if err := b.queueReviewResync(ctx, orgID, installationID, pr, trigger, "paused:"+newPublicID()); err != nil {
-			slog.Warn("code review: the summary was not queued to say the reviews are paused", "org", orgID, "pr", pr.ID, "err", err)
+// paused, or one that has had the settings' auto_pause_after automatic reviews, which this request
+// then pauses — the one write that says so, conditional on it not being paused yet, so of two
+// requests racing one pauses it, audits it and has the summary's footer say so, rendered again for
+// nothing. Nothing else is posted: the footer is where a reader of the pull request looks for why a
+// push was not reviewed, and a comment saying it would be the notification nobody wanted ten of.
+//
+// Two things a push brings are not held to it. One that leaves the pull request's own diff as it was
+// is turned away as unchanged before it can be the one that pauses (reviewDiffUnchanged). And while
+// the ceiling holds the pause, a fix somebody with access claimed in a finding's thread lets one push
+// through (reviewFixClaim): claim is that reply run, for the run to carry, which is what spends it.
+// A claim does not lift a pause a member asked for: a person decided that one.
+func (b *Bot) reviewAutoPaused(ctx context.Context, orgID, installationID int64, pr *ReviewPR, eff review.Effective,
+	trigger string) (s *reviewSkip, claim string, err error) {
+	if !pr.Paused {
+		after := eff.AutoPause()
+		if after == 0 || pr.AutoReviews < after {
+			return nil, "", nil
 		}
-		slog.Info("code review: automatic reviews paused", "org", orgID, "repo", pr.Repo, "pr", pr.Number, "after", pr.AutoReviews)
+		if trigger == "push" {
+			gh, err := b.reviewClient(orgID, installationID, pr.Repo, pr.Number)
+			if err != nil {
+				return nil, "", err
+			}
+			if same, err := b.reviewDiffUnchanged(ctx, gh, pr); err != nil {
+				return nil, "", err
+			} else if same {
+				return reviewUnchangedSkip(), "", nil
+			}
+		}
+		paused, err := b.store.pauseReviewPR(ctx, orgID, pr.ID, true)
+		if err != nil {
+			return nil, "", err
+		}
+		pr.Paused = true
+		if paused {
+			pr.PausedAuto = true
+			b.auditSystem(ctx, orgID, "review.paused", reviewAuditEvent(pr, "", map[string]any{"after": pr.AutoReviews, "by": "code review"}))
+			if err := b.queueReviewResync(ctx, orgID, installationID, pr, trigger, "paused:"+newPublicID()); err != nil {
+				slog.Warn("code review: the summary was not queued to say the reviews are paused", "org", orgID, "pr", pr.ID, "err", err)
+			}
+			slog.Info("code review: automatic reviews paused", "org", orgID, "repo", pr.Repo, "pr", pr.Number, "after", pr.AutoReviews)
+		}
+		s = &reviewSkip{"paused", fmt.Sprintf("automatic reviews of this pull request paused after %d", pr.AutoReviews)}
+	} else {
+		s = &reviewSkip{"paused", "automatic reviews of this pull request are paused"}
 	}
-	return &reviewSkip{"paused", fmt.Sprintf("automatic reviews of this pull request paused after %d", reviewAutoPauseAfter)}, nil
+	if trigger == "push" && pr.PausedAuto {
+		c, err := b.reviewFixClaim(ctx, orgID, pr)
+		if err != nil {
+			return nil, "", err
+		}
+		if c.run != "" {
+			slog.Info("code review: a fix claimed in a finding's thread lets a push through the pause", "org", orgID, "repo", pr.Repo,
+				"pr", pr.Number, "reply", c.run, "by", c.login)
+			return nil, c.run, nil
+		}
+	}
+	return s, "", nil
 }
 
 // reviewOwnKeyGate is the organisation's own model key at the gate: a review on it needs the key's
@@ -1295,6 +1346,8 @@ func (b *Bot) nextReviewRun(ctx context.Context) bool {
 		b.processResync(runCtx, ctx, h)
 	case "reply":
 		b.processReply(runCtx, ctx, h)
+	case "answer":
+		b.processAnswer(runCtx, ctx, h)
 	default:
 		b.endReviewRun(ctx, h, ReviewRunResult{Status: "failed", Score: -1, Error: "the lane does not run " + r.Kind + " runs yet"})
 	}
@@ -1411,6 +1464,15 @@ type reviewCheckpoint struct {
 	TokensOut    int64                `json:"tokens_out"`
 	TokensCached int64                `json:"tokens_cached"`
 	CostUSD      float64              `json:"cost_usd"`
+
+	// RepoRules are the rules the run read from the repository's instruction files, which its
+	// findings cite as C-ids and their comments quote (review.RenderContext.RepoRules).
+	RepoRules []review.RepoRule `json:"repo_rules,omitempty"`
+
+	// Carried and CarriedOpen are what the run took forward from earlier reviews of merged pull
+	// requests (review_carry.go), which every rendering of the summary from this run lists.
+	Carried     []review.CarriedFile    `json:"carried,omitempty"`
+	CarriedOpen []review.CarriedFinding `json:"carried_open,omitempty"`
 }
 
 // reviewResolvedJSON is one earlier finding as a run left it (review_resolve.go).
@@ -1475,6 +1537,8 @@ type reviewTypeRunJSON struct {
 	Key     string `json:"key"`
 	Summary string `json:"summary,omitempty"`
 	Skipped string `json:"skipped,omitempty"`
+	Auto    bool   `json:"auto,omitempty"` // the diff brought it in (review_auto.go)
+	Cut     bool   `json:"cut,omitempty"`  // a pass of it ran out of time or money (review.TypeRun.Cut)
 }
 
 func checkpointOf(out *reviewOutcome, skipped []review.TypeRun) *reviewCheckpoint {
@@ -1483,9 +1547,10 @@ func checkpointOf(out *reviewOutcome, skipped []review.TypeRun) *reviewCheckpoin
 		FilesReviewed: out.FilesReviewed, Candidates: out.Candidates, Dropped: len(out.Dropped), Kept: len(out.Findings),
 		Drops: out.Dropped, ContextNotes: out.ContextNotes, Skills: out.Skills, Trace: out.Trace,
 		Model: out.Model, TokensIn: int64(out.Total.In), TokensOut: int64(out.Total.Out), TokensCached: int64(out.Total.CachedIn),
-		CostUSD: out.Total.CostUSD, NotReviewed: []reviewNotReviewed{}}
+		CostUSD: out.Total.CostUSD, NotReviewed: []reviewNotReviewed{}, Carried: out.Carried, CarriedOpen: out.CarriedOpen}
+	c.RepoRules = out.RepoRules
 	for _, t := range append(slices.Clone(out.TypeRuns), skipped...) {
-		c.Types = append(c.Types, reviewTypeRunJSON{Key: t.Key, Summary: t.Summary, Skipped: t.Skipped})
+		c.Types = append(c.Types, reviewTypeRunJSON{Key: t.Key, Summary: t.Summary, Skipped: t.Skipped, Auto: t.Auto, Cut: t.Cut})
 	}
 	for _, f := range out.NotReviewed {
 		c.NotReviewed = append(c.NotReviewed, reviewNotReviewed{Path: f.Path, Reason: f.Reason})
@@ -1545,6 +1610,15 @@ func reviewCacheKey(out *reviewOutcome, configHash string, specs []reviewTypeSpe
 	if out.SkillsHash != "" {
 		// Likewise only when a type read skills: what they said, at the commits they were read at.
 		parts = append(parts, "skills:"+out.SkillsHash)
+	}
+	if len(out.AutoTypes) > 0 {
+		// And only when the diff brought a type in, each at its version: an organisation's copy edited
+		// since is another review. Which ones it brought in follows from the commits and the settings.
+		auto := make([]string, 0, len(out.AutoTypes))
+		for _, s := range out.AutoTypes {
+			auto = append(auto, s.Key+"@"+strconv.Itoa(s.Version))
+		}
+		parts = append(parts, "auto:"+strings.Join(auto, ","))
 	}
 	return reviewHash(parts...)
 }
@@ -1675,17 +1749,41 @@ func (b *Bot) processReview(work, lane context.Context, h *reviewHold) {
 			skipped(s)
 			return
 		}
+		if r.Trigger == "push" && !reviewTry(r) {
+			// Read at the claim, once the debounce has passed: what the push did is what the head is
+			// now. One that left the pull request's own diff as its last review read it is not
+			// reviewed, and not counted towards the pause (reviewDiffUnchanged).
+			if same, err := b.reviewDiffUnchanged(work, gh, pr); err != nil {
+				b.reviewRunError(work, lane, h, err)
+				return
+			} else if same {
+				skipped(reviewUnchangedSkip())
+				return
+			}
+		}
 		switch {
 		case reviewTry(r):
+		case r.Trigger == "push" && opts.Claim != "" && pr.Paused && pr.PausedAuto:
+			// Through the pause on the fix claimed in a finding's thread it was queued for, and which
+			// it carries (review_pause.go).
 		case reviewCountsTowardsPause(r.Trigger, opts.BotLabel):
 			// Queued before the pull request had its fill — a burst of pushes, the catch-up beside a
-			// delivery — and claimed after: it is the one past the pause.
-			if s, err := b.reviewAutoPaused(work, r.OrgID, r.InstallationID, pr, r.Trigger); err != nil {
+			// delivery — and claimed after: it is the one past the pause, unless a fix claimed since
+			// lets it through, when it carries that claim from here.
+			s, claim, err := b.reviewAutoPaused(work, r.OrgID, r.InstallationID, pr, plan.eff, r.Trigger)
+			if err != nil {
 				b.reviewRunError(work, lane, h, err)
 				return
 			} else if s != nil {
 				skipped(s)
 				return
+			}
+			if claim != "" {
+				opts.Claim = claim
+				if err := b.carryClaim(work, h, opts); err != nil {
+					b.reviewRunError(work, lane, h, err)
+					return
+				}
 			}
 		case r.Trigger == "label" && pr.Paused:
 			// Paused while a person's label waited: not counted, and not run by itself either.
@@ -1742,6 +1840,7 @@ func (b *Bot) processReview(work, lane context.Context, h *reviewHold) {
 		if out, ck, ok = b.reviewWork(work, lane, h, pr, pull, plan, specs, skippedTypes, opts); !ok {
 			return
 		}
+		specs = slices.Concat(specs, out.AutoTypes)
 	}
 	b.publishReview(work, lane, h, pr, gh, plan, specs, ck, out)
 }
@@ -1808,9 +1907,20 @@ func (b *Bot) reviewWork(work, lane context.Context, h *reviewHold, pr *ReviewPR
 	r.Types, r.RuleLabel, r.ConfigHash = reviewRunTypes(specs), plan.label, configHash
 	spec := reviewSpec{OrgID: r.OrgID, InstallationID: r.InstallationID, Repo: pr.Repo, PR: pr.Number, Pull: pull,
 		Settings: plan.eff, Types: specs, Prior: prior, FromScratch: opts.Full}
+	if plan.auto && !reviewTry(r) {
+		if spec.Auto, err = reviewAutoTypes(work, b.store, r.OrgID, plan.keys); err != nil {
+			b.reviewRunError(work, lane, h, err)
+			return nil, nil, false
+		}
+	}
 	if opts.Scope == reviewScopeSinceLast && pr.LastReviewedSHA != "" {
 		spec.LastReviewedSHA = pr.LastReviewedSHA
 		json.Unmarshal([]byte(pr.FileHashes), &spec.PriorFileHashes) // written only by finishReviewRun
+	}
+	if !reviewTry(r) && !opts.Full {
+		// A try starts from nothing and a full review looks again at everything; any other review
+		// leaves out what merged pull requests' reviews already read (review_carry.go).
+		spec.Carry = b.reviewCarryFor(work, r, pr, plan.post != review.ModeLive)
 	}
 	var cached *ReviewRun
 	spec.Cached = func(out *reviewOutcome) bool {
@@ -1872,6 +1982,9 @@ func (b *Bot) reviewWork(work, lane context.Context, h *reviewHold, pr *ReviewPR
 		b.endReviewRun(lane, h, ReviewRunResult{Status: "skipped", Score: -1, Error: "nothing_to_review: every changed file is ignored, binary or generated"})
 		return nil, nil, false
 	}
+	// Recorded under every type it ran, the ones its diff brought in too: a run resumed into its post,
+	// a summary rendered again and a label's review asking what this head already ran all read them.
+	r.Types = reviewRunTypes(slices.Concat(specs, out.AutoTypes))
 	ck := checkpointOf(out, skippedTypes)
 	ck.Resolved = reviewResolvedOf(out, pr.Repo)
 	if plan.post == review.ModeLive && !reviewTry(r) {

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/bits"
 	"net/url"
 	"path"
 	"regexp"
@@ -15,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode"
 
 	"attesttag/internal/review"
 )
@@ -47,9 +49,11 @@ const (
 	// release-sized pull request becomes several passes rather than one it skims.
 	reviewUnitTokens  = 40_000
 	reviewCharsPerTok = 3.5
-	// The most changed files one review reads, best first (reviewRank). The rest are said out loud
-	// in "Not reviewed", which caps the score, rather than read badly.
-	reviewMaxFiles = 80
+	// The most changed files one review reads, riskiest first (reviewRank). The rest are said out
+	// loud in "Not reviewed", which caps the score, rather than read badly. A large pull request is
+	// where a bug hides best, and at 80 a large one left most of itself unread; the finder's time
+	// grows with what there is to read (reviewFinderBudget), and max $ still bounds the money.
+	reviewMaxFiles = 150
 	// A changed file this short is shown whole, up to this many of them per unit; a longer one is
 	// shown as the declaration enclosing each hunk, at most this many lines a hunk.
 	reviewWholeFileLines = 400
@@ -59,10 +63,21 @@ const (
 	// over and above the diff, which PullFiles caps on its own.
 	reviewFetchMaxBytes = 4 << 20
 	// The repo map and the instruction files are context, not the subject: a few thousand
-	// characters each, so the diff stays most of every prompt.
+	// characters each, so the diff stays most of every prompt. The instruction files get more than
+	// the map, since a team's standards are spread over more files than AGENTS.md — CONTRIBUTING.md,
+	// an editor's rule files, the docs AGENTS.md points to — and what is cut from them is a rule the
+	// finder never hears of.
 	reviewMapChars          = 4000
-	reviewInstructionsChars = 14_000
+	reviewInstructionsChars = 24_000
 	reviewPRTextChars       = 2000
+	// How many editor rule files of each kind a review reads at the base, and how many docs the root's
+	// instruction files link to. Each is one request, and they bound what is read: the other names are
+	// fixed, so at most 27 files, which the fair split then gives 24,000 characters between them. The
+	// bound is on what is read, not what is kept: a rule file for paths the pull request does not
+	// touch is read and dropped, and a cap on the whole list would let a handful of those push
+	// CONTRIBUTING.md out unread.
+	reviewRuleFilesEach = 6
+	reviewLinkedDocsMax = 4
 	// Context repositories a review may read, and code searches it may make: code search allows
 	// ten requests a minute for the whole installation.
 	reviewMaxContextRepos = 5
@@ -166,7 +181,7 @@ var reviewInjectionRes = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\b(ai|llm|automated|bot)\s+(code\s+)?reviewers?\b[^\n]{0,60}\b(must|should|do not|don't|never|ignore|skip|approve)\b`),
 	regexp.MustCompile(`(?i)\b(you are|you're|act as)\s+(an?\s+|the\s+)?(ai|llm|language model|code reviewer|reviewer|assistant)\b`),
 	regexp.MustCompile(`(?i)\bdo\s+not\s+(report|flag|mention)\s+(any|this|these|the)\b`),
-	regexp.MustCompile(`(?i)</?\s*(system|assistant|pr_data|review_criteria|tool_result|code_now|code_then|diff_now|finding)\s*>`),
+	regexp.MustCompile(`(?i)</?\s*(system|assistant|pr_data|pr_discussion|review_criteria|repository_rules|tool_result|code_now|code_then|diff_now|finding)\s*>`),
 	regexp.MustCompile(`(?i)\b(submit_review|submit_verdict|submit_resolution)\b`),
 	regexp.MustCompile(`(?i)\b(give|rate|score)\s+(this|the)\s+(pr|pull request|change|diff)\s+(a\s+)?(5|five|perfect)\b`),
 }
@@ -206,6 +221,7 @@ type reviewFile struct {
 	// "unreadable"), or "" when it is.
 	skip   string
 	tier   int // reviewRank's tier
+	risk   int // reviewRank's order within the tier (reviewRisk)
 	tokens int // its numbered diff's estimated size
 }
 
@@ -332,7 +348,7 @@ func reviewParseFile(gf review.File, e review.Effective) *reviewFile {
 		masked.Patch = ""
 	}
 	f.File = masked
-	f.tier = reviewTier(raw.Path)
+	f.tier, f.risk = reviewTier(raw.Path), reviewRisk(raw.Path, f.changed())
 	f.tokens = reviewTokens(review.NumberedPatch(masked))
 	switch {
 	case e.IgnoresPath(raw.Path):
@@ -401,26 +417,121 @@ var (
 	reviewTestPaths = []string{"**/*_test.*", "**/*.test.*", "**/*.spec.*", "**/test_*.py", "**/test/**", "**/tests/**",
 		"**/__tests__/**", "**/testdata/**", "**/fixtures/**"}
 	reviewDocPaths = []string{"**/*.md", "**/*.mdx", "**/*.rst", "**/*.txt", "**/*.adoc", "docs/**", "doc/**", "**/LICENSE*"}
+	// reviewSurfacePaths change how a thing looks or what a test is fed rather than what the code
+	// does: stylesheets and images, stories, snapshots, fixtures and mocks, and translations. Read
+	// after the tests, since a large pull request's cut falls on whatever is ranked last. Snapshot
+	// files a test runner writes (__snapshots__, .snap) are generated (reviewGeneratedPaths) and
+	// never get this far.
+	reviewSurfacePaths = []string{"**/*.css", "**/*.scss", "**/*.sass", "**/*.less", "**/*.styl", "**/*.svg",
+		"**/*.stories.*", "**/*.story.*", "**/stories/**", "**/snapshots/**", "**/fixtures/**", "**/__fixtures__/**",
+		"**/testdata/**", "**/__mocks__/**", "**/mocks/**", "**/*.mock.*", "**/*_mock.*", "**/mock_*",
+		"**/locales/**", "**/locale/**", "**/translations/**", "**/i18n/**/*.json", "**/*.po", "**/*.pot", "**/*.xlf", "**/*.xliff"}
 )
 
-// reviewTier ranks what a reviewer should read first: source, then tests, then docs, then lockfiles.
+// reviewTier ranks what a reviewer should read first: source, then tests, then the surface files
+// (reviewSurfacePaths), then docs, then lockfiles.
 func reviewTier(p string) int {
 	switch {
 	case review.MatchAny(reviewLockfiles, p):
-		return 3
+		return 4
+	case review.MatchAny(reviewSurfacePaths, p):
+		return 2
 	case review.MatchAny(reviewTestPaths, p):
 		return 1
 	case review.MatchAny(reviewDocPaths, p):
-		return 2
+		return 3
 	}
 	return 0
 }
 
-// reviewRank orders the reviewable files best first — by tier, then the larger change, then the
-// path, so the order never depends on how GitHub happened to list them.
+// reviewRiskWords are the words in a path that mark code where a bug costs most: who may do what,
+// money, the shape and storage of data, state a user interface shares, work that runs in the
+// background or on a schedule, and the edges where data comes in and goes out. A word of four
+// letters or more also matches the start of a longer one ("migrations", "authorize"); a shorter
+// one only itself or its plural, so "api" is not "apiary". A word earlier in the list wins a
+// path word both match, so "router" counts once.
+var reviewRiskWords = []string{"auth", "permission", "policy", "security", "session", "token", "payment", "billing",
+	"invoice", "migration", "schema", "model", "store", "state", "redux", "reducer", "logic", "saga", "hook", "api",
+	"route", "router", "handler", "controller", "service", "worker", "job", "queue", "task", "cron", "db", "sql",
+	"query", "cache", "lock", "sync", "upload", "download", "export", "import"}
+
+// reviewPathWords splits a path into lowercase words at every separator, at a lower-to-upper case
+// change, before the last capital of a run followed by a lower case letter ("HTTPHandler" is
+// "http handler"), and between letters and digits.
+func reviewPathWords(p string) []string {
+	var words []string
+	rs := []rune(p)
+	start := -1
+	flush := func(end int) {
+		if start >= 0 {
+			words = append(words, strings.ToLower(string(rs[start:end])))
+			start = -1
+		}
+	}
+	for i, r := range rs {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+			flush(i)
+			continue
+		}
+		if start >= 0 {
+			prev := rs[i-1]
+			switch {
+			case unicode.IsLower(prev) && unicode.IsUpper(r),
+				unicode.IsUpper(prev) && unicode.IsUpper(r) && i+1 < len(rs) && unicode.IsLower(rs[i+1]),
+				unicode.IsDigit(prev) != unicode.IsDigit(r):
+				flush(i)
+			}
+		}
+		if start < 0 {
+			start = i
+		}
+	}
+	flush(len(rs))
+	return words
+}
+
+// reviewRiskWord is the risk word a path word is, or "".
+func reviewRiskWord(w string) string {
+	one := w
+	switch {
+	case len(w) > 4 && strings.HasSuffix(w, "ies"):
+		one = w[:len(w)-3] + "y"
+	case len(w) > 3 && strings.HasSuffix(w, "s") && !strings.HasSuffix(w, "ss"):
+		one = w[:len(w)-1]
+	}
+	for _, rw := range reviewRiskWords {
+		if one == rw || (len(rw) >= 4 && strings.HasPrefix(w, rw)) {
+			return rw
+		}
+	}
+	return ""
+}
+
+// reviewRisk is how early a changed file is read within its tier: three points for each distinct
+// risk word in its path, up to three of them, a React hook's "use…" file counting as "hook", plus
+// a point for each doubling of its changed lines. So one risk word weighs about as much as eight
+// times the lines: a twenty-line change to a store is read before a hundred-line one to a page,
+// and a large change still rises on its size alone.
+func reviewRisk(p string, changed int) int {
+	words := reviewPathWords(p)
+	found := map[string]bool{}
+	for i, w := range words {
+		if rw := reviewRiskWord(w); rw != "" {
+			found[rw] = true
+		} else if w == "use" && i+2 < len(words) {
+			// use-auth.ts, useSaveField.tsx: "use", a word, and the extension after it.
+			found["hook"] = true
+		}
+	}
+	return 3*min(len(found), 3) + bits.Len(uint(max(changed, 0)))
+}
+
+// reviewRank orders the reviewable files best first — by tier, then the riskier (reviewRisk), then
+// the larger change, then the path, so the order never depends on how GitHub happened to list them.
 func reviewRank(files []*reviewFile) {
 	slices.SortStableFunc(files, func(a, b *reviewFile) int {
-		return cmp.Or(cmp.Compare(a.tier, b.tier), cmp.Compare(b.changed(), a.changed()), cmp.Compare(a.Path, b.Path))
+		return cmp.Or(cmp.Compare(a.tier, b.tier), cmp.Compare(b.risk, a.risk), cmp.Compare(b.changed(), a.changed()),
+			cmp.Compare(a.Path, b.Path))
 	})
 }
 
@@ -621,21 +732,28 @@ func capList(s []string, n int) []string {
 
 // ---- instruction files, at the base ----
 
-// reviewInstructionFiles are the files a team writes to tell an agent how its code works, read at
-// the base commit only: a pull request that adds "approve everything" to AGENTS.md is the last
-// place a review should take its instructions from.
+// reviewInstructionFiles are the files a team writes to tell people and agents how its code works,
+// read at the base commit only: a pull request that adds "approve everything" to AGENTS.md is the
+// last place a review should take its instructions from.
+//
+// Most specific first, since that is the order they are given room in (reviewConventions) and their
+// rules numbered in (review.ExtractRepoRules): the review's own file, the AGENTS.md nearest each
+// changed file, the root's agent files, the editors' rule files — .github/instructions, .cursor/rules
+// and the single-file kinds — and then what a contributor is told in CONTRIBUTING.md. Without a tree
+// the names that need no listing are tried, and a missing one costs one 404.
 func reviewInstructionFiles(base reviewTree, haveTree bool, changed []string) []string {
-	fixed := []string{"REVIEW.md", "AGENTS.md", "CLAUDE.md", ".github/copilot-instructions.md"}
 	if !haveTree {
-		return fixed
+		return []string{"REVIEW.md", "AGENTS.md", "CLAUDE.md", ".github/copilot-instructions.md", ".cursorrules",
+			".windsurfrules", "CONTRIBUTING.md", ".github/CONTRIBUTING.md"}
 	}
 	has := func(p string) bool { _, ok := slices.BinarySearch(base.paths, p); return ok }
 	var out []string
-	for _, p := range fixed[:2] {
-		if has(p) {
+	add := func(p string) {
+		if has(p) && !slices.Contains(out, p) {
 			out = append(out, p)
 		}
 	}
+	add("REVIEW.md")
 	// The AGENTS.md nearest each changed file, which is the one that speaks for its directory.
 	var nearest []string
 	for _, c := range changed {
@@ -649,11 +767,181 @@ func reviewInstructionFiles(base reviewTree, haveTree bool, changed []string) []
 		}
 	}
 	slices.Sort(nearest)
-	out = append(out, nearest[:min(len(nearest), 3)]...)
-	for _, p := range fixed[2:] {
-		if has(p) {
+	for _, p := range nearest[:min(len(nearest), 3)] {
+		add(p)
+	}
+	add("AGENTS.md")
+	add("CLAUDE.md")
+	add(".github/copilot-instructions.md")
+	// Rule files that may say which paths they are for: read, and kept only when one of them is
+	// changed here (reviewRuleFileApplies). Sorted, as the tree is.
+	for _, kind := range []struct{ dir, ext string }{{".github/instructions/", ".instructions.md"}, {".cursor/rules/", ".mdc"}} {
+		n := 0
+		for _, p := range base.paths {
+			if n < reviewRuleFilesEach && strings.HasPrefix(p, kind.dir) && strings.HasSuffix(p, kind.ext) {
+				add(p)
+				n++
+			}
+		}
+	}
+	add(".cursorrules")
+	add(".windsurfrules")
+	add("CONTRIBUTING.md")
+	add(".github/CONTRIBUTING.md")
+	return out
+}
+
+// reviewFrontMatter splits the YAML front matter an editor's rule file may open with from its body,
+// and reads what it says about where the file applies: the globs and alwaysApply of a .mdc file, and
+// the applyTo of a .github/instructions file. Only the flat forms those files use are read — a value on
+// the key's line, comma-separated or a bracketed list, or "- item" lines under it.
+func reviewFrontMatter(text string) (globs []string, always bool, body string) {
+	lines := strings.Split(text, "\n")
+	if len(lines) < 2 || strings.TrimSpace(lines[0]) != "---" {
+		return nil, false, text
+	}
+	end := -1
+	for i := 1; i < len(lines) && i < 60; i++ {
+		if strings.TrimSpace(lines[i]) == "---" {
+			end = i
+			break
+		}
+	}
+	if end < 0 {
+		return nil, false, text
+	}
+	list := func(v string) []string {
+		var out []string
+		for _, g := range strings.Split(strings.Trim(strings.TrimSpace(v), "[]"), ",") {
+			if g = strings.Trim(strings.TrimSpace(g), `"'`); g != "" {
+				out = append(out, g)
+			}
+		}
+		return out
+	}
+	for i := 1; i < end; i++ {
+		k, v, ok := strings.Cut(lines[i], ":")
+		if !ok || strings.HasPrefix(lines[i], " ") {
+			continue
+		}
+		switch strings.TrimSpace(k) {
+		case "globs", "applyTo":
+			globs = append(globs, list(v)...)
+			for j := i + 1; j < end && strings.HasPrefix(strings.TrimSpace(lines[j]), "- "); j++ {
+				globs = append(globs, list(strings.TrimPrefix(strings.TrimSpace(lines[j]), "- "))...)
+			}
+		case "alwaysApply":
+			always = strings.EqualFold(strings.Trim(strings.TrimSpace(v), `"'`), "true")
+		}
+	}
+	return globs, always, strings.TrimLeft(strings.Join(lines[end+1:], "\n"), "\n")
+}
+
+// reviewRuleFileApplies says whether a rule file with these globs speaks for a change to these
+// files: one with no globs, or that always applies, speaks for every change. A glob with no slash in
+// it is a file name, matched in any directory, as editors read "*.tsx".
+func reviewRuleFileApplies(globs []string, always bool, changed []string) bool {
+	if always || len(globs) == 0 {
+		return true
+	}
+	for _, c := range changed {
+		for _, g := range globs {
+			if review.Match(g, c) || (!strings.Contains(g, "/") && review.Match("**/"+g, c)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// reviewDocLink is a link in markdown, [text](target), and reviewDocPath a path written as code,
+// `docs/standards.md`: the two ways an AGENTS.md points at the file that holds the rest of it.
+var (
+	reviewDocLink = regexp.MustCompile(`\[[^\]\n]*\]\(\s*<?([^)\s>]+)>?(?:\s+"[^"\n]*")?\s*\)`)
+	reviewDocPath = regexp.MustCompile("`([^`\\s]+\\.mdc?)`")
+)
+
+// reviewLinkedDocs are the markdown files the root's own instruction files point to — a standards
+// page, a skill — which are where a team that keeps AGENTS.md short keeps its rules. Only files in
+// the repository at the base, ending .md or .mdc, and not one already read; never a URL. At most
+// reviewLinkedDocsMax, in the order the links are met.
+func reviewLinkedDocs(files []review.InstructionFile, base reviewTree) []string {
+	has := func(p string) bool { _, ok := slices.BinarySearch(base.paths, p); return ok }
+	var out []string
+	for _, f := range files {
+		if f.Path != "REVIEW.md" && f.Path != "AGENTS.md" && f.Path != "CLAUDE.md" {
+			continue
+		}
+		var targets []string
+		for _, m := range reviewDocLink.FindAllStringSubmatch(f.Text, -1) {
+			targets = append(targets, m[1])
+		}
+		for _, m := range reviewDocPath.FindAllStringSubmatch(f.Text, -1) {
+			targets = append(targets, m[1])
+		}
+		for _, t := range targets {
+			if len(out) == reviewLinkedDocsMax {
+				return out
+			}
+			t, _, _ = strings.Cut(t, "#")
+			t, _, _ = strings.Cut(t, "?")
+			if strings.Contains(t, ":") || t == "" {
+				continue // a URL, a mailto:, or an anchor on the same page
+			}
+			p := path.Clean(strings.TrimPrefix(t, "/"))
+			ext := strings.ToLower(path.Ext(p))
+			if p == "." || p == ".." || strings.HasPrefix(p, "../") || (ext != ".md" && ext != ".mdc") || !has(p) ||
+				slices.Contains(out, p) || slices.ContainsFunc(files, func(g review.InstructionFile) bool { return g.Path == p }) {
+				continue
+			}
 			out = append(out, p)
 		}
+	}
+	return out
+}
+
+// reviewConventions is the instruction files as the finder is given them, within limit characters. The
+// room is shared fairly — every file gets an equal share, a file shorter than its share gives what it
+// leaves to the others — so one long CONTRIBUTING.md cannot crowd out the AGENTS.md nearest the
+// change, and a file longer than its share is cut with a mark that says so.
+func reviewConventions(files []review.InstructionFile, limit int) string {
+	const cut = "(cut short)\n"
+	texts := make([]string, len(files))
+	lens := make([]int, len(files))
+	budget := limit
+	for i, f := range files {
+		texts[i] = untrusted(f.Text)
+		lens[i] = len(texts[i])
+		budget -= len("--- " + f.Path + " ---\n\n")
+	}
+	shares := reviewFairShares(lens, budget)
+	var b strings.Builder
+	for i, f := range files {
+		body := texts[i]
+		if len(body) > shares[i] {
+			body, _ = cutRunes(body, max(shares[i]-len(cut)-1, 0))
+			body = strings.TrimRight(body, " \n") + "\n" + cut
+		} else {
+			body += "\n"
+		}
+		fmt.Fprintf(&b, "--- %s ---\n%s", untrusted(f.Path), body)
+	}
+	return b.String()
+}
+
+// reviewFairShares divides total between items wanting lens, max-min fair: the smallest want is met
+// first, and what each leaves is shared among the rest.
+func reviewFairShares(lens []int, total int) []int {
+	out := make([]int, len(lens))
+	order := make([]int, len(lens))
+	for i := range order {
+		order[i] = i
+	}
+	slices.SortStableFunc(order, func(a, b int) int { return cmp.Compare(lens[a], lens[b]) })
+	left := max(total, 0)
+	for k, i := range order {
+		out[i] = min(lens[i], left/(len(order)-k))
+		left -= out[i]
 	}
 	return out
 }
@@ -837,7 +1125,7 @@ func reviewHash(parts ...string) string {
 
 // reviewTagText matches anything that could be read as one of the prompt's own section tags.
 // code covers code_then and code_now, and diff the resolution check's diff_now (review_resolve.go).
-var reviewTagText = regexp.MustCompile(`(?i)<(\s*/?\s*(?:pr_data|pr_diff|head_file|repo_map|repository_conventions|team_instructions|prior_findings|candidate|code|diff|finding|review_criteria|review_skills|skill))`)
+var reviewTagText = regexp.MustCompile(`(?i)<(\s*/?\s*(?:pr_data|pr_diff|pr_discussion|head_file|repo_map|repo_docs|past_fixes|repository_conventions|repository_rules|team_instructions|prior_findings|candidate|code|diff|finding|review_criteria|review_skills|skill|review|question|reply|thread))`)
 
 // untrusted defuses text a stranger wrote before it goes between the prompt's tags, so a pull
 // request cannot close its own section and open one that reads like ours.

@@ -8,6 +8,7 @@ import { StatusChip } from "@/components/core/status-chip";
 import { UpgradeButton } from "@/components/core/upgrade-button";
 import { useAuth } from "@/components/shell/auth-provider";
 import { Button } from "@/components/ui/button";
+import { DEFAULT_AUTO_PAUSE_AFTER } from "@/components/reviews/review-format";
 import { api, errorMessage, type CodeReviewAccess, type ReviewPaused, type ReviewResumeResponse } from "@/lib/api";
 
 // Two things that stop reviews from starting by themselves, and what a person can do about each.
@@ -101,7 +102,7 @@ export function PausedChip({ paused }: { paused: ReviewPaused }) {
 /** Why a pull request's automatic reviews are paused, in a sentence. */
 export function pausedWhy(p: ReviewPaused): string {
   return p.paused_by === "auto"
-    ? `Automatic reviews paused by themselves after ${p.auto_pause_after ?? 5}.`
+    ? `Automatic reviews paused by themselves after ${p.auto_pause_after ?? DEFAULT_AUTO_PAUSE_AFTER}.`
     : "Automatic reviews paused by a member (@… pause).";
 }
 

@@ -2167,7 +2167,7 @@ func reviewReachNote(moved []string) string {
 		"mode": "which pull requests post live", "trigger": "which are reviewed on every push",
 		"model": "which run on a model a rule chose", "notify": "where reviews are announced",
 		"max_usd": "what a review may spend", "forks": "whether pull requests from forks are reviewed",
-		"context_repos": "which other repositories a review reads",
+		"context_repos": "which other repositories a review reads", "context_repos_auto": "which other repositories a review reads",
 	}
 	var said []string
 	for _, f := range moved {

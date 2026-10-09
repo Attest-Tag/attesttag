@@ -15,6 +15,9 @@ import {
   type FieldEnv,
 } from "@/components/reviews/review-fields";
 import {
+  AUTO_TYPES,
+  CONTEXT_AUTO,
+  DEFAULT_AUTO_PAUSE_AFTER,
   DRAFTS,
   FIXES,
   FORKS,
@@ -223,6 +226,27 @@ export function ReviewSettingsForm({
           />
         </SettingsSection>
         <SettingsSection
+          title="Pause after"
+          description="Automatic reviews of one pull request before they pause, until somebody comments @… resume; 0 never pauses them. A push that leaves the pull request's diff as it was is not counted. Raising it needs Manage connections as well."
+        >
+          <TextValueField
+            env={env}
+            field="auto_pause_after"
+            label="Pause after"
+            type="number"
+            min={0}
+            max={100}
+            step="1"
+            stored={own.auto_pause_after !== undefined ? String(own.auto_pause_after) : ""}
+            shown={String(inherited.auto_pause_after ?? DEFAULT_AUTO_PAUSE_AFTER)}
+            placeholder={String(inherited.auto_pause_after ?? DEFAULT_AUTO_PAUSE_AFTER)}
+            parse={(raw) => {
+              const n = Number(raw);
+              return Number.isInteger(n) && n >= 0 && n <= 100 ? n : null;
+            }}
+          />
+        </SettingsSection>
+        <SettingsSection
           title="Forks"
           description="A pull request from a fork is a stranger's code on the organisation's money, so it is never reviewed automatically."
         >
@@ -290,6 +314,20 @@ export function ReviewSettingsForm({
             canReach={canReach}
             busy={busy === "branch_rules"}
             onSave={(rules) => save("branch_rules", rules)}
+          />
+        </SettingsSection>
+        <SettingsSection
+          title="Types that join by themselves"
+          description="Whether a review whose types a branch rule chose also runs a type whose pattern the diff matches. A review whose types somebody named runs those alone."
+        >
+          <ChoiceField
+            env={env}
+            field="auto_types"
+            label="Types that join by themselves"
+            choices={AUTO_TYPES}
+            own={own.auto_types === undefined ? undefined : own.auto_types ? "yes" : "no"}
+            inherited={inherited.auto_types ? "yes" : "no"}
+            onPick={(v) => void save("auto_types", v === undefined ? undefined : v === "yes")}
           />
         </SettingsSection>
       </SettingsGroup>
@@ -385,6 +423,21 @@ export function ReviewSettingsForm({
           description="Other repositories of the organisation a review may read — and so quote — when it checks a change against the code it calls."
         >
           <ContextReposField env={env} repos={orgRepos} />
+        </SettingsSection>
+        <SettingsSection
+          title="When none are named"
+          description="What a review reads when no context repository is named here or above."
+        >
+          <ChoiceField
+            env={env}
+            field="context_repos_auto"
+            label="When none are named"
+            choices={CONTEXT_AUTO}
+            own={own.context_repos_auto === undefined ? undefined : own.context_repos_auto ? "yes" : "no"}
+            inherited={inherited.context_repos_auto ? "yes" : "no"}
+            reach={["yes"]}
+            onPick={(v) => void save("context_repos_auto", v === undefined ? undefined : v === "yes")}
+          />
         </SettingsSection>
         <SettingsSection
           title="Model"

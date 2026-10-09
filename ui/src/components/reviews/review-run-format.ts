@@ -105,6 +105,7 @@ export const FINDING_STATUSES: { value: string; label: string; hint: string; var
   { value: "disputed", label: "Disputed", hint: "Argued in its thread, and the reviewer kept it.", variant: "danger" },
   { value: "fixed", label: "Fixed", hint: "A later push changed the lines and the problem went with them.", variant: "success" },
   { value: "resolved_by_human", label: "Resolved", hint: "Somebody resolved its thread on GitHub.", variant: "success" },
+  { value: "acknowledged", label: "Acknowledged", hint: "Accepted in its thread as a known risk, so not scored.", variant: "neutral" },
   { value: "withdrawn", label: "Withdrawn", hint: "Taken back after a reply showed it was wrong.", variant: "neutral" },
   { value: "outdated", label: "Outdated", hint: "Its code moved on before anybody settled it.", variant: "neutral" },
 ];

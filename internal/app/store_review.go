@@ -1295,3 +1295,86 @@ func checkReviewType(t *ReviewType, key string) error {
 	}
 	return nil
 }
+
+// reviewContextCandidate is a repository a review may read beside its own without anybody naming it
+// (reviewRun.autoContextRepos): one of the organisation's App connections on the same installation.
+// Private is what review_prs last said of it, when one of its pull requests has been seen; false
+// when none has, and pinning it says.
+type reviewContextCandidate struct {
+	Conn    *Connection
+	Private bool
+}
+
+// reviewContextCandidates are the other repositories of an installation that are in code review —
+// the organisation's App connections for it, less the one under review and any taken out of code
+// review — the most recently reviewed first, then the rest by name. conns is the organisation's
+// connections, which the caller has read already.
+func (s *Store) reviewContextCandidates(ctx context.Context, orgID, installationID int64, self string, conns []*Connection) ([]reviewContextCandidate, error) {
+	removed := map[string]bool{}
+	rows, err := s.db.QueryContext(ctx, `select repo from review_settings where org_id=? and kind='repo' and removed_at is not null`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var repo string
+		if err := rows.Scan(&repo); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		removed[strings.ToLower(repo)] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	last := map[string]string{}
+	rows, err = s.db.QueryContext(ctx, `select lower(repo), max(created_at) from review_runs
+		where org_id=? and kind='review' and status in ('posted','shadow') group by lower(repo)`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var repo, at string
+		if err := rows.Scan(&repo, &at); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		last[repo] = at
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	private := map[string]bool{}
+	rows, err = s.db.QueryContext(ctx, `select lower(repo), max(is_private) from review_prs where org_id=? group by lower(repo)`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var repo string
+		var p int64
+		if err := rows.Scan(&repo, &p); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		private[repo] = p != 0
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	var out []reviewContextCandidate
+	for _, c := range conns {
+		key := strings.ToLower(c.Repo)
+		if c.CredType != "github_app" || c.GitHubInstallationID != installationID || c.Repo == "" || strings.EqualFold(c.Repo, self) ||
+			removed[key] || slices.ContainsFunc(out, func(o reviewContextCandidate) bool { return strings.EqualFold(o.Conn.Repo, c.Repo) }) {
+			continue
+		}
+		out = append(out, reviewContextCandidate{Conn: c, Private: private[key]})
+	}
+	slices.SortStableFunc(out, func(a, b reviewContextCandidate) int {
+		la, lb := last[strings.ToLower(a.Conn.Repo)], last[strings.ToLower(b.Conn.Repo)]
+		return cmp.Or(cmp.Compare(lb, la), cmp.Compare(strings.ToLower(a.Conn.Repo), strings.ToLower(b.Conn.Repo)))
+	})
+	return out, nil
+}

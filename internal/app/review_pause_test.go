@@ -7,17 +7,33 @@ import (
 	"testing"
 )
 
-// Automatic reviews pause by themselves after reviewAutoPauseAfter on one pull request, and a member
-// pauses and resumes them by command. What these pin: the sixth automatic trigger posts nothing but
-// the summary's footer line, a review somebody asks for still runs while paused, a run queued before
-// the pause and claimed after it is turned away, resume starts the count again, and only members of
-// the organisation can do either. They run on both dialects.
+// Automatic reviews pause by themselves after the settings' auto_pause_after on one pull request, and
+// a member pauses and resumes them by command. What these pin: the trigger past the ceiling posts
+// nothing but the summary's footer line, a review somebody asks for still runs while paused, a run
+// queued before the pause and claimed after it is turned away, resume starts the count again, and
+// only members of the organisation can do either. Most run under a ceiling of five (pauseFive),
+// which the day's throttle lets a test reach. They run on both dialects.
+
+const (
+	pauseFive      = `{"mode":"live","trigger":"push","auto_pause_after":5}`
+	testPauseAfter = 5
+)
+
+// pushedTotals is the totals pull request after a push to sha that changed something of its own: a
+// file added, whose one line names the push. A push that leaves its diff as it was is not reviewed
+// (reviewDiffUnchanged).
+func pushedTotals(sha string) ([]map[string]any, map[string]string) {
+	fx := totalsFixture()
+	fx.addFile("src/push_"+sha[:7]+".go", "package totals // "+sha[:7]+"\n")
+	return fx.files, fx.head
+}
 
 // pushReviewed pushes sha to acme/web#7 on a repository reviewed on every push, lets the debounce
 // pass and runs the lane.
 func (rig *laneRig) pushReviewed(sha string) {
 	rig.t.Helper()
-	rig.gh.pushTo(sha, totalsFixture().files, totalsFixture().head)
+	files, head := pushedTotals(sha)
+	rig.gh.pushTo(sha, files, head)
 	rig.deliver("pull_request", prEvent("synchronize", 7, sha))
 	if _, err := rig.st.db.ExecContext(context.Background(), `update review_runs set not_before=0 where org_id=? and status='queued'`, orgID); err != nil {
 		rig.t.Fatal(err)
@@ -45,7 +61,7 @@ func (rig *laneRig) lastSummary() string {
 // quietly. A command still reviews the head, and `status` and the API say the reviews are paused.
 func TestReviewLaneAutoPausesAfterFive(t *testing.T) {
 	ctx := context.Background()
-	rig := newLaneRig(t, totalsFixture(), `{"mode":"live","trigger":"push"}`)
+	rig := newLaneRig(t, totalsFixture(), pauseFive)
 	rig.serveConversation()
 	rig.confirmLock()
 	rig.deliver("pull_request", prEvent("opened", 7, reviewHead))
@@ -54,7 +70,7 @@ func TestReviewLaneAutoPausesAfterFive(t *testing.T) {
 		rig.pushReviewed(shaOf(i))
 	}
 	pr := rig.pr(7)
-	if pr.AutoReviews != reviewAutoPauseAfter || pr.Paused || pr.ReviewsCount != 5 {
+	if pr.AutoReviews != testPauseAfter || pr.Paused || pr.ReviewsCount != 5 {
 		t.Fatalf("after the opening and four pushes: %d automatic reviews of %d, paused %v", pr.AutoReviews, pr.ReviewsCount, pr.Paused)
 	}
 	calls := len(rig.model.requests(""))
@@ -94,7 +110,7 @@ func TestReviewLaneAutoPausesAfterFive(t *testing.T) {
 	if runs := rig.runs(7); runs[0].Trigger != "command" || runs[0].Status != "posted" {
 		t.Errorf("a command on a paused pull request = %+v", runs[0])
 	}
-	if pr := rig.pr(7); pr.AutoReviews != reviewAutoPauseAfter || !pr.Paused {
+	if pr := rig.pr(7); pr.AutoReviews != testPauseAfter || !pr.Paused {
 		t.Errorf("the command counted towards the pause, or lifted it: %+v", pr)
 	}
 	rig.deliver("issue_comment", commentEvent(1102, "alice", "MEMBER", "@attesttag status", true))
@@ -109,13 +125,14 @@ func TestReviewLaneAutoPausesAfterFive(t *testing.T) {
 // five, is the one past the pause: skipped, having spent nothing, and the pull request paused.
 func TestReviewLaneAutoPauseAtTheClaim(t *testing.T) {
 	ctx := context.Background()
-	rig := newLaneRig(t, totalsFixture(), `{"mode":"live","trigger":"push"}`)
+	rig := newLaneRig(t, totalsFixture(), pauseFive)
 	rig.confirmLock()
 	rig.deliver("pull_request", prEvent("opened", 7, reviewHead))
 	rig.drain()
-	rig.gh.pushTo(reviewHeadC, totalsFixture().files, totalsFixture().head)
+	files, head := pushedTotals(reviewHeadC)
+	rig.gh.pushTo(reviewHeadC, files, head)
 	rig.deliver("pull_request", prEvent("synchronize", 7, reviewHeadC))
-	if _, err := rig.st.db.ExecContext(ctx, `update review_prs set auto_reviews=? where org_id=?`, reviewAutoPauseAfter, orgID); err != nil {
+	if _, err := rig.st.db.ExecContext(ctx, `update review_prs set auto_reviews=? where org_id=?`, testPauseAfter, orgID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := rig.st.db.ExecContext(ctx, `update review_runs set not_before=0 where org_id=? and status='queued'`, orgID); err != nil {
@@ -142,7 +159,7 @@ func TestReviewLaneAutoPauseAtTheClaim(t *testing.T) {
 // API shows where the pull request stands.
 func TestReviewCommandPauseAndResume(t *testing.T) {
 	ctx := context.Background()
-	api := newReviewAPIRig(t, `{"mode":"live","trigger":"push"}`)
+	api := newReviewAPIRig(t, pauseFive)
 	rig := api.laneRig
 	rig.serveConversation()
 	rig.confirmLock()
@@ -164,7 +181,7 @@ func TestReviewCommandPauseAndResume(t *testing.T) {
 	}
 	run := rig.runs(7)[len(rig.runs(7))-1] // the opening's review
 	out := api.must(200, "GET", "/api/reviews/"+run.PublicID, api.viewer, nil)
-	if p := out["pr"].(map[string]any); p["paused"] != true || p["paused_by"] != "member" || p["auto_pause_after"] != float64(reviewAutoPauseAfter) {
+	if p := out["pr"].(map[string]any); p["paused"] != true || p["paused_by"] != "member" || p["auto_pause_after"] != float64(5) { // the repository's own ceiling
 		t.Errorf("the API's pull request = %v", p)
 	}
 	rig.deliver("issue_comment", commentEvent(1203, "alice", "MEMBER", "@attesttag pause", true))
@@ -213,7 +230,7 @@ func TestReviewCommandPauseAndResume(t *testing.T) {
 // as it was. The next push is the sixth, and pauses it.
 func TestReviewLaneDuplicateAtTheCeilingPausesNothing(t *testing.T) {
 	ctx := context.Background()
-	rig := newLaneRig(t, totalsFixture(), `{"mode":"live","trigger":"push"}`)
+	rig := newLaneRig(t, totalsFixture(), pauseFive)
 	rig.confirmLock()
 	rig.deliver("pull_request", prEvent("opened", 7, reviewHead))
 	rig.drain()
@@ -238,7 +255,7 @@ func TestReviewLaneDuplicateAtTheCeilingPausesNothing(t *testing.T) {
 // its five automatic reviews is a member pausing it — in the API, the footer and `status` — and the
 // ceiling's own pause still reads as the ceiling's.
 func TestReviewMemberPauseAfterFiveIsTheMembers(t *testing.T) {
-	api := newReviewAPIRig(t, `{"mode":"live","trigger":"push"}`)
+	api := newReviewAPIRig(t, pauseFive)
 	rig := api.laneRig
 	rig.serveConversation()
 	rig.confirmLock()
@@ -249,7 +266,7 @@ func TestReviewMemberPauseAfterFiveIsTheMembers(t *testing.T) {
 	}
 	rig.deliver("issue_comment", commentEvent(1301, "alice", "MEMBER", "@attesttag pause", true))
 	rig.drain()
-	if pr := rig.pr(7); !pr.Paused || pr.PausedAuto || pr.AutoReviews != reviewAutoPauseAfter {
+	if pr := rig.pr(7); !pr.Paused || pr.PausedAuto || pr.AutoReviews != testPauseAfter {
 		t.Fatalf("a member's pause after five: %+v", pr)
 	}
 	run := rig.runs(7)[len(rig.runs(7))-1]
@@ -269,7 +286,7 @@ func TestReviewMemberPauseAfterFiveIsTheMembers(t *testing.T) {
 	// here, since the day's throttle would stop them first — it is the ceiling's.
 	rig.deliver("issue_comment", commentEvent(1303, "alice", "MEMBER", "@attesttag resume", true))
 	rig.drain()
-	if _, err := rig.st.db.ExecContext(context.Background(), `update review_prs set auto_reviews=? where org_id=?`, reviewAutoPauseAfter, orgID); err != nil {
+	if _, err := rig.st.db.ExecContext(context.Background(), `update review_prs set auto_reviews=? where org_id=?`, testPauseAfter, orgID); err != nil {
 		t.Fatal(err)
 	}
 	rig.pushReviewed(shaOf(5))

@@ -88,6 +88,7 @@ func (r *reviewRun) checkAll(ctx context.Context, found []reviewFound) []*review
 			r.dropC(c, "duplicate", "already open on this pull request", p.PublicID)
 		case w != nil:
 			r.dropC(c, "withdrawn", "withdrawn after discussion on this pull request", w.PublicID)
+		case r.carriedDecided(c):
 		case r.minorUnchanged(c):
 			r.dropC(c, "rereview", "a minor finding on a file unchanged since the last review", "")
 		default:
@@ -169,11 +170,19 @@ func (r *reviewRun) check(ctx context.Context, found reviewFound) *reviewCandida
 }
 
 // citeRules keeps the rule ids a finding cites that are rules of its type, on and about its file,
-// and holds its severity to the most severe they allow: a finding may be no more severe than the
-// rule it rests on.
+// or rules this run read from the repository's instruction files, and holds its severity to the most
+// severe its type's rules allow: a finding may be no more severe than the rule it rests on. An id
+// that names nothing this run has is dropped, so a comment never says it rests on a rule nobody can
+// find.
+//
+// A repository rule says that something is a finding, not how bad it is: a convention finding that
+// rests on repository rules alone is held to review.RepoRuleCap, and anything else — a SQL injection
+// the repository's "always parameterise queries" also forbids — is as severe as its consequence,
+// which the verifier judges. Capped whatever it was, the better a team wrote its rules down the more
+// of its worst findings would be posted as minor ones.
 func (r *reviewRun) citeRules(f *review.Finding, ts *reviewTypeSpec) {
 	var keep []string
-	allowed := -1
+	allowed, repoOnly := -1, false
 	for _, id := range f.RuleIDs {
 		id = strings.ToUpper(strings.TrimSpace(id))
 		if strings.HasPrefix(id, "S") {
@@ -183,11 +192,19 @@ func (r *reviewRun) citeRules(f *review.Finding, ts *reviewTypeSpec) {
 			}
 			continue
 		}
+		if review.RepoRuleID(id) {
+			if _, ok := review.FindRepoRule(r.repoRules, id); ok && !slices.Contains(keep, id) {
+				keep = append(keep, id)
+				repoOnly = repoOnly || allowed < 0
+			}
+			continue
+		}
 		rule, ok := ts.Rule(id)
 		if !ok || rule.Off || !rule.Covers(f.Path) || slices.Contains(keep, id) {
 			continue
 		}
 		keep = append(keep, id)
+		repoOnly = false
 		capRank := 0
 		if rule.SeverityCap.Valid() {
 			capRank = sevRank(rule.SeverityCap)
@@ -197,6 +214,9 @@ func (r *reviewRun) citeRules(f *review.Finding, ts *reviewTypeSpec) {
 		}
 	}
 	f.RuleIDs = keep
+	if repoOnly && allowed < 0 && f.Category == review.CategoryConvention {
+		allowed = sevRank(review.RepoRuleCap)
+	}
 	if allowed >= 0 && f.Severity.Valid() && sevRank(f.Severity) < allowed {
 		f.Severity = []review.Severity{review.P0, review.P1, review.P2}[allowed]
 	}
@@ -285,6 +305,12 @@ func normSpace(s string) string { return strings.Join(strings.Fields(s), " ") }
 // and nothing in their hunk was masked; otherwise the summary — "outside the diff" for a changed
 // file, and for a file this pull request does not change only a P0, since anything less about code
 // nobody touched is somebody else's review. "" means nowhere: drop it.
+//
+// A range only part of which the diff shows — a finder citing a function from its signature, above
+// the hunk, down to an unchanged line inside it — is narrowed to the part one hunk shows, and
+// commented on there. GitHub refuses the whole range, and "outside the diff" for a finding whose
+// lines are on the screen in front of the author reads as the reviewer not knowing where it is. Its
+// suggestion goes with the narrowing: it was written to replace the lines it no longer names.
 func (r *reviewRun) place(c *reviewCandidate) string {
 	f := c.file
 	if f == nil {
@@ -294,12 +320,59 @@ func (r *reviewRun) place(c *reviewCandidate) string {
 		return ""
 	}
 	if !review.ValidAnchor(f.Hunks, c.Side, c.StartLine, c.Line) {
-		return reviewWhereOutside
+		start, end, ok := fitAnchor(f.Hunks, c.Side, c.StartLine, c.Line)
+		if !ok {
+			return reviewWhereOutside
+		}
+		c.StartLine, c.Line = start, end
+		if start == end {
+			c.StartLine = 0
+		}
+		c.Suggestion, c.replaced = nil, ""
 	}
 	if hi := f.hunkAt(c.Side, c.Line); hi >= 0 && f.masked[hi] {
 		return reviewWhereMasked
 	}
 	return reviewWhereInline
+}
+
+// fitAnchor is the part of the lines start through line that one hunk shows on side, as a range
+// GitHub will take a comment on: the hunk sharing the most lines with it, the later one of two that
+// share as many, since a finding's own line is its last. ok is false when no hunk shows any of them.
+// Hunks are contiguous on each side (review.Hunk), so the overlap is a range of lines that all exist.
+func fitAnchor(hunks []review.Hunk, side review.Side, start, line int) (from, to int, ok bool) {
+	if start == 0 {
+		start = line
+	}
+	if line < 1 || start < 1 || start > line {
+		return 0, 0, false
+	}
+	// The hunk that shows the finding's own line wins: the comment belongs where it points, and a
+	// range that only strays into another hunk is narrowed to the part of it around that line. Only
+	// when no hunk shows the line does the largest visible overlap stand in for it.
+	best, own := 0, false
+	for _, h := range hunks {
+		lo, n := h.NewStart, h.NewLines
+		if side == review.Left {
+			lo, n = h.OldStart, h.OldLines
+		} else if side != review.Right {
+			return 0, 0, false
+		}
+		if n <= 0 {
+			continue
+		}
+		s, e := max(start, lo), min(line, lo+n-1)
+		if s > e || !review.ValidAnchor([]review.Hunk{h}, side, s, e) {
+			continue
+		}
+		mine := e == line
+		switch {
+		case own && !mine, !own && !mine && e-s+1 < best, own && mine && e-s+1 < best:
+			continue
+		}
+		from, to, ok, best, own = s, e, true, e-s+1, own || mine
+	}
+	return from, to, ok
 }
 
 // reviewNoSuggestPaths are files a one-click suggestion must never change: a workflow or an action
@@ -574,7 +647,7 @@ func (r *reviewRun) verifyAll(ctx context.Context, cands []*reviewCandidate) ([]
 	}
 	todo = todo[:n]
 
-	vctx, cancel := context.WithTimeout(ctx, r.e.verifyWall)
+	vctx, cancel := context.WithTimeout(ctx, reviewVerifyBudget(r.e.verifyWall, len(todo)))
 	defer cancel()
 	verdicts := make([]*reviewVerdict, len(todo))
 	errs := make([]error, len(todo))
@@ -628,6 +701,21 @@ func (r *reviewRun) verifyAll(ctx context.Context, cands []*reviewCandidate) ([]
 	return kept, nil
 }
 
+// reviewUncitedP2Margin is what a P2 that cites no rule needs over the strictness's threshold.
+const reviewUncitedP2Margin = 10
+
+// reviewNeeds is the verifier confidence a finding of severity sev needs at a strictness's threshold
+// (accept says why each is what it is).
+func reviewNeeds(threshold int, sev review.Severity, citesRule bool) int {
+	switch {
+	case sev == review.P0:
+		return max(threshold, 85)
+	case sev == review.P2 && !citesRule:
+		return threshold + reviewUncitedP2Margin
+	}
+	return threshold
+}
+
 func cmpBool(a, b bool) int {
 	switch {
 	case a == b:
@@ -639,9 +727,12 @@ func cmpBool(a, b bool) int {
 }
 
 // accept applies a verdict. A finding stands only when the verifier confirmed it at the confidence
-// the strictness asks for — more for a P0, which says "do not merge", and for a P2 that cites no rule,
-// which is the easiest kind of noise to produce. The verifier may bring the severity down and move
-// the lines within the diff; it may not make a finding more severe.
+// the strictness asks for — at least 85 for a P0, which says "do not merge", and ten more for a P2
+// that cites no rule, which is the easiest kind of noise to produce. A P2 that cites one — a
+// criteria rule, a skill, a repository rule — passes where any other finding does: the rule says
+// the team wants it said. A flat 85 for every P2 without a rule dropped the real small ones — a new
+// branch no test reaches, an unbounded read — with the noise. The verifier may bring the severity
+// down and move the lines within the diff; it may not make a finding more severe.
 func (r *reviewRun) accept(ctx context.Context, c *reviewCandidate, v *reviewVerdict) bool {
 	c.verifierConf = min(max(v.Confidence, 0), 100)
 	switch v.Verdict {
@@ -658,10 +749,7 @@ func (r *reviewRun) accept(ctx context.Context, c *reviewCandidate, v *reviewVer
 	if s, err := review.ParseSeverity(v.Severity); err == nil && sevRank(s) > sevRank(c.Severity) {
 		c.Severity = s
 	}
-	need := strictnessThreshold(r.strictness(c.ts))
-	if c.Severity == review.P0 || (c.Severity == review.P2 && len(c.RuleIDs) == 0) {
-		need = max(need, 85)
-	}
+	need := reviewNeeds(strictnessThreshold(r.strictness(c.ts)), c.Severity, len(c.RuleIDs) > 0)
 	if c.verifierConf < need {
 		r.dropC(c, "low_confidence", fmt.Sprintf("confirmed at %d, and this needs %d: %s", c.verifierConf, need, v.Reason), "")
 		return false
@@ -774,11 +862,40 @@ func (r *reviewRun) finish(kept []*reviewCandidate) {
 			break
 		}
 	}
-	r.out.Risk = "No blocking issues found."
-	for _, f := range r.out.Findings {
-		if f.Scored() {
-			r.out.Risk = fmt.Sprintf("%s: %s (%s:%d).", f.Severity, f.Title, f.Path, f.Line)
+	r.out.Risk = r.riskLine()
+}
+
+// riskLine is the run's one sentence on what stands in the way of merging: the worst finding open on
+// the pull request once this run is done — its own, or a P0 or P1 an earlier review raised that it
+// left standing. A re-review that found nothing new under an open P1 must not say "No blocking
+// issues found" beside the comment that says otherwise. Earlier P2s are not named over this run's:
+// the line names what blocks, and a carried minor note does not.
+func (r *reviewRun) riskLine() string {
+	var worst *review.Finding
+	carried := false
+	for i := range r.out.Findings {
+		if f := &r.out.Findings[i]; f.Scored() {
+			worst = &f.Finding
 			break
 		}
 	}
+	for _, p := range r.spec.Prior {
+		if p.Kind == reviewKindNote || p.PreExisting || (p.Severity != review.P0 && p.Severity != review.P1) {
+			continue
+		}
+		now := r.standing(p) // nil for one this run found fixed or gone, or that was withdrawn
+		if now == nil {
+			continue
+		}
+		if worst == nil || sevRank(now.Severity) < sevRank(worst.Severity) {
+			worst, carried = &now.Finding, true
+		}
+	}
+	switch {
+	case worst == nil:
+		return "No blocking issues found."
+	case carried:
+		return fmt.Sprintf("%s: %s (%s:%d), open from an earlier review.", worst.Severity, worst.Title, worst.Path, worst.Line)
+	}
+	return fmt.Sprintf("%s: %s (%s:%d).", worst.Severity, worst.Title, worst.Path, worst.Line)
 }

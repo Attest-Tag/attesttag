@@ -697,6 +697,8 @@ func findingStatusWords(s review.FindingStatus) string {
 		return "resolved"
 	case review.FindingOutdated:
 		return "outdated: its code is gone"
+	case review.FindingAcknowledged:
+		return "acknowledged as a known risk"
 	}
 	return "no longer open"
 }

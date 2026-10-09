@@ -218,6 +218,21 @@ func TestReviewAPIPermissionMatrix(t *testing.T) {
 	}
 }
 
+// More automatic reviews are more spend nobody asked for: an editor may lower the ceiling on them,
+// and raising it, or taking it away with 0, is the admin's, as reviewing every push is.
+func TestReviewAutoPauseCeilingRaisedNeedsTheConnectionsPermission(t *testing.T) {
+	rig := newReviewAPIRig(t, `{"mode":"shadow"}`)
+	rig.must(200, "PUT", rig.repoPath(), rig.editor, map[string]any{"settings": map[string]any{"auto_pause_after": 3}})
+	for _, n := range []int{20, 0} {
+		code, out := rig.call("PUT", rig.repoPath(), rig.editor, map[string]any{"settings": map[string]any{"auto_pause_after": n}})
+		if code != 403 || !slices.Contains(fieldsOf(out), "auto_pause_after") {
+			t.Errorf("an editor setting auto_pause_after %d = %d %v", n, code, out)
+		}
+	}
+	rig.must(200, "PUT", rig.repoPath(), rig.admin, map[string]any{"settings": map[string]any{"auto_pause_after": 20}})
+	rig.must(200, "PUT", rig.repoPath(), rig.editor, map[string]any{"settings": map[string]any{"auto_pause_after": 4}})
+}
+
 // The side doors: a field an editor may not set must not be reachable by making the level inherit
 // it. Resetting a repository's shadow under a live connection, deleting the group that held it to
 // shadow, and moving it out of that group each make it post live, and each is refused an editor.
@@ -1070,7 +1085,7 @@ func TestReviewAPIListsEveryBuiltinType(t *testing.T) {
 		keys = append(keys, ty["key"].(string))
 		used[ty["key"].(string)] = ty["used_by"].(float64)
 	}
-	if want := []string{"general", "security", "tests", "performance", "release"}; !slices.Equal(keys, want) {
+	if want := []string{"general", "security", "tests", "performance", "concurrency", "release"}; !slices.Equal(keys, want) {
 		t.Errorf("types listed %v, want %v", keys, want)
 	}
 	if used["performance"] != 1 || used["tests"] != 1 || used["security"] != 0 {

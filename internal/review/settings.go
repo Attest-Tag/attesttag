@@ -177,12 +177,31 @@ type Settings struct {
 	// to be fixed by a commit pushed to its branch (a fix box ticked, `@bot fix`). Off, the
 	// comments carry no box and the command is answered with a refusal.
 	Fixes *bool `json:"fixes,omitempty"`
+	// AutoTypes is whether a review whose types a branch rule chose also runs the types whose
+	// pattern its diff matches (Type.Auto), such as Concurrency and state on a change that touches
+	// async code. Off, a review runs its rule's types and its labels', and nothing else.
+	AutoTypes *bool `json:"auto_types,omitempty"`
+
+	// AutoPauseAfter is how many automatic reviews one pull request has before they pause by
+	// themselves (on opening, on a push, found by the catch-up); 0 never pauses them. Each is a review
+	// somebody pays for whether anybody reads it or not, and the pull requests pushed to most are the
+	// ones a ceiling reaches first — too low a one stops reviewing exactly where the bugs are.
+	AutoPauseAfter *int `json:"auto_pause_after,omitempty"`
 
 	Instructions   []string `json:"instructions,omitempty"`    // what the team wants checked, one per entry
 	ExcludeAuthors []string `json:"exclude_authors,omitempty"` // login globs never reviewed automatically
 	ReviewBots     []string `json:"review_bots,omitempty"`     // bot login globs reviewed automatically all the same; other bots are skipped
 	IgnorePaths    []string `json:"ignore_paths,omitempty"`    // path globs left out of every review
 	ContextRepos   []string `json:"context_repos,omitempty"`   // owner/name of the organisation's own repositories the reviewer may read
+	// ContextReposAuto is whether a repository that names no context repositories reads the other
+	// repositories of its connection that are in code review, the most recently reviewed first. A
+	// bug in a pull request often sits across the line between two of a team's repositories — the
+	// frontend calling what the backend changed — and a list somebody has to think of first is a
+	// list nobody keeps. Context repositories named here win over the automatic choice. Off unless
+	// turned on: a finding quotes what it read, and a collaborator of one private repository is not
+	// always one of the other, so reading past the repository is somebody's decision, made where
+	// naming a context repository is (connections.manage).
+	ContextReposAuto *bool `json:"context_repos_auto,omitempty"`
 
 	BranchRules []BranchRule `json:"branch_rules,omitempty"`
 }
@@ -198,12 +217,16 @@ const (
 	MaxListEntries = 50
 	MaxEntryLen    = 400
 	MaxHeaderLen   = 400
+	// DefaultAutoPauseAfter is the built-in ceiling on a pull request's automatic reviews, and
+	// MaxAutoPauseAfter the highest a level may set; the daily caps stop a busy one long before either.
+	DefaultAutoPauseAfter = 10
+	MaxAutoPauseAfter     = 100
 )
 
 // Defaults is the built-in value of every single-valued setting, the level under the
 // connection. A connection added to review starts in shadow, reviewing pull requests as they
-// open, with the general review on every branch: nothing is posted until somebody decides it
-// should be, and nothing costs more than a dollar a review.
+// open, with the general and the security review on every branch: nothing is posted until
+// somebody decides it should be, and nothing costs more than a dollar a review.
 func Defaults() Settings {
 	return Settings{
 		Mode:          ptr(ModeShadow),
@@ -218,9 +241,21 @@ func Defaults() Settings {
 		Notify:        ptr(NotifyChannel{}),
 		NotifyOn:      ptr(NotifyEvents()),
 		Fixes:         ptr(true),
-		BranchRules:   []BranchRule{{Types: []string{DefaultType}}},
+		AutoTypes:     ptr(true),
+		BranchRules:   []BranchRule{{Types: DefaultRuleTypes()}},
+
+		ContextReposAuto: ptr(false),
+
+		AutoPauseAfter: ptr(DefaultAutoPauseAfter),
 	}
 }
+
+// DefaultRuleTypes are the types the built-in fallback rule runs: General, and Security beside it.
+// Most teams never write a branch rule, and General alone does not look for a missing authorisation
+// check or an injection, so a team that had not set reviews up by hand would never be told of one —
+// the findings it least wants to hear of from somebody else. A rule a team writes and leaves
+// without types still runs DefaultType alone (MatchRule), as the console shows it.
+func DefaultRuleTypes() []string { return []string{DefaultType, "security"} }
 
 func ptr[T any](v T) *T { return &v }
 
@@ -254,12 +289,25 @@ type Effective struct {
 	// changes a comment's last lines, not what a review finds, and switching it must not make every
 	// cached review a stranger. The console reads it left out as off.
 	Fixes bool `json:"fixes,omitzero"`
+	// AutoTypes counts in Hash only when it is off, so the built-in settings hash what they did
+	// before the setting existed and turning it off still makes a review another review. The
+	// console reads it left out as off.
+	AutoTypes bool `json:"auto_types,omitzero"`
+
+	// AutoPauseAfter is left out of Hash too: when automatic reviews pause decides whether a review
+	// runs, never what it finds. A pointer, so that 0 — never — is said rather than left out; nil, in
+	// an Effective built in code, is the built-in ceiling (AutoPause).
+	AutoPauseAfter *int `json:"auto_pause_after,omitempty"`
 
 	Instructions   []string `json:"instructions"`
 	ExcludeAuthors []string `json:"exclude_authors"`
 	ReviewBots     []string `json:"review_bots,omitzero"` // omitzero for Hash's sake, as Notify: adding it missed no cached review
 	IgnorePaths    []string `json:"ignore_paths"`
 	ContextRepos   []string `json:"context_repos"`
+	// ContextReposAuto is off unless a level turns it on. omitzero, so the bytes hashed for settings
+	// that leave it alone are what they were before it existed; the console reads it left out as off,
+	// as it reads Fixes.
+	ContextReposAuto bool `json:"context_repos_auto,omitzero"`
 
 	BranchRules []BranchRule `json:"branch_rules"`
 
@@ -302,6 +350,11 @@ func Resolve(chain []LevelSettings) Effective {
 		pick(&e.MaxUSD, s.MaxUSD, "max_usd", lv, e.Source)
 		pick(&e.Notify, s.Notify, "notify", lv, e.Source)
 		pick(&e.Fixes, s.Fixes, "fixes", lv, e.Source)
+		pick(&e.AutoTypes, s.AutoTypes, "auto_types", lv, e.Source)
+		pick(&e.ContextReposAuto, s.ContextReposAuto, "context_repos_auto", lv, e.Source)
+		if s.AutoPauseAfter != nil {
+			e.AutoPauseAfter, e.Source["auto_pause_after"] = ptr(*s.AutoPauseAfter), lv
+		}
 		if s.NotifyOn != nil {
 			// A copy, and never nil: an empty set is "nothing", where nil would read as every event.
 			e.NotifyOn, e.Source["notify_on"] = append([]NotifyEvent{}, *s.NotifyOn...), lv
@@ -453,6 +506,15 @@ func (e Effective) ReviewsBot(login string) bool {
 	return false
 }
 
+// AutoPause is how many automatic reviews a pull request has before they pause by themselves; 0 is
+// never.
+func (e Effective) AutoPause() int {
+	if e.AutoPauseAfter == nil {
+		return DefaultAutoPauseAfter
+	}
+	return max(*e.AutoPauseAfter, 0)
+}
+
 // IgnoresPath reports whether a changed file is left out of the review.
 func (e Effective) IgnoresPath(path string) bool { return MatchAny(e.IgnorePaths, path) }
 
@@ -462,21 +524,34 @@ func (e Effective) IgnoresPath(path string) bool { return MatchAny(e.IgnorePaths
 // came from does not change what it does — and so is the channel told about it, and what it is
 // told, at every level and in every rule: pointing the announcements somewhere else changes no
 // review, and must not make the next request on a reviewed head pay for that review again. So are
-// the bots let through, which decide whether a review runs, not what it finds.
+// the bots let through and the ceiling on automatic reviews, which decide whether a review runs, not
+// what it finds.
+//
+// The automatic choice of context repositories does change what a review reads, so it is hashed:
+// left out while off, as it is unless somebody turned it on.
 func (e Effective) Hash() string {
 	e.Source = nil
 	e.Notify, e.NotifyOn, e.Fixes = NotifyChannel{}, nil, false
-	e.ReviewBots = nil
+	e.ReviewBots, e.AutoPauseAfter = nil, nil
 	e.BranchRules = cloneRules(e.BranchRules)
 	for i := range e.BranchRules {
 		e.BranchRules[i].Notify = nil
 	}
-	b, err := json.Marshal(e)
+	// Automatic types are hashed only when they are off. On is the default, and leaving it out then
+	// keeps the bytes what they were before there was a setting; off adds a field, so a review with
+	// them is never answered from one without.
+	noAuto := !e.AutoTypes
+	e.AutoTypes = false
+	hashed := struct {
+		Effective
+		NoAutoTypes bool `json:"no_auto_types,omitzero"`
+	}{e, noAuto}
+	b, err := json.Marshal(hashed)
 	if err != nil {
 		// Only a NaN or an infinity in MaxUSD can fail here, and Validate refuses both; a
 		// fallback that still distinguishes settings beats a constant hash that would make two
 		// different configurations look the same.
-		b = fmt.Appendf(nil, "%#v", e)
+		b = fmt.Appendf(nil, "%#v", hashed)
 	}
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
@@ -485,8 +560,9 @@ func (e Effective) Hash() string {
 // SettingFields lists every setting by its JSON name, in declaration order.
 func SettingFields() []string {
 	return []string{"mode", "trigger", "drafts", "forks", "strictness", "max_comments",
-		"comment_header", "model", "max_usd", "notify", "notify_on", "fixes", "instructions", "exclude_authors",
-		"review_bots", "ignore_paths", "context_repos", "branch_rules"}
+		"comment_header", "model", "max_usd", "notify", "notify_on", "fixes", "auto_types", "auto_pause_after",
+		"instructions", "exclude_authors", "review_bots", "ignore_paths", "context_repos", "context_repos_auto",
+		"branch_rules"}
 }
 
 // ChangedFields lists the JSON names of the settings that differ between two versions of one
@@ -549,6 +625,9 @@ func (s Settings) Validate() error {
 	}
 	if v := s.MaxUSD; v != nil && (math.IsNaN(*v) || *v < MinMaxUSD || *v > MaxMaxUSD) {
 		bad("max_usd must be between $%.2f and $%.2f", MinMaxUSD, MaxMaxUSD)
+	}
+	if v := s.AutoPauseAfter; v != nil && (*v < 0 || *v > MaxAutoPauseAfter) {
+		bad("auto_pause_after must be between 0 (never) and %d", MaxAutoPauseAfter)
 	}
 	// An empty model is not "inherit" — that is leaving the key out — and would run nothing.
 	if s.Model != nil && !validModelName(*s.Model) {

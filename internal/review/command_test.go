@@ -62,8 +62,36 @@ func TestParseCommand(t *testing.T) {
 		{"a sentence that starts with review", "@slug review the error handling in store.go", true, VerbQuestion, nil},
 		{"a question that starts with review", "@slug review is this safe?", true, VerbQuestion, nil},
 		{"why without score", "@slug why did you flag this", true, VerbQuestion, nil},
-		{"full on its own", "@slug full", true, VerbQuestion, nil},
-		{"too many words to be types", "@slug review a b c d e f g h i j k", true, VerbQuestion, nil},
+		{"full on its own is no command", "@slug full", true, VerbUnknown, nil},
+		{"too many words to be types", "@slug review b c d e f g h i j k l", true, VerbQuestion, nil},
+
+		// What people actually type for the commands they mean.
+		{"score is the status", "@slug score", true, VerbStatus, nil},
+		{"confidence? is the status", "@slug Confidence?", true, VerbStatus, nil},
+		{"a sentence about the score is a question", "@slug score seems low for a typo fix", true, VerbQuestion, nil},
+		{"start review", "@slug start review", true, VerbReview, nil},
+		{"start the review", "@slug start the review", true, VerbReview, nil},
+		{"start the review of pr", "@slug start the review of pr", true, VerbReview, nil},
+		{"start a review of this pull request", "@slug start a review of this pull request please", true, VerbReview, nil},
+		{"start reviewing", "@slug start reviewing", true, VerbReview, nil},
+		{"review this", "@slug review this", true, VerbReview, nil},
+		{"review again", "@slug review again", true, VerbReview, nil},
+		{"review this pull request", "@slug review this pull request", true, VerbReview, nil},
+		{"review for a type", "@slug review for security", true, VerbReview, []string{"security"}},
+		{"recheck", "@slug recheck", true, VerbRecheck, nil},
+		{"re-check this finding", "@slug re-check this finding", true, VerbRecheck, nil},
+		{"check again", "@slug check again", true, VerbRecheck, nil},
+		{"check on its own", "@slug check", true, VerbRecheck, nil},
+		{"review this thread", "@slug review this thread", true, VerbRecheck, nil},
+		{"review this thread again and update the confidence", "@slug review this thread again and update the confidence", true, VerbRecheck, nil},
+		{"check something is a question", "@slug check this for races", true, VerbQuestion, nil},
+		{"thanks", "@slug thanks!", true, VerbThanks, nil},
+		{"thank you so much", "@slug thank you so much", true, VerbThanks, nil},
+		{"one unknown word", "@slug approve", true, VerbUnknown, nil},
+		{"one unknown word, any case", "@slug LGTM.", true, VerbUnknown, nil},
+		{"one word asked is a question", "@slug why?", true, VerbQuestion, nil},
+		{"a bare mention in capitals", "@SLUG", true, VerbHelp, nil},
+		{"a bare mention with a bang", "@Slug !", true, VerbHelp, nil},
 
 		// Not commands.
 		{"another App's slug sharing a prefix", "@slug-dev review", false, "", nil},
@@ -119,6 +147,18 @@ func TestParseCommandKeepsTheTextAsWritten(t *testing.T) {
 	cmd, _ = ParseCommand("@slug", "slug")
 	if cmd.Text != "" {
 		t.Errorf("a bare mention has no text, got %q", cmd.Text)
+	}
+}
+
+// A bare mention is somebody saying hello, answered with the short help; "help" asks for all of it.
+func TestParseCommandTellsABareMentionFromHelp(t *testing.T) {
+	for _, body := range []string{"@slug", "@SLUG", "  @slug ?", "@slug[bot]", "@slug:"} {
+		if cmd, ok := ParseCommand(body, "slug"); !ok || cmd.Verb != VerbHelp || !cmd.Bare {
+			t.Errorf("%q = %+v, %v; want a bare mention", body, cmd, ok)
+		}
+	}
+	if cmd, _ := ParseCommand("@slug help", "slug"); cmd.Verb != VerbHelp || cmd.Bare {
+		t.Errorf("help = %+v; want the whole help", cmd)
 	}
 }
 

@@ -824,6 +824,88 @@ func (s *Store) sweepReviewRuns(ctx context.Context) ([]*ReviewRun, error) {
 	return out, rows.Err()
 }
 
+// reviewCarryRuns lists the reviews of the organisation's other pull requests in repo that merged, at
+// the head each was last reviewed at — posted, or with shadow recorded in shadow too — finished since
+// a time in the stored format, newest first and at most limit: the reviews a pull request carrying
+// their code may take forward (review_carry.go). One that was only recorded was shown to nobody on
+// GitHub, so a live review does not lean on it, as reviewFindingsSaid does not.
+func (s *Store) reviewCarryRuns(ctx context.Context, orgID int64, repo string, exceptPR int64, shadow bool, since string,
+	limit int) ([]*ReviewRun, error) {
+	shadowStatus := ""
+	if shadow {
+		shadowStatus = "shadow"
+	}
+	rows, err := s.db.QueryContext(ctx, `select `+reviewRunCols+` from review_runs
+		where org_id=? and repo=? and review_pr_id<>? and kind='review' and status in ('posted',?) and finished_at>=?
+		  and exists (select 1 from review_prs p where p.org_id=review_runs.org_id and p.id=review_runs.review_pr_id
+		    and p.state='merged' and p.last_reviewed_sha=review_runs.head_sha)
+		order by id desc limit ?`, orgID, strings.ToLower(strings.TrimSpace(repo)), exceptPR, shadowStatus, since, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*ReviewRun
+	for rows.Next() {
+		r, err := scanReviewRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// reviewCarryFindings lists the findings of the organisation's pull requests prIDs that somebody was
+// shown, as reviewFindingsSaid has it — open or disputed, or settled in one of reviewCarrySettled —
+// oldest first: what a review carrying their code lists, and is told not to raise again.
+func (s *Store) reviewCarryFindings(ctx context.Context, orgID int64, prIDs []int64, shadow bool) ([]*ReviewFinding, error) {
+	if len(prIDs) == 0 {
+		return nil, nil
+	}
+	shadowStatus := ""
+	if shadow {
+		shadowStatus = "shadow"
+	}
+	statuses := append([]review.FindingStatus{review.FindingOpen, review.FindingDisputed}, reviewCarrySettled...)
+	args := []any{orgID}
+	for _, id := range prIDs {
+		args = append(args, id)
+	}
+	for _, st := range statuses {
+		args = append(args, string(st))
+	}
+	args = append(args, orgID, shadowStatus)
+	marks := func(n int) string { return strings.TrimSuffix(strings.Repeat("?,", n), ",") }
+	return s.reviewFindingList(ctx, `select `+reviewFindingCols+` from review_findings
+		where org_id=? and review_pr_id in (`+marks(len(prIDs))+`) and status in (`+marks(len(statuses))+`)
+		  and (github_comment_id>0 or first_run_id in (select r.id from review_runs r where r.org_id=?
+		    and r.review_pr_id=review_findings.review_pr_id and r.kind='review' and (r.status in ('posted',?) or r.github_review_id>0)))
+		order by id`, args...)
+}
+
+// reviewClaimTaken reports whether a review of the pull request carries the fix claim of reply run
+// claim (reviewOptions.Claim) and is queued, running or came to a review: one that was skipped,
+// failed or stood aside reviewed nothing, and leaves the claim for the next push. claim is a public
+// id, 32 hex characters, so nothing in it reads as a pattern.
+func (s *Store) reviewClaimTaken(ctx context.Context, orgID, prID int64, claim string) (bool, error) {
+	if !reviewPublicIDShape.MatchString(claim) {
+		return false, nil
+	}
+	var n int
+	err := s.db.QueryRowContext(ctx, `select count(*) from review_runs
+		where org_id=? and review_pr_id=? and kind='review' and status in ('queued','running','posted','shadow') and request_json like ?`,
+		orgID, prID, `%"claim":"`+claim+`"%`).Scan(&n)
+	return n > 0, err
+}
+
+// setReviewRunRequest writes a claimed run's request again, when the claim settled something it
+// carries from then on (reviewOptions.Claim). Fenced on the run's lease.
+func (s *Store) setReviewRunRequest(ctx context.Context, r *ReviewRun, requestJSON string) error {
+	res, err := s.db.ExecContext(ctx, `update review_runs set request_json=?
+		where org_id=? and id=? and lease_until=? and status='running'`, cmp.Or(requestJSON, "{}"), r.OrgID, r.ID, r.Lease)
+	return fencedWrite(res, err)
+}
+
 // reviewTypesAtHead is the review types a pull request's reviews of head have run or are about to,
 // other than except's: those of every review of it queued, running, or finished with a result —
 // posted, recorded in shadow, or answered from an earlier one. A try is not the pull request's
@@ -851,7 +933,7 @@ func (s *Store) reviewTypesWhere(ctx context.Context, orgID, prID int64, head st
 	if head == "" {
 		return nil, nil
 	}
-	rows, err := s.db.QueryContext(ctx, `select types_json from review_runs
+	rows, err := s.db.QueryContext(ctx, `select types_json, coalesce(outcome_json,'') from review_runs
 		where org_id=? and review_pr_id=? and kind='review' and head_sha=? and id<>? and (`+cond+`)`, orgID, prID, head, except)
 	if err != nil {
 		return nil, err
@@ -859,14 +941,21 @@ func (s *Store) reviewTypesWhere(ctx context.Context, orgID, prID int64, head st
 	defer rows.Close()
 	var out []string
 	for rows.Next() {
-		var raw string
-		if err := rows.Scan(&raw); err != nil {
+		var raw, outcome string
+		if err := rows.Scan(&raw, &outcome); err != nil {
 			return nil, err
 		}
 		var types []ReviewRunType
 		json.Unmarshal([]byte(raw), &types) // written only by this file
+		// A type the diff brought in read only the parts its pattern matched, so it has not reviewed
+		// the head as a review asked for that type would (reviewChosenTypes).
+		var ck struct {
+			Types []reviewTypeRunJSON `json:"types"`
+		}
+		json.Unmarshal([]byte(outcome), &ck) // the run's checkpoint, written by the lane
 		for _, t := range types {
-			if !slices.Contains(out, t.Key) {
+			auto := slices.ContainsFunc(ck.Types, func(c reviewTypeRunJSON) bool { return c.Auto && c.Key == t.Key })
+			if !auto && !slices.Contains(out, t.Key) {
 				out = append(out, t.Key)
 			}
 		}
@@ -915,7 +1004,7 @@ type ReviewFinding struct {
 }
 
 var reviewFindingStatuses = []review.FindingStatus{review.FindingOpen, review.FindingWithdrawn, review.FindingFixed,
-	review.FindingResolved, review.FindingOutdated, review.FindingDisputed}
+	review.FindingResolved, review.FindingOutdated, review.FindingDisputed, review.FindingAcknowledged}
 
 const reviewFindingCols = `id, public_id, org_id, review_pr_id, first_run_id, last_run_id, review_type, review_types, path,
 	side, start_line, line, anchor_sha, code_hash, placement, kind, severity, category, title, body, suggestion, evidence,

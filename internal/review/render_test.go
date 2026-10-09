@@ -614,3 +614,91 @@ func TestSummaryListsFixedAndOutdatedApart(t *testing.T) {
 		t.Errorf("the closed findings come before the open ones:\n%s", got)
 	}
 }
+
+// A finding resting on one of the repository's own rules quotes it under "Why this was flagged",
+// with the file it is written in, as a type's rule is quoted; one the run did not read is named by
+// its id alone, never given words it did not have.
+func TestRenderFindingQuotesARepositoryRule(t *testing.T) {
+	f := validFinding()
+	f.Severity = P2
+	f.RuleIDs = []string{"C2", "C9"}
+	ctx := testRenderContext()
+	ctx.RepoRules = []RepoRule{{ID: "C1", Text: "Always wrap errors.", Source: "AGENTS.md"},
+		{ID: "C2", Text: "Never abbreviate column as col.", Source: "web/AGENTS.md"}}
+	got := RenderFinding(f, ctx)
+	if !strings.Contains(got, "- Repository rule `C2`: Never abbreviate column as col. (`web/AGENTS.md`)") {
+		t.Errorf("the cited repository rule is not quoted with its file:\n%s", got)
+	}
+	if !strings.Contains(got, "- Repository rule `C9`\n") || strings.Contains(got, "Always wrap errors") {
+		t.Errorf("a rule the run did not read, or one not cited, was given words:\n%s", got)
+	}
+}
+
+// The verdict line names the worst finding open on the pull request, whichever review raised it, and
+// a model's summary that says there is nothing to block on is not shown under it: the two would
+// contradict each other in the first lines a reader sees. Without a P0 or P1 open, the summary is
+// left as the model wrote it.
+func TestRenderSummaryDropsAnAllClearBesideABlockingFinding(t *testing.T) {
+	carried := SummaryFinding{Finding: validFinding(), ID: "f1", Status: FindingOpen, Placement: PlacementInline}
+	carried.Severity, carried.Title = P1, "Count ignores the Scan error"
+	s := SummaryState{ReviewID: "r", Status: ReviewDone, FullCoverage: true, ReviewedSHA: testHead, HeadSHA: testHead,
+		Summary: "Renames the totals hook. No blocking issues found.", Findings: []SummaryFinding{carried}}
+	got := RenderSummary(s, testRenderContext())
+	if !strings.Contains(got, "Merge after fixing **Count ignores the Scan error**") {
+		t.Errorf("the verdict does not name the open P1:\n%s", got)
+	}
+	if strings.Contains(got, "No blocking issues") || !strings.Contains(got, "Renames the totals hook.") {
+		t.Errorf("the summary still says nothing blocks beside an open P1, or lost its account of the change:\n%s", got)
+	}
+	carried.Severity = P2
+	s.Findings = []SummaryFinding{carried}
+	if got := RenderSummary(s, testRenderContext()); !strings.Contains(got, "Renames the totals hook. No blocking issues found.") {
+		t.Errorf("with only a P2 open the summary was rewritten:\n%s", got)
+	}
+	for in, want := range map[string]string{
+		"Adds a cache. No issues were found.":            "Adds a cache.",
+		"No blocking problems identified. Adds a cache.": "Adds a cache.",
+		"Fixes the issues found in the last release.":    "Fixes the issues found in the last release.",
+	} {
+		if got := withoutAllClear(in); got != want {
+			t.Errorf("withoutAllClear(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// What the review did not read is said right under the verdict, before the summary, so a reader who
+// stops at the first lines knows the verdict is about part of the change.
+func TestRenderSummaryPutsNotReviewedFirst(t *testing.T) {
+	got := RenderSummary(doneSummary(), testRenderContext())
+	nr, sum := strings.Index(got, "<summary>Not reviewed ("), strings.Index(got, "<summary>Summary</summary>")
+	if nr < 0 || sum < 0 || nr > sum {
+		t.Errorf("Not reviewed is not above the summary:\n%s", got)
+	}
+}
+
+// A finding accepted in its thread as a known risk leaves the score, the risk line and the open
+// list, and is listed under Acknowledged with the reason it was given — a person's words, kept to a
+// line and sanitised, so a reason cannot mention a team or break out of the summary's markup.
+func TestSummaryListsAcknowledgedApartWithTheReason(t *testing.T) {
+	p1 := validFinding()
+	p1.Severity, p1.Title, p1.Suggestion = P1, "Retry loop has no upper bound", nil
+	acked := SummaryFinding{Finding: p1, ID: "f1", Status: FindingAcknowledged, Placement: PlacementInline,
+		Reason: "Known, tracked\nseparately in the backlog @acme/oncall", CommentURL: "https://github.com/acme/web/pull/7#discussion_r55"}
+	s := SummaryState{ReviewID: "r", FullCoverage: true, Findings: []SummaryFinding{acked}}
+	got := RenderSummary(s, testRenderContext())
+	for _, want := range []string{"Confidence 5/5", "No blocking issues found.", "<details><summary>Acknowledged (1)</summary>",
+		"[Retry loop has no upper bound](https://github.com/acme/web/pull/7#discussion_r55)", "“Known, tracked separately in the backlog",
+		"open=0 -->"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the summary lacks %q:\n%s", want, got)
+		}
+	}
+	for _, leak := range []string{"Open findings", "@acme/oncall", "tracked\nseparately"} {
+		if strings.Contains(got, leak) {
+			t.Errorf("the summary says %q:\n%s", leak, got)
+		}
+	}
+	if Standing(FindingAcknowledged) || !Standing(FindingDisputed) || !Standing("") {
+		t.Error("Standing counts the wrong statuses")
+	}
+}

@@ -2072,6 +2072,12 @@ export type ReviewSettingsValues = {
   review_bots?: string[];
   ignore_paths?: string[];
   context_repos?: string[];
+  /** With no context repositories named, read the connection's other repositories in code review. */
+  context_repos_auto?: boolean;
+  /** Run the types whose pattern the diff matches beside the ones a branch rule chose. */
+  auto_types?: boolean;
+  /** Automatic reviews of one pull request before they pause; 0 never pauses them. */
+  auto_pause_after?: number;
   branch_rules?: ReviewBranchRule[];
 };
 
@@ -2100,6 +2106,12 @@ export type ReviewEffective = {
   review_bots: string[];
   ignore_paths: string[];
   context_repos: string[];
+  /** On unless a level turned it off; the server leaves false out. */
+  context_repos_auto?: boolean;
+  /** On unless a level turned it off; the server leaves false out. */
+  auto_types?: boolean;
+  /** Absent is the built-in ceiling. */
+  auto_pause_after?: number;
   branch_rules: ReviewBranchRule[] | null;
   source?: Partial<Record<keyof ReviewSettingsValues, ReviewLevel>>;
 };
@@ -2475,7 +2487,7 @@ export type ReviewFindingEvent = {
   run?: string;
 };
 
-export type ReviewFindingStatus = "open" | "withdrawn" | "fixed" | "resolved_by_human" | "outdated" | "disputed";
+export type ReviewFindingStatus = "open" | "withdrawn" | "fixed" | "resolved_by_human" | "outdated" | "disputed" | "acknowledged";
 
 export type ReviewFinding = {
   id: string;

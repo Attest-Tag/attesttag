@@ -15,8 +15,11 @@ func TestResolveWithNothingSetIsTheBuiltInDefaults(t *testing.T) {
 		e.Model != "heavy" || e.MaxUSD != 1.00 {
 		t.Errorf("defaults resolved to %+v", e)
 	}
-	if len(e.BranchRules) != 1 || !e.BranchRules[0].Fallback() || !slices.Equal(e.BranchRules[0].Types, []string{DefaultType}) {
-		t.Errorf("default branch rules = %+v, want one fallback running %s", e.BranchRules, DefaultType)
+	if len(e.BranchRules) != 1 || !e.BranchRules[0].Fallback() || !slices.Equal(e.BranchRules[0].Types, []string{DefaultType, "security"}) {
+		t.Errorf("default branch rules = %+v, want one fallback running %s and security", e.BranchRules, DefaultType)
+	}
+	if e.ContextReposAuto {
+		t.Error("the automatic choice of context repositories is on by default")
 	}
 	for _, field := range SettingFields() {
 		if e.Source[field] != LevelDefault {
@@ -44,7 +47,10 @@ func TestEveryFieldHasOneNameEverywhere(t *testing.T) {
 
 	var eff map[string]json.RawMessage
 	// With a channel: a zero one is left out of the JSON (Effective.Notify).
-	raw, _ = json.Marshal(Resolve([]LevelSettings{{LevelConnection, Settings{Notify: &NotifyChannel{Team: "T1", Channel: "C1"}}}}))
+	// With a channel, and the automatic context repositories on: a zero one of either is left out of
+	// the JSON (Effective.Notify, Effective.ContextReposAuto).
+	raw, _ = json.Marshal(Resolve([]LevelSettings{{LevelConnection, Settings{Notify: &NotifyChannel{Team: "T1", Channel: "C1"},
+		ContextReposAuto: ptr(true)}}}))
 	json.Unmarshal(raw, &eff)
 	delete(eff, "source")
 
@@ -335,8 +341,12 @@ func TestEffectiveHash(t *testing.T) {
 // reviewed head pay for that review again. These are the hashes of the built-in settings and of a
 // rule list as they were before the channel existed; a field added to Effective or BranchRule must
 // keep them — left out of the JSON while it is zero — or say here why every cache is to go.
+//
+// The built-in one moved once on purpose, when the built-in fallback rule began running Security
+// beside General: a pull request under the built-in rule is reviewed by another set of types from
+// then on, which no cached review answers anyway, since the types are in the cache key too.
 func TestEffectiveHashIsPinned(t *testing.T) {
-	if got := Resolve(nil).Hash(); got != "ba717c67aa9d5d176e40e20701f38ffdbfe2ffd85369a8e8d0ba46377d27fc2f" {
+	if got := Resolve(nil).Hash(); got != "08baa1b195b95aa6aaeccb3b6fd7d3a4906a7842cdb8e0cc875665ea112ae84a" {
 		t.Errorf("the built-in settings hash %s: every cached review would be missed", got)
 	}
 	var s Settings
@@ -353,6 +363,16 @@ func TestEffectiveHashIsPinned(t *testing.T) {
 	s.BranchRules[1].Notify = &NotifyChannel{}
 	if got := Resolve([]LevelSettings{{LevelConnection, s}}).Hash(); got != rules {
 		t.Errorf("a rule list with channels hashes %s, want the same as without", got)
+	}
+	// The automatic context repositories are off unless turned on: saying so changes nothing, and
+	// turning them on changes what a review reads, so it is another review.
+	s.ContextReposAuto = ptr(false)
+	if got := Resolve([]LevelSettings{{LevelConnection, s}}).Hash(); got != rules {
+		t.Errorf("context_repos_auto set to its default hashes %s, want the same as unset", got)
+	}
+	s.ContextReposAuto = ptr(true)
+	if got := Resolve([]LevelSettings{{LevelConnection, s}}).Hash(); got == rules {
+		t.Error("context_repos_auto turned on hashes the same as off; a review that reads more would be answered from one that read less")
 	}
 }
 
