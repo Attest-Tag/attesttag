@@ -3,6 +3,14 @@
 
 Do not merge yet: **Session token logged on every request** (P0, `api/log.go:L12`) and 4 more.
 
+<details><summary>Not reviewed (2 files, 1 review type)</summary>
+
+- `assets/logo.png` — binary
+- `dist/bundle.js` — too large
+- Release summary review — not run: budget
+
+</details>
+
 <details open><summary>Summary</summary>
 
 Adds per-organisation item lists and a totals refresh.  Thanks @⁠octocat!
@@ -67,14 +75,6 @@ Adds per-organisation item lists and a totals refresh.  Thanks @⁠octocat!
 The loop retries forever on a 500 from the totals service.
 
 <sub>Not introduced by this pull request, so not scored.</sub>
-
-</details>
-
-<details><summary>Not reviewed (2 files, 1 review type)</summary>
-
-- `assets/logo.png` — binary
-- `dist/bundle.js` — too large
-- Release summary review — not run: budget
 
 </details>
 

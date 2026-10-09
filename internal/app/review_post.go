@@ -89,7 +89,7 @@ func (b *Bot) reviewRenderContext(ctx context.Context, r *ReviewRun, pr *ReviewP
 	}
 	rctx := review.RenderContext{Repo: pr.Repo, PR: pr.Number, HeadSHA: r.HeadSHA, BaseSHA: r.BaseSHA,
 		DefaultSHAs: ck.DefaultSHAs, AllowedRepos: ck.ContextRepos, Slug: slug, CommentHeader: eff.CommentHeader,
-		Types: types, PublicRepo: !private, ShowCost: b.settings.Get(ctx, r.OrgID).ShowCost,
+		Types: types, RepoRules: ck.RepoRules, PublicRepo: !private, ShowCost: b.settings.Get(ctx, r.OrgID).ShowCost,
 		MarkerKey: derivedKey("review-marker"), OrgID: r.OrgID}
 	if !private && ck.Private {
 		rctx.DefaultSHAs, rctx.AllowedRepos = nil, nil

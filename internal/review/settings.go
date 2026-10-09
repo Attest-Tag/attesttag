@@ -187,6 +187,12 @@ type Settings struct {
 	ReviewBots     []string `json:"review_bots,omitempty"`     // bot login globs reviewed automatically all the same; other bots are skipped
 	IgnorePaths    []string `json:"ignore_paths,omitempty"`    // path globs left out of every review
 	ContextRepos   []string `json:"context_repos,omitempty"`   // owner/name of the organisation's own repositories the reviewer may read
+	// ContextReposAuto is whether a repository that names no context repositories reads the other
+	// repositories of its connection that are in code review, the most recently reviewed first. A
+	// bug in a pull request often sits across the line between two of a team's repositories — the
+	// frontend calling what the backend changed — and a list somebody has to think of first is a
+	// list nobody keeps. Context repositories named here win over the automatic choice.
+	ContextReposAuto *bool `json:"context_repos_auto,omitempty"`
 
 	BranchRules []BranchRule `json:"branch_rules,omitempty"`
 }
@@ -206,8 +212,8 @@ const (
 
 // Defaults is the built-in value of every single-valued setting, the level under the
 // connection. A connection added to review starts in shadow, reviewing pull requests as they
-// open, with the general review on every branch: nothing is posted until somebody decides it
-// should be, and nothing costs more than a dollar a review.
+// open, with the general and the security review on every branch: nothing is posted until
+// somebody decides it should be, and nothing costs more than a dollar a review.
 func Defaults() Settings {
 	return Settings{
 		Mode:          ptr(ModeShadow),
@@ -223,9 +229,18 @@ func Defaults() Settings {
 		NotifyOn:      ptr(NotifyEvents()),
 		Fixes:         ptr(true),
 		AutoTypes:     ptr(true),
-		BranchRules:   []BranchRule{{Types: []string{DefaultType}}},
+		BranchRules:   []BranchRule{{Types: DefaultRuleTypes()}},
+
+		ContextReposAuto: ptr(true),
 	}
 }
+
+// DefaultRuleTypes are the types the built-in fallback rule runs: General, and Security beside it.
+// Most teams never write a branch rule, and General alone does not look for a missing authorisation
+// check or an injection, so a team that had not set reviews up by hand would never be told of one —
+// the findings it least wants to hear of from somebody else. A rule a team writes and leaves
+// without types still runs DefaultType alone (MatchRule), as the console shows it.
+func DefaultRuleTypes() []string { return []string{DefaultType, "security"} }
 
 func ptr[T any](v T) *T { return &v }
 
@@ -269,6 +284,10 @@ type Effective struct {
 	ReviewBots     []string `json:"review_bots,omitzero"` // omitzero for Hash's sake, as Notify: adding it missed no cached review
 	IgnorePaths    []string `json:"ignore_paths"`
 	ContextRepos   []string `json:"context_repos"`
+	// ContextReposAuto is on unless a level turns it off. omitzero, and hashed as its opposite
+	// (Hash), so the bytes hashed for settings that leave it alone are what they were before it
+	// existed; the console reads it left out as off, as it reads Fixes.
+	ContextReposAuto bool `json:"context_repos_auto,omitzero"`
 
 	BranchRules []BranchRule `json:"branch_rules"`
 
@@ -312,6 +331,7 @@ func Resolve(chain []LevelSettings) Effective {
 		pick(&e.Notify, s.Notify, "notify", lv, e.Source)
 		pick(&e.Fixes, s.Fixes, "fixes", lv, e.Source)
 		pick(&e.AutoTypes, s.AutoTypes, "auto_types", lv, e.Source)
+		pick(&e.ContextReposAuto, s.ContextReposAuto, "context_repos_auto", lv, e.Source)
 		if s.NotifyOn != nil {
 			// A copy, and never nil: an empty set is "nothing", where nil would read as every event.
 			e.NotifyOn, e.Source["notify_on"] = append([]NotifyEvent{}, *s.NotifyOn...), lv
@@ -473,6 +493,9 @@ func (e Effective) IgnoresPath(path string) bool { return MatchAny(e.IgnorePaths
 // told, at every level and in every rule: pointing the announcements somewhere else changes no
 // review, and must not make the next request on a reviewed head pay for that review again. So are
 // the bots let through, which decide whether a review runs, not what it finds.
+//
+// The automatic choice of context repositories does change what a review reads, so it is hashed —
+// as its opposite, "manual", which is false and left out wherever nobody turned the choice off.
 func (e Effective) Hash() string {
 	e.Source = nil
 	e.Notify, e.NotifyOn, e.Fixes = NotifyChannel{}, nil, false
@@ -481,20 +504,22 @@ func (e Effective) Hash() string {
 	for i := range e.BranchRules {
 		e.BranchRules[i].Notify = nil
 	}
-	// Automatic types are hashed only when they are off. On is the default, and leaving it out then
-	// keeps the bytes what they were before there was a setting; off adds a field, so a review with
-	// them is never answered from one without.
-	noAuto := !e.AutoTypes
-	e.AutoTypes = false
-	b, err := json.Marshal(struct {
+	// Automatic types and the automatic choice of context repositories are hashed only when they are
+	// off. On is the default, and leaving it out then keeps the bytes what they were before there was
+	// a setting; off adds a field, so a review with them is never answered from one without.
+	noAuto, manual := !e.AutoTypes, !e.ContextReposAuto
+	e.AutoTypes, e.ContextReposAuto = false, false
+	hashed := struct {
 		Effective
-		NoAutoTypes bool `json:"no_auto_types,omitzero"`
-	}{e, noAuto})
+		NoAutoTypes        bool `json:"no_auto_types,omitzero"`
+		ContextReposManual bool `json:"context_repos_manual,omitzero"`
+	}{e, noAuto, manual}
+	b, err := json.Marshal(hashed)
 	if err != nil {
 		// Only a NaN or an infinity in MaxUSD can fail here, and Validate refuses both; a
 		// fallback that still distinguishes settings beats a constant hash that would make two
 		// different configurations look the same.
-		b = fmt.Appendf(nil, "%#v", e)
+		b = fmt.Appendf(nil, "%#v", hashed)
 	}
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
@@ -504,7 +529,7 @@ func (e Effective) Hash() string {
 func SettingFields() []string {
 	return []string{"mode", "trigger", "drafts", "forks", "strictness", "max_comments",
 		"comment_header", "model", "max_usd", "notify", "notify_on", "fixes", "auto_types", "instructions",
-		"exclude_authors", "review_bots", "ignore_paths", "context_repos", "branch_rules"}
+		"exclude_authors", "review_bots", "ignore_paths", "context_repos", "context_repos_auto", "branch_rules"}
 }
 
 // ChangedFields lists the JSON names of the settings that differ between two versions of one

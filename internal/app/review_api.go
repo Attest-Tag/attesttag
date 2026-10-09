@@ -763,6 +763,11 @@ func reviewTierReach(changed []string, before, after review.Effective, byField b
 	if !slices.EqualFunc(before.ContextRepos, after.ContextRepos, strings.EqualFold) {
 		add("context_repos")
 	}
+	// The automatic choice reads repositories nobody named, so turning it on reaches further, as
+	// naming one does. Turning it off asks nothing more.
+	if after.ContextReposAuto && !before.ContextReposAuto {
+		add("context_repos_auto")
+	}
 	if before.Model != after.Model {
 		add("model")
 	}

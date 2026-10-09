@@ -40,6 +40,9 @@ type RenderContext struct {
 	// Types are the review types the run used, for their names and their rules' text. A key
 	// missing here falls back to the built-in type of that key, and then to the key itself.
 	Types []Type
+	// RepoRules are the rules the run read from the repository's instruction files, for the text of
+	// a C-id a finding cites. One the run did not read is named by its id alone.
+	RepoRules []RepoRule
 	// ConsoleURL is this review's page in the console. It is linked from the summary, and model
 	// text may link to its origin, only when it is a real https address: a link to localhost on
 	// a pull request is a broken link for everybody but the operator.
@@ -333,7 +336,8 @@ func invisibleRune(r rune) bool {
 }
 
 // whyFlagged is the collapsed explanation under a finding: its category, what it is about, the
-// team rules it cites in their own words, and what the verifier made of it.
+// team rules and the repository's own rules it cites in their own words, and what the verifier made
+// of it.
 func (ctx RenderContext) whyFlagged(f Finding, p *linkPolicy) string {
 	var items []string
 	if f.Category.Valid() {
@@ -346,6 +350,15 @@ func (ctx RenderContext) whyFlagged(f Finding, p *linkPolicy) string {
 	for i, id := range f.RuleIDs {
 		if i == maxRuleIDs {
 			break
+		}
+		if RepoRuleID(id) {
+			// Said with the file it is written in, which is the repository's and a reader can open.
+			item := "Repository rule " + codeSpan(id)
+			if r, ok := FindRepoRule(ctx.RepoRules, id); ok {
+				item += ": " + sanitize(r.Text, p, inlineMode, MaxRepoRuleLen) + " (" + codeSpan(r.Source) + ")"
+			}
+			items = append(items, item)
+			continue
 		}
 		if l, _, ok := t.Skill(id); ok {
 			// Named by where it lives, which a reader can open, rather than by anything it says.
@@ -701,11 +714,19 @@ func RenderSummary(s SummaryState, ctx RenderContext) string {
 		}
 		blocks = append(blocks, lead)
 	}
+	// What the review did not read goes right under the verdict, not at the foot: a reader who
+	// stops at "No blocking issues found" has to see in the same glance that it was not all read.
+	if nr := ctx.notReviewed(s, p); nr != "" {
+		blocks = append(blocks, nr)
+	}
 
 	ran := ranTypes(s.Types)
 	summary := s.Summary
 	if strings.TrimSpace(summary) == "" && len(ran) == 1 {
 		summary = ran[0].Summary
+	}
+	if len(open) > 0 && severityRank(open[0].Severity) <= severityRank(P1) {
+		summary = withoutAllClear(summary)
 	}
 	if t := trimBlock(sanitize(summary, p, blockMode, 4000)); t != "" {
 		blocks = append(blocks, "<details open><summary>Summary</summary>\n\n"+t+"\n\n</details>")
@@ -770,9 +791,6 @@ func RenderSummary(s SummaryState, ctx RenderContext) string {
 		body := ctx.entries(pre, p) + "\n\n<sub>Not introduced by this pull request, so not scored.</sub>"
 		blocks = append(blocks, section(false, fmt.Sprintf("Pre-existing (%d)", len(pre)), body))
 	}
-	if nr := ctx.notReviewed(s, p); nr != "" {
-		blocks = append(blocks, nr)
-	}
 	if len(outdated) > 0 {
 		body := ctx.entries(outdated, p)
 		if sha := shortSHA(s.ReviewedSHA); sha != "" {
@@ -806,8 +824,20 @@ func summaryHeading(s SummaryState, status ReviewStatus, score int) string {
 	return h + fmt.Sprintf("Confidence %d/5 (advisory)", score)
 }
 
+// allClear is a model's summary saying the change has no problems, which is the risk line's to say
+// and, written by a finder pass that saw one unit of the diff, can contradict it.
+var allClear = regexp.MustCompile(`(?i)\s*\bno\s+(?:blocking\s+|critical\s+|major\s+|significant\s+|serious\s+)?(?:issues|problems|bugs)\s+(?:were\s+|was\s+)?(?:found|identified|detected)\b\.?`)
+
+// withoutAllClear takes such a sentence out of a summary written beside an open P0 or P1, so the
+// summary never says "No blocking issues found" under a line naming one. The model's account of what
+// the change does stays as it wrote it.
+func withoutAllClear(s string) string {
+	return strings.TrimSpace(allClear.ReplaceAllString(s, ""))
+}
+
 // riskSentence says what stands between the pull request and merging, from the worst open
-// finding. open is sorted worst first.
+// finding — the pull request's, whichever review raised it, not only the last one's. open is sorted
+// worst first.
 func riskSentence(open []SummaryFinding) string {
 	if len(open) == 0 {
 		return "No blocking issues found."

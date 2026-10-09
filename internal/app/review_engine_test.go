@@ -430,7 +430,7 @@ func dropReasons(out *reviewOutcome) map[string]string {
 // The whole way through: the finder reads, searches and submits; Go checks the quotes and the
 // anchor; the verifier confirms; the finding comes back inline, with the usage of every call. The
 // finder sees the diff numbered and the description wrapped as the author's text, and instructions
-// from the base commit only; the verifier never sees the description at all.
+// from the base commit only; the verifier sees the description framed as the author's account.
 func TestReviewEngineHappyPath(t *testing.T) {
 	fx := totalsFixture()
 	fx.base["AGENTS.md"] = "Every field of Totals is read and written under mu.\n"
@@ -491,11 +491,16 @@ func TestReviewEngineHappyPath(t *testing.T) {
 	if !strings.Contains(results, "13| \tdefer t.mu.Unlock()") || !strings.Contains(results, "acme/web\tsrc/totals.go") {
 		t.Errorf("the finder's reads did not come back:\n%s", results)
 	}
+	// The verifier reads the description as what it is, the author's account of the change, so it can
+	// tell an answered problem from an open one and never takes it for evidence.
 	for _, q := range rig.model.requests("verifier") {
-		for _, u := range q.Users {
-			if strings.Contains(u, "Make Add faster") || strings.Contains(u, "nobody calls it concurrently") {
-				t.Errorf("the verifier was shown the pull request's title or description:\n%s", u)
-			}
+		u := strings.Join(q.Users, "\n")
+		if !strings.Contains(u, "<pr_data>\nThe author's account of the change, not evidence of what it does.\nTitle: Make Add faster") ||
+			!strings.Contains(u, "nobody calls it concurrently") {
+			t.Errorf("the verifier was not shown the title and description as the author's account:\n%s", u)
+		}
+		if !strings.Contains(q.System, "never as evidence that the code does it") {
+			t.Error("the verifier's instructions do not say what the description is")
 		}
 	}
 	for _, s := range rig.gh.sent() {

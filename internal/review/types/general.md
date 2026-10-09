@@ -12,8 +12,9 @@ purpose: Find what will go wrong when this change runs: logic that does not do w
 around it says it should, contracts with other code that it breaks, data it can lose or
 corrupt, races, and new behaviour that nothing tests. Report a problem only when you can name
 the input or the sequence of events that triggers it and what happens then. Leave formatting,
-naming and anything a compiler, type checker or linter already catches to those tools; a
-stylesheet or markup change that alters what people see is behaviour, not style.
+naming and anything a compiler, type checker or linter already catches to those tools, except
+where one of the repository's own rules (C1, C2…) or a rule below asks for it; a stylesheet or
+markup change that alters what people see is behaviour, not style.
 
 - [P0] Data loss or corruption on a reachable path: a write that drops, truncates or
   overwrites data the caller meant to keep, a delete or update whose condition can match more

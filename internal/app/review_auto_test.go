@@ -201,17 +201,17 @@ func TestReviewLaneRecordsTheTypesTheDiffBroughtIn(t *testing.T) {
 	rig.deliver("pull_request", prEvent("opened", 7, reviewHead))
 	rig.drain()
 	runs := rig.runs(7)
-	if len(runs) != 1 || runs[0].Status != "posted" || !slices.Equal(runTypes(runs[0]), []string{"general", "concurrency"}) {
+	if len(runs) != 1 || runs[0].Status != "posted" || !slices.Equal(runTypes(runs[0]), []string{"general", "security", "concurrency"}) {
 		t.Fatalf("runs = %+v", runs)
 	}
 	ck, _ := checkpointFrom(runs[0])
-	if ck == nil || len(ck.Types) != 2 || ck.Types[0].Auto || !ck.Types[1].Auto {
+	if ck == nil || len(ck.Types) != 3 || ck.Types[0].Auto || ck.Types[1].Auto || !ck.Types[2].Auto {
 		t.Errorf("checkpoint types = %+v", ck)
 	}
-	if summary := rig.lastSummary(); !strings.Contains(summary, "Reviewed as General and Concurrency and state (auto)") {
+	if summary := rig.lastSummary(); !strings.Contains(summary, "Reviewed as General, Security and Concurrency and state (auto)") {
 		t.Errorf("the summary does not say Concurrency came in by itself:\n%s", summary)
 	}
-	if got := reviewChosenTypes(runs[0]); !slices.Equal(got, []ReviewRunType{{Key: "general"}}) {
+	if got := reviewChosenTypes(runs[0]); !slices.Equal(got, []ReviewRunType{{Key: "general"}, {Key: "security"}}) {
 		t.Errorf("the types asked for = %v", got)
 	}
 	gh, err := rig.b.reviewClient(orgID, fakeInstallation, "acme/web", 7)
@@ -230,10 +230,10 @@ func TestReviewLaneRecordsTheTypesTheDiffBroughtIn(t *testing.T) {
 	off.confirmLock()
 	off.deliver("pull_request", prEvent("opened", 7, reviewHead))
 	off.drain()
-	if runs := off.runs(7); len(runs) != 1 || !slices.Equal(runTypes(runs[0]), []string{"general"}) {
+	if runs := off.runs(7); len(runs) != 1 || !slices.Equal(runTypes(runs[0]), []string{"general", "security"}) {
 		t.Errorf("with automatic types off: %+v", runs)
 	}
-	if got := finderTypes(off.model.requests("finder")); !slices.Equal(got, []string{"general"}) {
+	if got := finderTypes(off.model.requests("finder")); !slices.Equal(got, []string{"general", "security"}) {
 		t.Errorf("with automatic types off, finder passes for %v", got)
 	}
 }

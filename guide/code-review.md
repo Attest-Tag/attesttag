@@ -36,10 +36,10 @@ It never:
   GitHub's API with a read-only token, the model has read tools only, and Go writes every word that
   is posted, from findings it has checked against the code. A fix somebody asks for is not the
   review: it is a fix job, which does check out, build and test, in the worker's own container.
-- **takes instructions from the pull request.** Instruction files — `REVIEW.md`, `AGENTS.md`,
-  `CLAUDE.md`, `.github/copilot-instructions.md`, and the `AGENTS.md` nearest each changed file —
-  are read at the **base** commit, as is a [skill](#skills) a type links in the same repository, so
-  a pull request that adds "report nothing" to one is not obeyed. Text in the diff written to steer a reviewer is itself a finding, and caps the score.
+- **takes instructions from the pull request.** [Instruction files](#instruction-files-and-the-rules-in-them)
+  — `AGENTS.md`, `CONTRIBUTING.md`, editors' rule files — are read at the **base** commit, as is a
+  [skill](#skills) a type links in the same repository, so a pull request that adds "report
+  nothing" to one is not obeyed. Text in the diff written to steer a reviewer is itself a finding, and caps the score.
 - **writes anything in shadow.** A repository in *Shadow*, where every connection starts, has the
   whole review run and recorded in the console and not one word written to GitHub: no review, no
   summary, no reaction, no check, no answer to a command or a reply, and no fix pushed. Only the organisation's own chat
@@ -47,35 +47,6 @@ It never:
 - **pages people or links out.** Everything a model wrote passes a sanitiser before it is posted:
   `@` mentions are defused, images are removed, and links survive only into the pull request's own
   repository and the context repositories the review was allowed to read.
-
-### What a review reads
-
-Before any model is asked, Go builds what the finder is shown: the diff with its lines numbered, the
-head's code around each change, a map of the repository, the instruction files at the base, and two
-sections from the repository itself:
-
-- **Past fixes in these files**: for up to 12 changed source files, their last ten commits on the
-  base branch, keeping those whose subject says fix, revert, hotfix, bug, regression, incident, race,
-  leak, crash, rollback or security, at most 15 lines. Earlier fixes show what broke there before,
-  and the finder checks that the change does not undo or repeat one.
-- **Documentation you can read**: up to 20 Markdown paths at the base near the changed code, under
-  `docs/`, `doc/`, `documentation/`, `adr/` or `decisions/` and beside a changed file or above it,
-  leaving out changelogs and licences. Paths only; the finder reads what bears on the change.
-
-A commit is shown as its hash, date, subject and pull request number, never its author.
-
-The finder then reads with tools that cannot write: `read_file` (the head, the base or a context
-repository), `list_files`, `grep` (a regular expression over every text file of the head, the pull
-request's own changes included), `find_code` (GitHub's code search, which sees default branches
-only) and `file_history` (a file's last ten commits on the base branch). The verifier has all but
-`list_files`.
-
-The first `grep` of a review downloads the head once, as GitHub's archive of that commit, with the
-read-only token, and keeps its text files of up to 512 KB in memory until the review ends. Ignored,
-generated and vendored paths, `node_modules`, `dist`, `build`, minified files, lockfiles and binaries
-are left out. Past 120 MB downloaded, 80 MB of text or 60,000 files the copy stops where it got to,
-and every grep says it searched part of the repository; a head that cannot be downloaded is said to
-be, and `read_file` and `find_code` still work.
 
 ## Setting it up
 
@@ -283,7 +254,7 @@ or *off*; its menu's **Code review settings…** and **Set review** in the selec
 | Drafts | skip drafts | *Skip drafts* or *Review drafts*: whether a draft is reviewed without anybody asking |
 | Forks | when a member asks | *When a member asks* or *Never* ([forks](#pull-requests-from-forks)) |
 | Fixes | fix when asked | *Fix when asked* or *Never*: whether somebody who can push may have a finding fixed on the pull request ([fixing a finding](#fixing-a-finding-on-the-pull-request)) |
-| Strictness | medium | how sure the verifier must be to keep a finding: 60, 70 or 85 out of 100 for low, medium and high |
+| Strictness | medium | how sure the verifier must be to keep a finding: 60, 70 or 85 out of 100 for low, medium and high ([how sure](#how-sure-a-finding-must-be)) |
 | Max comments | 8 | inline comments per review, 1 to 20; the rest are listed in the summary |
 | Comment header | none | text above every inline comment, up to 400 characters |
 | Model | Advanced | the default model, the advanced one, or one offered to channels; it verifies every finding, and finds them for every type without a model of its own |
@@ -298,17 +269,18 @@ or *off*; its menu's **Code review settings…** and **Set review** in the selec
 | Authors to skip | none | GitHub logins or globs (`release-bot`, `*-ci`) never reviewed without somebody asking |
 | Bots to review | none | the bots whose pull requests are reviewed without anybody asking: a login with or without `[bot]` (`dependabot`, `renovate[bot]`), a glob, or `*` for every bot. Any other bot's pull request is skipped; one this App opened — a [fix job](fix-jobs.md)'s — is reviewed like a person's, once it is out of draft. The authors to skip still apply |
 | Paths to ignore | none | path globs left out of every review (`dist/**`, `**/*.snap`) |
-| Context repositories | none | the organisation's other repositories connected through the App, which the review may read, and quote, for contracts that cross them — up to five per review |
+| Context repositories | none | the organisation's other repositories connected through the App, which the review may read, and quote, for contracts that cross them — up to five per review ([context repositories](#context-repositories)) |
+| Automatic context repositories | on | `context_repos_auto`: with no context repositories named, read up to five other repositories of the same connection that are in code review, the most recently reviewed first; set through the API |
 | Channel | none | the chat channel each review and the merge are announced in ([announcements](#announcements-in-a-chat-channel)) |
 | Notify on | all four | which events that channel hears of: *Started*, *Finished*, *Failed or not run*, *Merged* |
-| Branch rules | General on every branch | [branch rules](#branch-rules) |
+| Branch rules | General and Security on every branch | [branch rules](#branch-rules) |
 
 ### Who may change what
 
 Changing the settings needs `reviews.manage`, which the built-in admin and editor roles hold;
 `reviews.view` reads them, and the viewer role holds that. What posts, spends or reaches further
 needs `connections.manage` as well, which only admin holds: *Live*, *every push*, forks, context
-repositories, the model, max $, *Fixes* turned on, the channel reviews are announced in (not *Notify on*, which only
+repositories and their automatic choice turned on, the model, max $, *Fixes* turned on, the channel reviews are announced in (not *Notify on*, which only
 picks what it hears), a branch rule that posts live, reviews every push or names a model or a
 channel, adding repositories, and code review's budgets. It
 is judged on what a change makes effective at every repository and branch under the level changed,
@@ -319,6 +291,96 @@ by moving it out of a group, or by deleting a rule that held some branches in *S
 A save is made over the level as it read it. If somebody saved any of that level's settings while
 it was being checked, it is refused with 409 and writes nothing, so it never puts back what they
 changed, a field it did not name included.
+
+## What a review reads
+
+A review reads the diff, the changed files at the head around it and a map of the repository, all
+through the App's read-only token, and masks every credential in them before a model sees any of
+it. Beside those it reads what the team has written elsewhere: the repository's instruction files,
+what has been said on the pull request so far, and, where it may, the team's other repositories.
+
+### Instruction files and the rules in them
+
+At the pull request's **base** commit — so a pull request that edits one is not reviewed by its
+edit — a review reads, most specific first:
+
+- `REVIEW.md`, the `AGENTS.md` nearest each changed file (up to three), and the root's `AGENTS.md`
+  and `CLAUDE.md`;
+- `.github/copilot-instructions.md`, `.github/instructions/*.instructions.md` and
+  `.cursor/rules/*.mdc` (up to six of each kind), `.cursorrules` and `.windsurfrules`; a rule file
+  whose front matter names paths (`applyTo`, `globs`) only when the pull request changes one;
+- `CONTRIBUTING.md`, at the root or in `.github/`;
+- up to four Markdown files the root's `REVIEW.md`, `AGENTS.md` or `CLAUDE.md` link to in the same
+  tree — a standards page, a skill's `SKILL.md`. A link anywhere else is never followed.
+
+The finder is given up to 24,000 characters of them, shared fairly: a file shorter than its share
+leaves the rest to the others, and a longer one is cut with a mark that says so.
+
+The lines in them that tell somebody what to do — a list item or a sentence saying *must*, *never*,
+*always*, *do not*, *avoid*, *prefer*, *should*, *required* or *use … instead* — also become
+**repository rules**, `C1`, `C2`…, up to 40 of up to 300 characters, shared between the files the
+same way. A finding may rest on one, naming and style included; it cites the rule's id, is at most
+P2, and its comment quotes the rule and its file under *Why this was flagged*. Like a type's rules
+they are criteria: nothing in an instruction file changes how the review is done, what it may read,
+or where it posts.
+
+### The pull request's discussion
+
+Once it knows it is not answering from an earlier review, a review reads what has been said on the
+pull request: its inline threads and its conversation, everyone's but the App's own, whose
+findings' threads it already follows ([replies](#replies-in-a-findings-thread)). The finder is
+given up to 30 threads, newest first and about 8,000 characters in all, each with where it is, who
+started it — the pull request's author, somebody else or a bot — its first comment and its last two
+replies. Another tool's note on the conversation is kept, cut shorter and listed last, and a
+command to the App is left out.
+
+A problem raised there that the author answered as intended, declined, not a bug or tracked
+elsewhere is not raised again, unless the code at the head contradicts the answer; one raised and
+left unanswered may be. The verifier is shown the threads about the finding's file and the
+conversation, with the pull request's title and description, as the author's account of the change
+and never as evidence of what the code does. A discussion GitHub will not list is read as none, and
+the review goes on.
+
+### Context repositories
+
+A review may read, and quote, the organisation's other repositories, for contracts that cross them:
+the frontend calling what the backend changed. *Context repositories* names them. A repository that
+names none reads, unless `context_repos_auto` is set to `false`, up to five other repositories of
+its own connection that are in code review, the most recently reviewed first. Turning the automatic
+choice back on needs `connections.manage`, as naming one does.
+
+Either way only the organisation's App connections are read, each at the commit its default branch
+pointed at when the review began, and a private one never for a pull request in a public repository,
+where whatever was read may be quoted. A repository removed from code review is not chosen. A run's
+details in **History** list the repositories it read, and why any it tried were not.
+
+### Lookups, past fixes and documentation
+
+Beside the diff, the head's code around each change and the map of the repository, the finder is
+given two sections read from the repository itself:
+
+- **Past fixes in these files**: for up to 12 changed source files, their last ten commits on the
+  base branch, keeping those whose subject says fix, revert, hotfix, bug, regression, incident, race,
+  leak, crash, rollback or security, at most 15 lines. Earlier fixes show what broke there before,
+  and the finder checks that the change does not undo or repeat one.
+- **Documentation you can read**: up to 20 Markdown paths at the base near the changed code, under
+  `docs/`, `doc/`, `documentation/`, `adr/` or `decisions/` and beside a changed file or above it,
+  leaving out changelogs and licences. Paths only; the finder reads what bears on the change.
+
+A commit is shown as its hash, date, subject and pull request number, never its author.
+
+The finder then reads with tools that cannot write: `read_file` (the head, the base or a context
+repository), `list_files`, `grep` (a regular expression over every text file of the head, the pull
+request's own changes included), `find_code` (GitHub's code search, which sees default branches
+only) and `file_history` (a file's last ten commits on the base branch). The verifier has all but
+`list_files`.
+
+The first `grep` of a review downloads the head once, as GitHub's archive of that commit, with the
+read-only token, and keeps its text files of up to 512 KB in memory until the review ends. Ignored,
+generated and vendored paths, `node_modules`, `dist`, `build`, minified files, lockfiles and binaries
+are left out. Past 120 MB downloaded, 80 MB of text or 60,000 files the copy stops where it got to,
+and every grep says it searched part of the repository; a head that cannot be downloaded is said to
+be, and `read_file` and `find_code` still work.
 
 ## Review types
 
@@ -338,7 +400,8 @@ open findings per type. Six ship built in:
 | Concurrency and state | `concurrency` | requests racing, out-of-order responses, state read after an await, timers and effects outliving their screen, locks, cancellation, retries, check-then-act. Joins by itself (below) | P0 to P2 |
 | Release summary | `release` | a large merge into a production branch: what ships by area, migrations, configuration, deploy order, old and new versions running side by side, rollback. The summary is the result; only a P0 is commented on inline | P0 only |
 
-General runs when nothing says otherwise. A type's key is the word branch rules, the Start review
+General and Security run when nothing says otherwise: the built-in fallback rule names both, and a
+rule a team writes without types runs General. A type's key is the word branch rules, the Start review
 dialog and commands use: `@<app> review security`. Each type's findings below its inline minimum
 are listed in the summary under *More notes*.
 
@@ -568,7 +631,7 @@ performance, or a missing test for new logic.
 
 Before anything is posted, Go checks every finding — its quotes are in the code, its lines sit
 inside one hunk GitHub will take a comment on — and a verifier tries to refute it, keeping it only
-at the confidence the strictness asks for: every finding except the two Go raises itself from the
+when it is [sure enough](#how-sure-a-finding-must-be): every finding except the two Go raises itself from the
 diff, a committed credential and text addressed to an AI reviewer, which need no model to confirm. At most *Max comments* go inline, and at most three P2s;
 the rest are listed in the summary. A suggestion is offered only on the pull request's side of the
 diff, replacing exactly the finding's lines, and never on a workflow or an action
@@ -577,23 +640,41 @@ the repository's secrets is not the reviewer's to hand out. The agent prompt is 
 location, the severity and the title only, never the scenario, so text a pull request smuggled into
 a finding cannot become an instruction to an agent somebody points at the comment.
 
+### How sure a finding must be
+
+The verifier gives each candidate a verdict and a confidence out of 100, and a finding is kept when
+it is confirmed at the strictness's threshold: 60, 70 or 85 for low, medium and high. The strictness
+is the one a settings level or a branch rule sets, else the type's own. Two kinds of finding differ:
+
+- a **P0** needs at least 85 whatever the strictness, since it says *do not merge*;
+- a **P2 that cites no rule** needs ten more — 70, 80 or 95 — since it is the easiest kind of noise
+  to produce. A P2 that cites a type's rule, a skill or a repository rule needs no more than any
+  other finding: the rule says the team wants it said.
+
+The finder is asked for every real problem it can name a trigger and a consequence for, the smaller
+ones as P2 — a new branch no test reaches, a read with no bound — and not to pad the list; an empty
+list is still the answer for a sound change. A finding resting only on repository rules is held to
+P2, and the verifier may lower a severity, never raise it. What was dropped and why — refuted,
+uncertain, or confirmed below the threshold — is listed with the run in **History**.
+
 ### The summary comment
 
 One conversation comment per pull request, created by the first review and edited in place after
 that. Go renders it from what the database holds, so it changes the moment a finding does:
 
 - a heading with the score, `attest_tag review · Confidence 3/5 (advisory)`, and one sentence on
-  the worst open finding: *Do not merge yet*, *Merge after fixing*, *Only minor findings*, or *No
-  blocking issues found*;
-- **Summary**, the model's account of what the pull request does, and **Open findings**, worst
+  the worst finding open on the pull request, whichever review raised it: *Do not merge yet*,
+  *Merge after fixing*, *Only minor findings*, or *No blocking issues found*;
+- right under it, **Not reviewed**: the changed files it did not read — binary, generated, ignored,
+  too large, or past the money — and any review type that did not run, with why;
+- **Summary**, the model's account of what the pull request does, with the risks, rollout order or
+  follow-ups its description names, and **Open findings**, worst
   first, each linked to its comment, marked open, disputed, or claimed fixed in a commit, and with
   the lines of code it points at folded under *Code*;
 - when more than one type ran, a line naming the types and how many open findings each raised;
 - *Outside the diff*, *More notes*, *Beside a masked credential*, *In unchanged files* (P0s only),
   *Notes* (said and never scored — a credential-shaped string in a test fixture) and *Pre-existing*
   (not introduced by this pull request, never scored, at most two);
-- **Not reviewed**: the changed files it did not read — binary, generated, ignored, too large, or
-  past the money — and any review type that did not run, with why;
 - **Possibly outdated**: findings in files that changed after the reviewed commit, kept off the
   diff;
 - **Fixed** and **Outdated**, folded: what a later review found fixed, with the commit, and what it
@@ -997,7 +1078,7 @@ $0.15. The Start review dialog estimates one pull request's range before anythin
 | Commands | 10 an hour from one person; a full review once per commit a day |
 | Replies answered | 3 in one thread, 20 on one pull request a day, 20 an hour from one person (5 from somebody who is not one of the repository's people) |
 | Files read | the 150 changed files most worth reading; the rest are listed as not reviewed, which caps the score. Source comes first, then tests, then stylesheets, SVGs, stories, fixtures, mocks and translations, then docs, then lockfiles. Within each, a path naming where a bug costs most (auth, sessions, payments, migrations, models, stores, state, hooks, APIs, handlers, workers, queues, jobs, the database, caches, locks and the like) counts like eight times the changed lines |
-| Lookups | 40 greps, 5 code searches and 20 file histories per review, beyond the 12 histories read up front ([what a review reads](#what-a-review-reads)) |
+| Lookups | 40 greps, 5 code searches and 20 file histories per review, beyond the 12 histories read up front ([lookups](#lookups-past-fixes-and-documentation)) |
 | Review time | finding: 6 minutes for up to 4 passes (one type over one unit of about 40,000 tokens of diff), 45 seconds more for each pass past four, at most 12 minutes; verifying: 4 minutes for up to 8 findings, 15 seconds more for each past eight, at most 8 minutes. *Max $ per review* still bounds the money |
 | Inline comments | *Max comments* (8 by default, at most 20), of which at most 3 are P2s; a review of a later head adds at most one new P2 |
 | Pre-existing findings | 2 listed per review |

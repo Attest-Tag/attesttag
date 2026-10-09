@@ -70,7 +70,7 @@ const (
 	reviewAutoPauseAfter = 5
 	// reviewEngineVersion is in every cache key. Bump it when the engine's judgement changes, so a
 	// pull request reviewed by the old one is not answered from its result.
-	reviewEngineVersion = "1"
+	reviewEngineVersion = "2"
 	// The sticky summary's marker id. One summary per pull request, and the marker's MAC already
 	// binds the organisation, the repository and the number, so the id itself needs to say nothing.
 	reviewSummaryID = "summary"
@@ -1419,6 +1419,10 @@ type reviewCheckpoint struct {
 	TokensOut    int64                `json:"tokens_out"`
 	TokensCached int64                `json:"tokens_cached"`
 	CostUSD      float64              `json:"cost_usd"`
+
+	// RepoRules are the rules the run read from the repository's instruction files, which its
+	// findings cite as C-ids and their comments quote (review.RenderContext.RepoRules).
+	RepoRules []review.RepoRule `json:"repo_rules,omitempty"`
 }
 
 // reviewResolvedJSON is one earlier finding as a run left it (review_resolve.go).
@@ -1493,6 +1497,7 @@ func checkpointOf(out *reviewOutcome, skipped []review.TypeRun) *reviewCheckpoin
 		Drops: out.Dropped, ContextNotes: out.ContextNotes, Skills: out.Skills, Trace: out.Trace,
 		Model: out.Model, TokensIn: int64(out.Total.In), TokensOut: int64(out.Total.Out), TokensCached: int64(out.Total.CachedIn),
 		CostUSD: out.Total.CostUSD, NotReviewed: []reviewNotReviewed{}}
+	c.RepoRules = out.RepoRules
 	for _, t := range append(slices.Clone(out.TypeRuns), skipped...) {
 		c.Types = append(c.Types, reviewTypeRunJSON{Key: t.Key, Summary: t.Summary, Skipped: t.Skipped, Auto: t.Auto})
 	}
