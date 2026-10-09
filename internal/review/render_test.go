@@ -675,3 +675,30 @@ func TestRenderSummaryPutsNotReviewedFirst(t *testing.T) {
 		t.Errorf("Not reviewed is not above the summary:\n%s", got)
 	}
 }
+
+// A finding accepted in its thread as a known risk leaves the score, the risk line and the open
+// list, and is listed under Acknowledged with the reason it was given — a person's words, kept to a
+// line and sanitised, so a reason cannot mention a team or break out of the summary's markup.
+func TestSummaryListsAcknowledgedApartWithTheReason(t *testing.T) {
+	p1 := validFinding()
+	p1.Severity, p1.Title, p1.Suggestion = P1, "Retry loop has no upper bound", nil
+	acked := SummaryFinding{Finding: p1, ID: "f1", Status: FindingAcknowledged, Placement: PlacementInline,
+		Reason: "Known, tracked\nseparately in the backlog @acme/oncall", CommentURL: "https://github.com/acme/web/pull/7#discussion_r55"}
+	s := SummaryState{ReviewID: "r", FullCoverage: true, Findings: []SummaryFinding{acked}}
+	got := RenderSummary(s, testRenderContext())
+	for _, want := range []string{"Confidence 5/5", "No blocking issues found.", "<details><summary>Acknowledged (1)</summary>",
+		"[Retry loop has no upper bound](https://github.com/acme/web/pull/7#discussion_r55)", "“Known, tracked separately in the backlog",
+		"open=0 -->"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the summary lacks %q:\n%s", want, got)
+		}
+	}
+	for _, leak := range []string{"Open findings", "@acme/oncall", "tracked\nseparately"} {
+		if strings.Contains(got, leak) {
+			t.Errorf("the summary says %q:\n%s", leak, got)
+		}
+	}
+	if Standing(FindingAcknowledged) || !Standing(FindingDisputed) || !Standing("") {
+		t.Error("Standing counts the wrong statuses")
+	}
+}

@@ -570,10 +570,7 @@ func (p *reviewPurse) room(next float64) bool {
 // the lane to wait out rather than count against the run.
 func (e *reviewEngine) Run(ctx context.Context, spec reviewSpec) (*reviewOutcome, error) {
 	out := &reviewOutcome{Usage: map[string]Usage{}, FileHashes: map[string]string{}, DefaultSHAs: map[string]string{}}
-	r := &reviewRun{e: e, spec: spec, out: out, ctxRepos: map[string]*reviewRepoReader{}, texts: map[string]*reviewText{},
-		textErrs: map[string]error{}, byPath: map[string]*reviewFile{}, notReviewed: map[string]string{},
-		reviewed: map[string]bool{}, prior: map[string]*ReviewFinding{}, withdrawn: map[string]*ReviewFinding{},
-		checking: map[string]*reviewResolution{}, skills: map[string][]*reviewSkill{}, skillSections: map[string]string{}}
+	r := e.newRun(spec, out)
 	r.money.max = max(spec.Settings.MaxUSD, 0)
 	err := r.run(ctx)
 	r.grepIdx.release()
@@ -586,6 +583,21 @@ func (e *reviewEngine) Run(ctx context.Context, spec reviewSpec) (*reviewOutcome
 	}
 	r.mu.Unlock()
 	return out, err
+}
+
+// newRun is one run's state, every map made: a review's, and the smaller jobs that borrow its reads
+// and its models — a reply in a thread, a finding checked again, a question answered.
+func (e *reviewEngine) newRun(spec reviewSpec, out *reviewOutcome) *reviewRun {
+	if out.Usage == nil {
+		out.Usage = map[string]Usage{}
+	}
+	if out.FileHashes == nil {
+		out.FileHashes = map[string]string{}
+	}
+	return &reviewRun{e: e, spec: spec, out: out, ctxRepos: map[string]*reviewRepoReader{}, texts: map[string]*reviewText{},
+		textErrs: map[string]error{}, byPath: map[string]*reviewFile{}, notReviewed: map[string]string{},
+		reviewed: map[string]bool{}, prior: map[string]*ReviewFinding{}, withdrawn: map[string]*ReviewFinding{},
+		checking: map[string]*reviewResolution{}, skills: map[string][]*reviewSkill{}, skillSections: map[string]string{}}
 }
 
 func (r *reviewRun) run(ctx context.Context) error {
@@ -616,7 +628,8 @@ func (r *reviewRun) run(ctx context.Context) error {
 		switch p.Status {
 		case review.FindingOpen, review.FindingDisputed:
 			r.prior[fp] = p
-		case review.FindingWithdrawn:
+		case review.FindingWithdrawn, review.FindingAcknowledged:
+			// Settled in its thread either way: raised again, it would only be argued again.
 			r.withdrawn[fp] = p
 		}
 	}
@@ -1496,7 +1509,7 @@ func (r *reviewRun) unitPrompt(ctx context.Context, u *reviewUnit) string {
 			} else {
 				open = append(open, line)
 			}
-		case review.FindingWithdrawn:
+		case review.FindingWithdrawn, review.FindingAcknowledged:
 			gone = append(gone, fmt.Sprintf("- %s · %s", untrusted(oneLine(p.Title)), untrusted(p.Path)))
 		}
 	}

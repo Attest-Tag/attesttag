@@ -20,6 +20,14 @@ const (
 	VerbResume     Verb = "resume"   // start them again, with a fresh allowance before the next pause
 	VerbFix        Verb = "fix"      // fix open findings with a commit pushed to the pull request's branch
 	VerbQuestion   Verb = "question" // anything else: free text for the bot to answer
+	// VerbRecheck is "look at this again": in a finding's thread, that finding at the head; on the
+	// conversation, which names no finding, a review of the head.
+	VerbRecheck Verb = "recheck"
+	// VerbUnknown is one word that is no command — "@bot approve", "@bot full" — which is more likely
+	// a command misremembered than a question, and is pointed at help rather than answered.
+	VerbUnknown Verb = "unknown"
+	// VerbThanks is thanks and nothing else, which needs no answer.
+	VerbThanks Verb = "thanks"
 )
 
 // Command is a parsed request from a pull request comment.
@@ -36,6 +44,9 @@ type Command struct {
 	// Text is the comment from just after the mention to its end, as written. For a question
 	// it is the question, and it may run on past the first line.
 	Text string
+	// Bare is a mention with nothing after it but punctuation: somebody saying hello, or finding
+	// out what the bot is, who is answered with the short help rather than the whole of it.
+	Bare bool
 }
 
 // maxCommandTypes bounds how many type keys a command may name before the line is read as
@@ -58,7 +69,7 @@ const maxCommandTypes = 10
 // accepted too, since that is what people copy from the bot's own comments.
 //
 // A bare mention is a request for help rather than a review: it costs nothing, and the help
-// says how to ask for one.
+// says how to ask for one. Its case does not matter, as for any mention.
 func ParseCommand(body, slug string) (Command, bool) {
 	slug = strings.TrimPrefix(strings.TrimSpace(slug), "@")
 	if slug == "" {
@@ -76,6 +87,11 @@ func ParseCommand(body, slug string) (Command, bool) {
 		}
 		text := strings.TrimSpace(strings.Join(append([]string{rest}, lines[i+1:]...), "\n"))
 		cmd := classify(rest)
+		if (cmd.Verb == VerbUnknown || cmd.Verb == VerbThanks) && strings.Contains(text, "\n") {
+			// One word on the mention's line and more below it is somebody writing a question across
+			// lines, not a command misremembered nor only thanks.
+			cmd.Verb = VerbQuestion
+		}
 		cmd.Text = text
 		return cmd, true
 	}
@@ -107,11 +123,21 @@ func afterMention(line, slug string) (string, bool) {
 var whyScore = regexp.MustCompile(`(?i)^why\b.*\bscore`)
 
 // commandFiller are words that read naturally around a command and change nothing: "review
-// this PR please", "review again, thanks".
+// this PR please", "review again, thanks", "start the review of this pull request".
 var commandFiller = map[string]bool{
 	"please": true, "pls": true, "plz": true, "this": true, "the": true, "pr": true,
 	"it": true, "again": true, "now": true, "and": true, "thanks": true, "thank": true, "you": true,
+	"a": true, "an": true, "of": true, "for": true, "pull": true, "request": true,
 }
+
+// recheckWords may follow a review or check verb and still ask for one finding to be looked at
+// again — "review this thread again and update the confidence" — rather than name review types.
+var recheckWords = map[string]bool{"thread": true, "finding": true, "comment": true, "update": true, "confidence": true,
+	"score": true, "its": true}
+
+// thanksWords are a comment that only thanks the bot: "thanks!", "thank you so much".
+var thanksWords = map[string]bool{"thanks": true, "thank": true, "you": true, "thx": true, "ty": true, "cheers": true,
+	"so": true, "much": true, "a": true, "lot": true, "great": true, "nice": true}
 
 // classify reads the rest of the mention line.
 func classify(rest string) Command {
@@ -126,14 +152,25 @@ func classify(rest string) Command {
 		return strings.TrimRight(words[i], ".!?:")
 	}
 	switch {
-	case len(words) == 0 || verb(0) == "" || verb(0) == "help":
+	case only(words): // nothing but punctuation, or nothing at all
+		return Command{Verb: VerbHelp, Bare: true}
+	case verb(0) == "help":
 		return Command{Verb: VerbHelp}
 	case verb(0) == "status":
+		return Command{Verb: VerbStatus}
+	case (verb(0) == "score" || verb(0) == "confidence") && only(words[1:], commandFiller):
+		// What people call the status: the score is what it is about.
 		return Command{Verb: VerbStatus}
 	case verb(0) == "pause" && aboutReviews(words[1:]):
 		return Command{Verb: VerbPause}
 	case (verb(0) == "resume" || verb(0) == "unpause") && aboutReviews(words[1:]):
 		return Command{Verb: VerbResume}
+	case (verb(0) == "recheck" || verb(0) == "re-check" || verb(0) == "check") && only(words[1:], commandFiller, recheckWords):
+		return Command{Verb: VerbRecheck}
+	case reviewWord(verb(0)) && slices.ContainsFunc(words[1:], func(w string) bool { return w == "thread" || w == "finding" }) &&
+		only(words[1:], commandFiller, recheckWords):
+		// "review this thread": one finding, not the pull request, and not a type called "thread".
+		return Command{Verb: VerbRecheck}
 	case verb(0) == "full" && reviewWord(verb(1)):
 		return withTypes(VerbFullReview, words[2:])
 	case verb(0) == "full-review":
@@ -142,12 +179,43 @@ func classify(rest string) Command {
 		return withTypes(VerbReview, words[1:])
 	case verb(0) == "please" && reviewWord(verb(1)):
 		return withTypes(VerbReview, words[2:])
+	case verb(0) == "start" || verb(0) == "begin" || verb(0) == "run":
+		// "start the review", "start a review of this pr", "run the review": a review, once the
+		// words between the verb and "review" are filler.
+		i := 1
+		for i < len(words) && commandFiller[verb(i)] {
+			i++
+		}
+		if reviewWord(verb(i)) || verb(i) == "reviewing" {
+			return withTypes(VerbReview, words[i+1:])
+		}
 	case verb(0) == "fix":
 		return withSeverities(words[1:])
 	case verb(0) == "please" && verb(1) == "fix":
 		return withSeverities(words[2:])
 	}
+	switch {
+	case only(words, thanksWords):
+		return Command{Verb: VerbThanks}
+	case len(words) == 1 && !strings.Contains(words[0], "?"):
+		// Every command that is one word was matched above: this one is none of them.
+		return Command{Verb: VerbUnknown}
+	}
 	return Command{Verb: VerbQuestion}
+}
+
+// only reports whether every word, its trailing punctuation aside, is in one of the sets.
+func only(words []string, sets ...map[string]bool) bool {
+	for _, w := range words {
+		w = strings.TrimRight(w, ".!?:")
+		if w == "" {
+			continue
+		}
+		if !slices.ContainsFunc(sets, func(set map[string]bool) bool { return set[w] }) {
+			return false
+		}
+	}
+	return true
 }
 
 // withSeverities reads the severities named at the start of the words after "fix": "fix p0 p1",

@@ -142,8 +142,11 @@ func (b *Bot) reviewSummaryState(ctx context.Context, r *ReviewRun, pr *ReviewPR
 		sf := review.SummaryFinding{Finding: f.Finding, ID: f.PublicID, Status: f.Status, Placement: f.Placement,
 			Place: f.Place, Note: note, PossiblyOutdated: f.PossiblyOutdated, ClaimedFixedSHA: f.ClaimedFixedSHA,
 			Snippet: f.Snippet, AnchorSHA: f.AnchorSHA}
-		if f.Status == review.FindingFixed || f.Status == review.FindingOutdated {
+		switch f.Status {
+		case review.FindingFixed, review.FindingOutdated:
 			sf.ResolvedIn = reviewResolvedSHA(f.StatusReason)
+		case review.FindingAcknowledged:
+			sf.Reason = f.StatusReason
 		}
 		if f.GitHubCommentID > 0 {
 			sf.CommentURL = fmt.Sprintf("https://github.com/%s/pull/%d#discussion_r%d", pr.Repo, pr.Number, f.GitHubCommentID)
@@ -571,12 +574,17 @@ func (b *Bot) recordReviewID(ctx context.Context, h *reviewHold, id int64) (int6
 }
 
 // reviewPlainNote is the one line of a review with no inline comments: the commit reviewed, the score
-// the summary shows, and where the findings are, linked when the summary comment is known.
+// the summary shows, and where the findings are, linked when the summary comment is known. A review
+// with an open finding never reads as having nothing to say: a P1 the diff could not take a comment
+// on is named by its severity, since a reviewer's "nothing to comment on" beside a 3/5 is read as the
+// all-clear and the summary never opened.
 func reviewPlainNote(st review.SummaryState, summaryURL string) string {
 	var open []review.Finding
+	bySev := map[review.Severity]int{}
 	for _, f := range st.Findings {
-		if (f.Status == "" || f.Status == review.FindingOpen || f.Status == review.FindingDisputed) && !f.Note && !f.PreExisting {
+		if review.Standing(f.Status) && !f.Note && !f.PreExisting {
 			open = append(open, f.Finding)
+			bySev[review.Severity(severityWord(f.Severity))]++
 		}
 	}
 	where := "the summary comment"
@@ -588,13 +596,29 @@ func reviewPlainNote(st review.SummaryState, summaryURL string) string {
 		line += " `" + sha + "`"
 	}
 	line += fmt.Sprintf(" · Confidence %d/5 (advisory). ", review.Score(open, st.FullCoverage, st.InjectionDetected))
-	switch len(open) {
-	case 0:
+	if len(open) == 0 {
 		return line + "Nothing to comment on in the diff; " + where + " has the review."
-	case 1:
-		return line + "No comment on the diff: its one open finding is in " + where + "."
 	}
-	return line + fmt.Sprintf("No comments on the diff: its %d open findings are in %s.", len(open), where)
+	var counts []string
+	for _, sev := range []review.Severity{review.P0, review.P1, review.P2} {
+		if n := bySev[sev]; n > 0 {
+			counts = append(counts, fmt.Sprintf("%d %s", n, sev))
+		}
+	}
+	what := "Its open finding (" + strings.Join(counts, ", ") + ") is"
+	if len(open) > 1 {
+		what = fmt.Sprintf("Its %d open findings (%s) are", len(open), strings.Join(counts, ", "))
+	}
+	return line + what + " listed in " + where + ", not on the diff."
+}
+
+// severityWord is a stored severity as the note counts it: an unknown one is scored as a P2, so it
+// is counted as one.
+func severityWord(s review.Severity) string {
+	if s.Valid() {
+		return string(s)
+	}
+	return string(review.P2)
 }
 
 // adoptReview finds a review the App posted for this run, by its marker; 0 when there is none.

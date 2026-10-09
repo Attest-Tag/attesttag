@@ -449,6 +449,11 @@ const (
 	// FindingDisputed is a finding the author pushed back on twice without new evidence. The
 	// bot still stands by it, so it is still open and still scored.
 	FindingDisputed FindingStatus = "disputed"
+	// FindingAcknowledged is a finding accepted in its thread as a known risk — intended, tracked
+	// separately, out of this change's scope — by somebody who may settle it. The bot does not say
+	// it was wrong, which is what withdrawn says; the team has decided to live with it, so it is no
+	// longer scored and is listed apart with the reason it was given.
+	FindingAcknowledged FindingStatus = "acknowledged"
 )
 
 // Placement is where a finding was posted, as review_findings.placement stores it.
@@ -606,6 +611,9 @@ type SummaryFinding struct {
 	Note bool
 	// ClaimedFixedSHA is a reply's "fixed in <sha>", not yet checked.
 	ClaimedFixedSHA string
+	// Reason is why an acknowledged finding was accepted, as the reply that accepted it gave it: a
+	// person's words, one line, sanitised where it is shown.
+	Reason string
 	// AnchorSHA is the commit the finding's line numbers belong to: the head it was raised on, or
 	// the later head a re-review found its lines unchanged at and moved it to. Its location links
 	// there when no snippet says otherwise — never to a newer head its numbers were not counted in.
@@ -630,9 +638,7 @@ type Snippet struct {
 }
 
 // open reports whether a finding is still standing: open, or disputed but not withdrawn.
-func (f SummaryFinding) open() bool {
-	return f.Status == "" || f.Status == FindingOpen || f.Status == FindingDisputed
-}
+func (f SummaryFinding) open() bool { return Standing(f.Status) }
 
 // maxSummaryRows bounds each list in the summary; the console has the rest.
 const maxSummaryRows = 25
@@ -642,11 +648,12 @@ const maxSummaryRows = 25
 //	<!-- attest_tag:review=<id>.<mac> -->
 //	### attest_tag review · Confidence 3/5 (advisory)
 //	one sentence on the worst open finding
+//	<details> Not reviewed (n) </details>, when the review left something unread
 //	<details open> Summary · Open findings (n) </details>
 //	<details> a section per review type, when more than one ran </details>
 //	<details> Outside the diff · More notes · Beside a masked credential · In unchanged files ·
-//	          Notes · Pre-existing · Open from merged pull requests · Reviewed earlier ·
-//	          Not reviewed · Possibly outdated · Fixed · Outdated </details>
+//	          Notes · Pre-existing · Acknowledged · Open from merged pull requests · Reviewed earlier ·
+//	          Possibly outdated · Fixed · Outdated </details>
 //	<sub>Reviews (n) · Last reviewed abc1234 · …</sub>
 //	<!-- attest_tag:state sha=… score=… open=… -->
 //
@@ -658,16 +665,20 @@ func RenderSummary(s SummaryState, ctx RenderContext) string {
 	findings := slices.Clone(s.Findings)
 	slices.SortStableFunc(findings, compareFindings)
 
-	var open, pre, outside, outdated, more, masked, unchanged, notes, fixed, gone []SummaryFinding
+	var open, pre, outside, outdated, more, masked, unchanged, notes, fixed, gone, acked []SummaryFinding
 	for _, f := range findings {
 		if !f.open() {
 			// What a later review closed is listed apart, collapsed, so a push that fixed something is
-			// seen to have; withdrawn and resolved ones were settled in their threads, and are not.
+			// seen to have; withdrawn and resolved ones were settled in their threads, and are not. An
+			// acknowledged one is listed too: the risk is still in the code, and whoever reads the
+			// summary before merging should see that somebody accepted it, and why.
 			switch f.Status {
 			case FindingFixed:
 				fixed = append(fixed, f)
 			case FindingOutdated:
 				gone = append(gone, f)
+			case FindingAcknowledged:
+				acked = append(acked, f)
 			}
 			continue
 		}
@@ -798,6 +809,10 @@ func RenderSummary(s SummaryState, ctx RenderContext) string {
 	if len(pre) > 0 {
 		body := ctx.entries(pre, p) + "\n\n<sub>Not introduced by this pull request, so not scored.</sub>"
 		blocks = append(blocks, section(false, fmt.Sprintf("Pre-existing (%d)", len(pre)), body))
+	}
+	if len(acked) > 0 {
+		body := "<sub>Accepted in their threads as known risks, so not scored.</sub>\n\n" + ctx.acknowledgedRows(acked, p)
+		blocks = append(blocks, section(false, fmt.Sprintf("Acknowledged (%d)", len(acked)), body))
 	}
 	blocks = append(blocks, ctx.carriedSections(s, p)...)
 	if len(outdated) > 0 {
@@ -949,6 +964,29 @@ func (ctx RenderContext) closedRows(fs []SummaryFinding, p *linkPolicy, how stri
 	}
 	return strings.Join(lines, "\n")
 }
+
+// acknowledgedRows lists findings accepted as known risks, one line each with the reason given:
+// "**P1** · General · Scan error ignored · `store.go:L11` · “tracked separately”". The reason is a
+// person's words, sanitised like the model's and kept to a line.
+func (ctx RenderContext) acknowledgedRows(fs []SummaryFinding, p *linkPolicy) string {
+	var lines []string
+	for i, f := range fs {
+		if i == maxSummaryRows {
+			lines = append(lines, fmt.Sprintf("- …and %d more in the console", len(fs)-i))
+			break
+		}
+		row := fmt.Sprintf("- **%s** · %s · %s · %s", severityLabel(f.Severity), ctx.typeNames(f.Finding, p, inlineMode),
+			threadTitle(f, p), ctx.location(f, p))
+		if why := strings.TrimSpace(sanitize(strings.Join(strings.Fields(f.Reason), " "), p, inlineMode, maxReasonLen)); why != "" {
+			row += " · “" + why + "”"
+		}
+		lines = append(lines, row)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// maxReasonLen bounds an acknowledged finding's reason in the summary: a line, not a paragraph.
+const maxReasonLen = 200
 
 // entries lists findings with their scenario, for the sections whose findings have no inline
 // comment to read it in.

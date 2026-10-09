@@ -111,7 +111,7 @@ func (rig *laneRig) answers() []string {
 	_, _, comments, _ := rig.gh.snapshot()
 	var out []string
 	for _, c := range comments {
-		if !strings.Contains(c.Body, "<!-- attest_tag:") {
+		if c.User.Type == "Bot" && !strings.Contains(c.Body, "<!-- attest_tag:") {
 			out = append(out, c.Body)
 		}
 	}
@@ -374,12 +374,20 @@ func TestReviewCommandStatusAndHelp(t *testing.T) {
 	rig.confirmLock()
 
 	rig.deliver("issue_comment", commentEvent(801, "alice", "MEMBER", "@attesttag status", true))
-	rig.deliver("issue_comment", commentEvent(802, "alice", "MEMBER", "@attesttag", true))
+	rig.deliver("issue_comment", commentEvent(802, "alice", "MEMBER", "@attesttag help", true))
 	a := rig.answers()
 	if len(a) != 2 || !strings.Contains(a[0], "Not reviewed yet") || !strings.Contains(a[1], "`@attesttag full review`") ||
 		!strings.Contains(a[1], "Review types here: `general`, `security`, `tests`, `performance`, `concurrency`, `release`") ||
-		!strings.Contains(a[1], "`@attesttag pause`") || !strings.Contains(a[1], "`@attesttag resume`") {
+		!strings.Contains(a[1], "`@attesttag pause`") || !strings.Contains(a[1], "`@attesttag resume`") ||
+		!strings.Contains(a[1], "`@attesttag <question>`") || !strings.Contains(a[1], "`@attesttag recheck`") ||
+		strings.Contains(a[1], "not answered yet") {
 		t.Fatalf("status before a review, and help: %q", a)
+	}
+	// A bare mention, in any case, is somebody finding out what the bot is: the short help.
+	rig.deliver("issue_comment", commentEvent(804, "alice", "MEMBER", "@AttestTag", true))
+	if a = rig.answers(); len(a) != 3 || !strings.HasPrefix(a[2], "**attest_tag** reviews this pull request.") ||
+		!strings.Contains(a[2], "`@attesttag help` lists everything") || strings.Contains(a[2], "Review types here") {
+		t.Fatalf("a bare mention: %q", a)
 	}
 
 	rig.deliver("pull_request", prEvent("opened", 7, reviewHead))
@@ -414,7 +422,8 @@ func TestReviewCommandFullReview(t *testing.T) {
 
 	rig.deliver("issue_comment", commentEvent(901, "carol", "COLLABORATOR", "@attesttag full review", true))
 	rig.drain()
-	if a := rig.answers(); len(a) != 1 || !strings.Contains(a[0], "is for members of the organisation") {
+	if a := rig.answers(); len(a) != 1 || !strings.Contains(a[0], "for owners and members of the organisation") ||
+		!strings.Contains(a[0], "`@attesttag review` reviews the head now") {
 		t.Fatalf("a collaborator's full review: %q", a)
 	}
 
@@ -440,7 +449,8 @@ func TestReviewCommandFullReview(t *testing.T) {
 	rig.deliver("issue_comment", commentEvent(903, "alice", "OWNER", "@attesttag full review", true))
 	rig.drain()
 	a := rig.answers()
-	if !strings.Contains(a[len(a)-1], "has had a full review in the last day") {
+	if last := a[len(a)-1]; !strings.Contains(last, "has had a full review in the last day") ||
+		!strings.Contains(last, "Another can run on it in about 24 hours") || !strings.Contains(last, "`@attesttag review`") {
 		t.Errorf("a second full review the same day: %q", a)
 	}
 	if n := len(rig.runs(7)); n != 2 {
@@ -448,15 +458,22 @@ func TestReviewCommandFullReview(t *testing.T) {
 	}
 }
 
-// A question in somebody's own words is pointed at help, once an hour; ten commands an hour is
-// what one person gets, and the eleventh is not answered.
-func TestReviewCommandQuestionsAndThrottle(t *testing.T) {
+// One word that is no command is pointed at help, in a line; ten commands an hour is what one
+// person gets, and the eleventh is not answered.
+func TestReviewCommandUnknownWordAndThrottle(t *testing.T) {
 	rig := newLaneRig(t, totalsFixture(), `{"mode":"live"}`)
-	rig.serveConversation()
-	rig.deliver("issue_comment", commentEvent(1001, "alice", "MEMBER", "@attesttag what does Add do?", true))
-	rig.deliver("issue_comment", commentEvent(1002, "alice", "MEMBER", "@attesttag and Get?", true))
-	if a := rig.answers(); len(a) != 1 || !strings.Contains(a[0], "`@attesttag help`") {
-		t.Fatalf("answers to two questions: %q", a)
+	cv := rig.serveConversation()
+	rig.deliver("issue_comment", commentEvent(1001, "alice", "MEMBER", "@attesttag approve", true))
+	rig.deliver("issue_comment", commentEvent(1002, "alice", "MEMBER", "@attesttag thanks!", true))
+	if a := rig.answers(); len(a) != 1 || !strings.Contains(a[0], "`approve` is not something attest_tag does") ||
+		!strings.Contains(a[0], "`@attesttag help`") {
+		t.Fatalf("answers to an unknown word and to thanks: %q", a)
+	}
+	if !cv.has(rig.gh, "issue:1002:+1") || cv.has(rig.gh, "issue:1002:eyes") {
+		t.Errorf("thanks was not taken with a +1: %v", cv.reactions)
+	}
+	if n := len(rig.model.requests("")); n != 0 {
+		t.Errorf("an unknown word or thanks made %d model calls", n)
 	}
 	for i := range 9 {
 		rig.deliver("issue_comment", commentEvent(int64(1010+i), "alice", "MEMBER", "@attesttag help", true))
@@ -467,7 +484,7 @@ func TestReviewCommandQuestionsAndThrottle(t *testing.T) {
 		t.Errorf("the eleventh command in an hour: %+v", last)
 	}
 	if got != 1+8 {
-		t.Errorf("%d answers; want the question's and eight helps before the throttle", got)
+		t.Errorf("%d answers; want the unknown word's and eight helps before the throttle", got)
 	}
 	// Somebody else is not held to alice's count.
 	rig.deliver("issue_comment", commentEvent(1030, "bob", "MEMBER", "@attesttag help", true))

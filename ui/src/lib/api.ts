@@ -2475,7 +2475,7 @@ export type ReviewFindingEvent = {
   run?: string;
 };
 
-export type ReviewFindingStatus = "open" | "withdrawn" | "fixed" | "resolved_by_human" | "outdated" | "disputed";
+export type ReviewFindingStatus = "open" | "withdrawn" | "fixed" | "resolved_by_human" | "outdated" | "disputed" | "acknowledged";
 
 export type ReviewFinding = {
   id: string;

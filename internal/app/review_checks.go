@@ -297,6 +297,12 @@ func normSpace(s string) string { return strings.Join(strings.Fields(s), " ") }
 // and nothing in their hunk was masked; otherwise the summary — "outside the diff" for a changed
 // file, and for a file this pull request does not change only a P0, since anything less about code
 // nobody touched is somebody else's review. "" means nowhere: drop it.
+//
+// A range only part of which the diff shows — a finder citing a function from its signature, above
+// the hunk, down to an unchanged line inside it — is narrowed to the part one hunk shows, and
+// commented on there. GitHub refuses the whole range, and "outside the diff" for a finding whose
+// lines are on the screen in front of the author reads as the reviewer not knowing where it is. Its
+// suggestion goes with the narrowing: it was written to replace the lines it no longer names.
 func (r *reviewRun) place(c *reviewCandidate) string {
 	f := c.file
 	if f == nil {
@@ -306,12 +312,53 @@ func (r *reviewRun) place(c *reviewCandidate) string {
 		return ""
 	}
 	if !review.ValidAnchor(f.Hunks, c.Side, c.StartLine, c.Line) {
-		return reviewWhereOutside
+		start, end, ok := fitAnchor(f.Hunks, c.Side, c.StartLine, c.Line)
+		if !ok {
+			return reviewWhereOutside
+		}
+		c.StartLine, c.Line = start, end
+		if start == end {
+			c.StartLine = 0
+		}
+		c.Suggestion, c.replaced = nil, ""
 	}
 	if hi := f.hunkAt(c.Side, c.Line); hi >= 0 && f.masked[hi] {
 		return reviewWhereMasked
 	}
 	return reviewWhereInline
+}
+
+// fitAnchor is the part of the lines start through line that one hunk shows on side, as a range
+// GitHub will take a comment on: the hunk sharing the most lines with it, the later one of two that
+// share as many, since a finding's own line is its last. ok is false when no hunk shows any of them.
+// Hunks are contiguous on each side (review.Hunk), so the overlap is a range of lines that all exist.
+func fitAnchor(hunks []review.Hunk, side review.Side, start, line int) (from, to int, ok bool) {
+	if start == 0 {
+		start = line
+	}
+	if line < 1 || start < 1 || start > line {
+		return 0, 0, false
+	}
+	best := 0
+	for _, h := range hunks {
+		lo, n := h.NewStart, h.NewLines
+		if side == review.Left {
+			lo, n = h.OldStart, h.OldLines
+		} else if side != review.Right {
+			return 0, 0, false
+		}
+		if n <= 0 {
+			continue
+		}
+		s, e := max(start, lo), min(line, lo+n-1)
+		if s > e || e-s+1 < best {
+			continue
+		}
+		if review.ValidAnchor([]review.Hunk{h}, side, s, e) {
+			from, to, ok, best = s, e, true, e-s+1
+		}
+	}
+	return from, to, ok
 }
 
 // reviewNoSuggestPaths are files a one-click suggestion must never change: a workflow or an action

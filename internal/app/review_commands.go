@@ -36,11 +36,14 @@ import (
 //     organisation buys — and nothing else is done for it.
 //   - What it asks. review queues a review through the lane's one entry point (enqueueReview), past
 //     the filters a review nobody asked for is held to — the "when" setting, drafts, the author
-//     list — but not past fork policy, the throttles or the money. full review does the same from
-//     scratch, for members of the organisation only and once per commit a day. pause and resume
-//     stop and start the pull request's automatic reviews, for members of the organisation too.
-//     status and help are answered at once from what is stored, with no model; a free-form question
-//     is not answered yet, and is pointed at help at most once an hour.
+//     list — but not past fork policy, the throttles or the money; recheck, check again and review
+//     this thread, which on the conversation name no finding, are a review too. full review does the
+//     same from scratch, for members of the organisation only and once per commit a day, and a
+//     refusal says why and when it can run. pause and resume stop and start the pull request's
+//     automatic reviews, for members of the organisation too. status and help are answered at once
+//     from what is stored, with no model, and a bare mention with the short help. A question in
+//     somebody's own words is answered from the code (review_qa.go), as a run of its own in the
+//     lane; one word that is no command is pointed at help, and thanks needs no answer.
 //
 // A command is picked up visibly: an eyes reaction on it, which GitHub may refuse (the permission is
 // not every installation's) without anything else failing. Every answer is Go's own text, passed
@@ -60,8 +63,8 @@ import (
 const (
 	reviewCommandsPerHour = 10
 	// How often each kind of short answer may be given on one pull request: a stranger's refusal a
-	// day, the pointer to help an hour. Both are the same sentence every time, and a thread full of
-	// it is noise a person could make the bot produce on purpose.
+	// day, the note that questions have reached their limit an hour. Both are the same sentence every
+	// time, and a thread full of it is noise a person could make the bot produce on purpose.
 	reviewRefusalEvery  = 24 * time.Hour
 	reviewQuestionEvery = time.Hour
 	// A full review of one commit, at most once in this.
@@ -329,16 +332,24 @@ func (b *Bot) reviewCommand(ctx context.Context, d *githubDelivery, p *githubIss
 	if err := c.where(ctx, eff); err != nil {
 		return err
 	}
-	// Picked up. A reaction GitHub refuses — the installation may not have granted it — costs the
-	// person the signal and nothing else.
+	// Picked up — or, for thanks, which needs no answer, taken. A reaction GitHub refuses — the
+	// installation may not have granted it — costs the person the signal and nothing else.
 	if !c.quiet {
-		if err := c.gh.ReactToIssueComment(ctx, p.Comment.ID, "eyes"); err != nil {
-			slog.Debug("code review: no eyes reaction on a command", "repo", c.repo, "pr", c.n, "err", err)
+		react := "eyes"
+		if cmd.Verb == review.VerbThanks {
+			react = "+1"
+		}
+		if err := c.gh.ReactToIssueComment(ctx, p.Comment.ID, react); err != nil {
+			slog.Debug("code review: no reaction on a command", "repo", c.repo, "pr", c.n, "err", err)
 		}
 	}
 
 	switch cmd.Verb {
 	case review.VerbHelp:
+		if cmd.Bare {
+			c.audit(ctx, "answered", nil)
+			return c.answer(ctx, reviewShortHelpText(slug))
+		}
 		keys, err := b.reviewTypeKeys(ctx, d.OrgID)
 		if err != nil {
 			return err
@@ -353,14 +364,23 @@ func (b *Bot) reviewCommand(ctx context.Context, d *githubDelivery, p *githubIss
 		c.audit(ctx, "answered", nil)
 		return c.answer(ctx, text)
 	case review.VerbQuestion:
-		if !b.store.AlertOnce(ctx, d.OrgID, fmt.Sprintf("review-question:%s#%d", strings.ToLower(c.repo), c.n), reviewQuestionEvery) {
-			c.audit(ctx, "ignored: a question was pointed at help within the hour", nil)
-			return nil
-		}
-		c.audit(ctx, "answered", nil)
-		return c.answer(ctx, fmt.Sprintf("Questions in your own words are not answered yet. "+
-			"`@%s help` lists what attest_tag does on a pull request.", slug))
-	case review.VerbReview, review.VerbFullReview:
+		return c.question(ctx)
+	case review.VerbUnknown:
+		// A command misremembered, most likely: one line saying so beats silence, and beats a model
+		// guessing at what one word meant.
+		c.audit(ctx, "answered: not a command", nil)
+		// "\x60" is a backtick, kept out of a code span it could close.
+		word := strings.Trim(strings.ReplaceAll(strings.Join(strings.Fields(cmd.Text), " "), "\x60", ""), " .!:,")
+		word, _ = cutRunes(word, 40)
+		return c.answer(ctx, fmt.Sprintf("`%s` is not something attest_tag does. `@%s help` lists what it does; "+
+			"a question in a sentence, `@%s <question>`, is answered from the code.", word, slug, slug))
+	case review.VerbThanks:
+		c.audit(ctx, "thanked", nil)
+		return nil
+	case review.VerbReview, review.VerbFullReview, review.VerbRecheck:
+		// A recheck on the conversation names no finding: the head is reviewed, which looks again at
+		// every earlier finding whose code changed. In a finding's thread it is that finding's
+		// (reviewThreadAsk).
 		return c.review(ctx)
 	case review.VerbPause, review.VerbResume:
 		return c.pause(ctx, cmd.Verb == review.VerbPause)
@@ -465,8 +485,9 @@ func (c *reviewCommandCall) review(ctx context.Context) error {
 	b, d, full := c.b, c.d, c.cmd.Verb == review.VerbFullReview
 	if full && !reviewOrgMember(c.p.Comment.AuthorAssociation) {
 		c.audit(ctx, "refused: a full review is for members of the organisation", nil)
-		return c.answer(ctx, fmt.Sprintf("`@%s full review` is for members of the organisation that owns this repository. "+
-			"`@%s review` reviews the head.", c.slug, c.slug))
+		return c.answer(ctx, fmt.Sprintf("Not run: `@%s full review` reviews code already reviewed all over again, which is for "+
+			"owners and members of the organisation that owns this repository — one of them can ask for it. "+
+			"`@%s review` reviews the head now.", c.slug, c.slug))
 	}
 	if len(c.cmd.Types) > 0 {
 		keys, err := b.reviewTypeKeys(ctx, d.OrgID)
@@ -498,14 +519,13 @@ func (c *reviewCommandCall) review(ctx context.Context) error {
 	case full:
 		scope = reviewScopeWhole
 		if row != nil {
-			done, err := b.store.reviewFullRunsSince(ctx, d.OrgID, row.ID, pull.Head.SHA, nowMinus(reviewFullEvery))
+			last, err := b.store.reviewLastFullRun(ctx, d.OrgID, row.ID, pull.Head.SHA, nowMinus(reviewFullEvery))
 			if err != nil {
 				return err
 			}
-			if done > 0 {
+			if last != "" {
 				c.audit(ctx, "refused: a full review of this commit ran in the last day", map[string]any{"head": pull.Head.SHA})
-				return c.answer(ctx, fmt.Sprintf("`%s` has had a full review in the last day. A push gets a new review with `@%s review`.",
-					shortSHA(pull.Head.SHA), c.slug))
+				return c.answer(ctx, reviewFullRefusal(pull.Head.SHA, last, c.slug))
 			}
 		}
 	case row != nil && row.LastReviewedSHA != "" && row.LastReviewedSHA != pull.Head.SHA:
@@ -528,6 +548,25 @@ func (c *reviewCommandCall) review(ctx context.Context) error {
 	// The review is the answer, and the eyes say it is coming.
 	c.audit(ctx, "queued", map[string]any{"run": run.PublicID, "head": pull.Head.SHA})
 	return nil
+}
+
+// reviewFullRefusal says why a full review of head was not run — one ran on it at since, a stored
+// time, and a commit gets one a day — and when one can: the time that day is up, or after a push.
+func reviewFullRefusal(head, since, slug string) string {
+	when := "tomorrow"
+	if t, ok := parseStoreTime(since); ok {
+		left := time.Until(t.Add(reviewFullEvery))
+		switch {
+		case left <= time.Minute:
+			when = "in a minute"
+		case left < time.Hour:
+			when = fmt.Sprintf("in about %d minutes", int(left.Minutes())+1)
+		default:
+			when = fmt.Sprintf("in about %d hours", int(left.Hours()+0.5))
+		}
+	}
+	return fmt.Sprintf("Not run: `%s` has had a full review in the last day, and one commit gets one a day. Another can run on it %s. "+
+		"After a push, `@%s review` reviews the new head, and a full review of it can run at once.", shortSHA(head), when, slug)
 }
 
 // answerCachedCommand tells the person who asked for a review that it already exists: the same
@@ -629,7 +668,24 @@ func reviewKeyList(keys []string) string {
 	return strings.Join(quoted, ", ")
 }
 
-// reviewHelpText is the answer to help, and to a bare mention.
+// reviewShortHelpText is the answer to a bare mention: what the bot is and the three things most
+// people want, with the way to the rest. Somebody who typed only the name is finding out, and the
+// whole help is a wall to them.
+func reviewShortHelpText(slug string) string {
+	return fmt.Sprintf("**attest_tag** reviews this pull request. `@%s review` reviews the head, `@%s status` says where the "+
+		"review stands, and `@%s` followed by a question asks about the change. `@%s help` lists everything.", slug, slug, slug, slug)
+}
+
+// reviewThreadHelpText is the answer to a bare mention, or help, in a finding's thread: what can be
+// said there, about the finding.
+func reviewThreadHelpText(slug string) string {
+	return fmt.Sprintf("Reply here to dispute this finding or ask about it, and you get a verdict. Reply `intended`, or say why "+
+		"the risk is accepted, to acknowledge it: it then stops counting. `@%s recheck` checks it again at the head, and "+
+		"`@%s fix` has it fixed on this pull request where fixes are allowed. `@%s help` on the conversation lists everything.",
+		slug, slug, slug)
+}
+
+// reviewHelpText is the answer to help.
 func reviewHelpText(slug string, keys []string) string {
 	var b strings.Builder
 	b.WriteString("**attest_tag code review** answers these, at the start of a comment:\n\n")
@@ -643,10 +699,13 @@ func reviewHelpText(slug string, keys []string) string {
 		"and a review somebody asks for still runs.\n", slug, slug, reviewAutoPauseAfter)
 	fmt.Fprintf(&b, "- `@%s fix` has attest_tag fix the open findings and push the commit to this pull request's branch; "+
 		"`@%s fix p0 p1` fixes those severities only. For people who can push to the repository, when its review settings allow fixes.\n", slug, slug)
+	fmt.Fprintf(&b, "- `@%s <question>` — anything that is not one of these — is answered from the pull request's code, "+
+		"diff and review. It changes no finding.\n", slug)
 	fmt.Fprintf(&b, "- `@%s help` is this.\n\n", slug)
 	b.WriteString("Reply in a finding's thread to dispute it or ask about it, and you get a verdict; " +
-		"say it is fixed, and the summary records your claim.")
-	fmt.Fprintf(&b, " Reply `@%s fix` there, or tick the fix box on the finding, and it is fixed on the pull request.\n\n", slug)
+		"say it is fixed, and the summary records your claim; reply `intended`, or why the risk is accepted, to acknowledge it.")
+	fmt.Fprintf(&b, " Reply `@%s recheck` there to have it checked again at the head, and `@%s fix`, or tick the fix box on the "+
+		"finding, to have it fixed on the pull request.\n\n", slug, slug)
 	b.WriteString("Review types here: " + reviewKeyList(keys) + ".")
 	return b.String()
 }
@@ -683,7 +742,7 @@ func (b *Bot) reviewStatusText(ctx context.Context, orgID int64, repo string, n 
 	default:
 		add("Confidence **%d/5** (advisory).", score)
 		bySev := map[review.Severity]int{}
-		var claimed, disputed, withdrawn, fixed int
+		var claimed, disputed, withdrawn, fixed, acknowledged int
 		for _, f := range st.Findings {
 			switch {
 			case f.Note || f.PreExisting:
@@ -699,6 +758,8 @@ func (b *Bot) reviewStatusText(ctx context.Context, orgID int64, repo string, n 
 				withdrawn++
 			case f.Status == review.FindingFixed:
 				fixed++
+			case f.Status == review.FindingAcknowledged:
+				acknowledged++
 			}
 		}
 		var parts []string
@@ -715,7 +776,8 @@ func (b *Bot) reviewStatusText(ctx context.Context, orgID int64, repo string, n 
 		for _, x := range []struct {
 			n    int
 			what string
-		}{{claimed, "claimed fixed"}, {disputed, "disputed"}, {withdrawn, "withdrawn"}, {fixed, "fixed"}} {
+		}{{claimed, "claimed fixed"}, {disputed, "disputed"}, {withdrawn, "withdrawn"}, {fixed, "fixed"},
+			{acknowledged, "acknowledged"}} {
 			if x.n > 0 {
 				extra = append(extra, fmt.Sprintf("%d %s", x.n, x.what))
 			}
