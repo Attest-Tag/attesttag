@@ -52,16 +52,17 @@ func (s *Store) addReviewFindingBotReply(ctx context.Context, orgID, id int64) e
 	return reviewFindingWritten(res, err)
 }
 
-// reviewFullRunsSince counts the full reviews asked for on a pull request's head since a time in the
-// stored format: the ones that are queued, running or came to something, since a full review that
-// failed or was refused answered nothing and the person may ask again. A full review is known by its
-// dedupe key (enqueueReview), which is the only thing on the row that says so.
-func (s *Store) reviewFullRunsSince(ctx context.Context, orgID, prID int64, head, since string) (int, error) {
-	var n int
-	err := s.db.QueryRowContext(ctx, `select count(*) from review_runs
+// reviewLastFullRun is when the newest full review asked for on a pull request's head since a time in
+// the stored format was asked for, or "" for none: the ones that are queued, running or came to
+// something, since a full review that failed or was refused answered nothing and the person may ask
+// again. When is what the refusal of another tells them (reviewFullRefusal). A full review is known
+// by its dedupe key (enqueueReview), which is the only thing on the row that says so.
+func (s *Store) reviewLastFullRun(ctx context.Context, orgID, prID int64, head, since string) (string, error) {
+	var at sql.NullString
+	err := s.db.QueryRowContext(ctx, `select max(created_at) from review_runs
 		where org_id=? and review_pr_id=? and kind='review' and dedupe_key like 'full:%' and head_sha=? and created_at>=?
-		  and status not in ('cancelled','skipped','failed','superseded')`, orgID, prID, head, since).Scan(&n)
-	return n, err
+		  and status not in ('cancelled','skipped','failed','superseded')`, orgID, prID, head, since).Scan(&at)
+	return at.String, err
 }
 
 // reviewActiveRun is the newest review of a pull request still queued or running, or nil: what the

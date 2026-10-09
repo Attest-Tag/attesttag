@@ -915,7 +915,7 @@ type ReviewFinding struct {
 }
 
 var reviewFindingStatuses = []review.FindingStatus{review.FindingOpen, review.FindingWithdrawn, review.FindingFixed,
-	review.FindingResolved, review.FindingOutdated, review.FindingDisputed}
+	review.FindingResolved, review.FindingOutdated, review.FindingDisputed, review.FindingAcknowledged}
 
 const reviewFindingCols = `id, public_id, org_id, review_pr_id, first_run_id, last_run_id, review_type, review_types, path,
 	side, start_line, line, anchor_sha, code_hash, placement, kind, severity, category, title, body, suggestion, evidence,

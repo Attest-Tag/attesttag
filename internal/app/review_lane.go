@@ -586,7 +586,7 @@ func (b *Bot) enqueueReview(ctx context.Context, orgID int64, repo string, pr in
 			scope = reviewScopeSinceLast
 		}
 	}
-	// A full review is told apart by its key, so the once-a-day check (reviewFullRunsSince) can find
+	// A full review is told apart by its key, so the once-a-day check (reviewLastFullRun) can find
 	// it, and keeps the mark when the key moves on below.
 	prefix := reviewKeyTrigger(req.Trigger)
 	if req.Full {
@@ -1295,6 +1295,8 @@ func (b *Bot) nextReviewRun(ctx context.Context) bool {
 		b.processResync(runCtx, ctx, h)
 	case "reply":
 		b.processReply(runCtx, ctx, h)
+	case "answer":
+		b.processAnswer(runCtx, ctx, h)
 	default:
 		b.endReviewRun(ctx, h, ReviewRunResult{Status: "failed", Score: -1, Error: "the lane does not run " + r.Kind + " runs yet"})
 	}

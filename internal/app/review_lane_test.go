@@ -712,7 +712,7 @@ func TestReviewLaneRefusedAnchorsAreCheckedAgain(t *testing.T) {
 		// With nothing inline, the review that keeps the App among the reviewers says where it went.
 		summary := fmt.Sprintf("[summary comment](https://github.com/acme/web/pull/7#issuecomment-%d)", comments[0].ID)
 		if plain := posts[1]; len(plain["comments"].([]reviewInlineComment)) != 0 ||
-			!strings.Contains(plain["body"].(string), "No comment on the diff: its one open finding is in the "+summary) {
+			!strings.Contains(plain["body"].(string), "Its open finding (1 P1) is listed in the "+summary+", not on the diff.") {
 			t.Errorf("the review after the refusal: %v", plain)
 		}
 		run := rig.runs(7)[0]
