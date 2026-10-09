@@ -132,10 +132,10 @@ func jobChecklist(j *Job, events []JobEvent) string {
 		b.WriteString(glyph + " " + st.label)
 	}
 	if last != "" && !jobTerminal(j.Status) {
-		b.WriteString("\n_" + escapeMrkdwn(truncate(oneLine(last), 200)) + "_")
+		b.WriteString("\n_" + escapeMrkdwn(truncate(oneLine(PublicJobText(last)), 200)) + "_")
 	}
 	if j.Error != "" && (j.Status == JobFailed || j.Status == JobTimeout) {
-		b.WriteString("\n" + escapeMrkdwn(truncate(oneLine(j.Error), 300)))
+		b.WriteString("\n" + escapeMrkdwn(truncate(oneLine(publicJobError(j.Error)), 300)))
 	}
 	return b.String()
 }
@@ -282,18 +282,21 @@ func (r *JobRunner) postReport(ctx context.Context, j *Job, res *JobResult) stri
 	if _, err := sl.PostMarkdown(ctx, j.Channel, j.ThreadTS, text, ""); err != nil {
 		slog.Warn("job report post failed", "job", j.ID, "err", err)
 	}
-	// Attachments: the diff the worker uploaded, and the log tail when there is one.
+	// Attachments: the diff the worker uploaded, and the log tail when there is one. The thread's
+	// copy of the log is PublicJobText's; the console's keeps the engine's own words.
 	if diff, _, _, err := r.store.JobFile(ctx, j.OrgID, j.ID, "diff"); err == nil && strings.TrimSpace(diff) != "" {
 		r.attach(ctx, j, "diff", fmt.Sprintf("fix-job-%d.diff", j.ID), fmt.Sprintf("Fix job #%d diff", j.ID), diff, "diff", "txt")
 	}
 	if tail := strings.TrimSpace(res.LogTail); tail != "" && (j.Status != JobSucceeded || len(tail) > 1500) {
-		r.attach(ctx, j, "log", fmt.Sprintf("fix-job-%d-log.txt", j.ID), fmt.Sprintf("Fix job #%d log", j.ID), tail, "text", "txt")
+		r.store.PutJobFile(ctx, j.OrgID, j.ID, "log", tail)
+		r.attach(ctx, j, "log", fmt.Sprintf("fix-job-%d-log.txt", j.ID), fmt.Sprintf("Fix job #%d log", j.ID), PublicJobText(tail), "text", "txt")
 	}
 	return text
 }
 
 // jobReport is the outcome message: what happened, what the checks said in every package the job
-// checked, what changed without being checked, and what it cost.
+// checked, what changed without being checked, and what it cost. What the worker wrote goes through
+// PublicJobText and publicJobError (jobs_public.go) first: the thread is not the console.
 func jobReport(j *Job, res *JobResult) string {
 	var b strings.Builder
 	switch j.Status {
@@ -318,7 +321,7 @@ func jobReport(j *Job, res *JobResult) string {
 			fmt.Fprintf(&b, " at %s", strings.ReplaceAll(j.Phase, "_", " "))
 		}
 		if j.Error != "" {
-			b.WriteString(" — " + escapeMrkdwn(truncate(oneLine(j.Error), 300)))
+			b.WriteString(" — " + escapeMrkdwn(truncate(oneLine(publicJobError(j.Error)), 300)))
 		}
 	case JobCancelled:
 		fmt.Fprintf(&b, ":octagonal_sign: *Fix job #%d cancelled*", j.ID)
@@ -339,11 +342,11 @@ func jobReport(j *Job, res *JobResult) string {
 			b.WriteString("\nNothing was pushed.")
 		}
 	}
-	if s := strings.TrimSpace(res.Summary); s != "" {
+	if s := strings.TrimSpace(PublicJobText(res.Summary)); s != "" {
 		b.WriteString("\n*Summary:* " + escapeMrkdwn(truncate(s, 1500)))
 	}
 	if res.Note != "" {
-		b.WriteString("\n:warning: " + escapeMrkdwn(truncate(oneLine(res.Note), 300)))
+		b.WriteString("\n:warning: " + escapeMrkdwn(truncate(oneLine(PublicJobText(res.Note)), 300)))
 	}
 	if res.CheckNote != "" {
 		b.WriteString("\n:warning: " + escapeMrkdwn(truncate(oneLine(res.CheckNote), 300)))
@@ -471,9 +474,6 @@ func (r *JobRunner) attach(ctx context.Context, j *Job, kind, filename, title, c
 	if err != nil {
 		slog.Warn("job file upload failed", "job", j.ID, "kind", kind, "err", err)
 		return
-	}
-	if kind == "log" {
-		r.store.PutJobFile(ctx, j.OrgID, j.ID, "log", content)
 	}
 	r.store.SetJobFileLink(ctx, j.OrgID, j.ID, kind, fileID, link)
 	r.store.AddArtifact(ctx, j.OrgID, &Artifact{TeamID: j.TeamID, Channel: j.Channel, ThreadTS: j.ThreadTS, CreatedBy: j.Requester, Title: title, Kind: artifactKind,

@@ -558,14 +558,14 @@ func reviewFixReport(j *Job, res *JobResult, spec JobSpec, slug, diff string) st
 	case JobSucceeded:
 		sha := res.HeadSHA
 		fmt.Fprintf(&b, "Pushed [`%s`](https://github.com/%s/commit/%s) to `%s`, fixing %s.", shortSHA(sha), spec.Repo, sha, spec.Branch, what)
-		if sum := strings.TrimSpace(res.Summary); sum != "" {
+		if sum := strings.TrimSpace(PublicJobText(res.Summary)); sum != "" {
 			b.WriteString("\n\n" + truncate(sum, 1500))
 		}
 		if checks := fixChecksLine(res); checks != "" {
 			b.WriteString("\n\n" + checks)
 		}
 		if res.Note != "" {
-			b.WriteString("\n\n> Note: " + truncate(oneLine(res.Note), 500) + ".")
+			b.WriteString("\n\n> Note: " + truncate(oneLine(PublicJobText(res.Note)), 500) + ".")
 		}
 		b.WriteString("\n\nA review of the new head follows, and closes what the commit fixed.")
 	case JobCancelled:
