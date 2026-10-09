@@ -116,7 +116,11 @@ already. Every pull request is a draft, and no setting changes that; on a reposi
 Build output and lockfiles the install step generated are never committed. Progress comes back as
 events; one checklist message in the thread
 (`○ clone → ○ set up and check → ○ fix → ○ build and test → ○ pull request`) is edited as they
-arrive, and the result is posted with the PR link, the diff and the log as files. *stop* in the
+arrive, and the result is posted with the PR link, the diff and the log as files. When the model
+provider refuses a call, the pull request, its commit, the thread and an answer on GitHub give a
+plain reason (credit or key limit reached, rate limited, or the provider's status code). The
+provider's own message names the account and key the call was made on, so it stays on the job in
+the console and in the server log. *stop* in the
 thread, `!job cancel <id>` or the console's Cancel end a job; the worker learns on its next event
 and pushes nothing further. A job that goes quiet for five minutes is marked stale, checked against
 the platform that started it, and given up on after fifteen more; jobs survive a bot restart
