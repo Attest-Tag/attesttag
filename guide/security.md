@@ -81,15 +81,16 @@ code instead ([code review](code-review.md)):
 - **The pull request does not instruct it.** Instruction files are read at the base commit, and a
   pull request from a fork is reviewed only when one of the repository's people asks.
 
-On the same pull requests, and nowhere else, it answers `@` commands from the repository's own
-people ([who they are](code-review.md#commands)) — anybody else is ignored, or on a public
-repository told once a day that only they can ask — and replies in its own findings' threads.
+On the same pull requests, and nowhere else, it answers `@` commands and questions from the
+repository's own people ([who they are](code-review.md#who-may-give-commands)) — anybody else is
+ignored, or on a public repository told once a day that only they can ask — and replies in its own
+findings' threads. An answer to a question changes no finding.
 Where a pull request's review is recorded in *Shadow*, by its repository's mode or by the branch
 rule it falls under, nothing is said on it at all.
 
 ### A reply cannot talk a finding away
 
-A reply can withdraw or downgrade a P0 or P1 finding only when it comes from one of the
+A reply can withdraw, downgrade or acknowledge a P0 or P1 finding only when it comes from one of the
 repository's own people or from the author of a pull request from the same repository, and only on
 a verdict reached by reading the code at the head. Resolving the finding's thread on GitHub is held
 to the same, so the author of a pull request from a fork who resolves it leaves it open and
@@ -422,9 +423,9 @@ console pressed anything, and naming the person on GitHub whose word it acted on
 - **What it did**, with the system as the actor, each naming the pull request: posting a review
   (`review.posted`, with the commit, the review and summary comment it left, and the score);
   skipping one for the money, the daily throttles, or because nothing in the pull request was left
-  to review (`review.skipped`); every answer it posted in a finding's thread (`review.replied`,
-  naming whom it answered); every finding withdrawn, downgraded, disputed or resolved on somebody's
-  word (`review.finding_changed`, naming whose); a P0 or P1 kept open when its thread was resolved
+  to review (`review.skipped`); every answer it posted in a finding's thread or to a question
+  (`review.replied`, naming whom it answered); every finding withdrawn, downgraded, acknowledged,
+  disputed or resolved on somebody's word (`review.finding_changed`, naming whose); a P0 or P1 kept open when its thread was resolved
   by somebody without the authority to close it (`review.finding_kept`); every rule proposed
   from a reply (`review.rule_proposed`, naming who asked); a closed finding's thread resolved on
   GitHub (`review.thread_resolved`, saying whether it was fixed or withdrawn); a pull request's

@@ -531,6 +531,8 @@ that. Go renders it from what the database holds, so it changes the moment a fin
 - *Outside the diff*, *More notes*, *Beside a masked credential*, *In unchanged files* (P0s only),
   *Notes* (said and never scored — a credential-shaped string in a test fixture) and *Pre-existing*
   (not introduced by this pull request, never scored, at most two);
+- **Acknowledged**, folded: findings accepted in their threads as known risks, each with the reason
+  it was given in one line, not scored;
 - **Not reviewed**: the changed files it did not read — binary, generated, ignored, too large, or
   past the money — and any review type that did not run, with why;
 - **Possibly outdated**: findings in files that changed after the reviewed commit, kept off the
@@ -584,8 +586,8 @@ The score is computed in Go from the open findings, never asked of the model:
 | two or more P0s | 0 |
 
 Pre-existing findings and notes never count. A disputed finding, or one somebody says is fixed,
-still does; a withdrawn one, one whose thread a person resolved, and one a later review found fixed
-or gone do not. The score is capped at
+still does; a withdrawn one, one [acknowledged](#acknowledging-a-known-risk) as a known risk, one
+whose thread a person resolved, and one a later review found fixed or gone do not. The score is capped at
 4 when the review could not read every reviewable changed line, or when the diff carries text
 written to steer the reviewer — talking a reviewer out of reporting anything is the easiest attack
 on one — and the summary says which. It is advisory: nothing on GitHub reads it, and the check that
@@ -623,20 +625,23 @@ is a command:
 
 | command | what it does |
 |---|---|
-| `@<app> review` | reviews the head, with the types its branch rule picks. On a head already reviewed with the same types and settings it says so and spends nothing |
+| `@<app> review` | reviews the head, with the types its branch rule picks. On a head already reviewed with the same types and settings it says so and spends nothing. `start the review`, `re-review`, `review again` and `check again` ask the same |
 | `@<app> review security` | the same, with the types named (up to ten keys) instead of the rule's |
-| `@<app> full review` | reviews again from scratch, even a commit already reviewed: for owners and members of the organisation, once per commit a day |
-| `@<app> status` | the score and why, the open findings by severity, the commit last reviewed and whether the head has moved, and why the last request was not reviewed — from what is stored, with no model call. `@<app> why is the score 3?` asks the same |
-| `@<app> help` | the commands and the review types here. A bare mention asks for it too |
+| `@<app> full review` | reviews again from scratch, even a commit already reviewed: for owners and members of the organisation, once per commit a day. A refusal says why, and when one can run |
+| `@<app> status` | the score and why, the open findings by severity, the commit last reviewed and whether the head has moved, and why the last request was not reviewed — from what is stored, with no model call. `score`, `confidence` and `why is the score 3?` ask the same |
+| `@<app> help` | the commands and the review types here. A bare mention, in any case, gets a short version |
 | `@<app> pause`, `@<app> resume` | stop and start the pull request's automatic reviews, for owners and members of the organisation ([pausing](#pausing-automatic-reviews)) |
 | `@<app> fix` | fixes the open findings with a commit pushed to the pull request's branch; `@<app> fix p0 p1` only those severities. For people who can push to the repository ([fixing a finding](#fixing-a-finding-on-the-pull-request)) |
+| `@<app> <question>` | anything else, in a sentence, is a question, answered from the code ([questions](#questions-to-the-reviewer)) |
 
 `<app>` is the App's slug (`GITHUB_APP_SLUG`), and `@<app>[bot]` works as well. The mention has to
 be followed by a space, a comma, a colon or the end of the line, so a development App called
 `<app>-dev` installed beside it never answers for this one. A mention mid-sentence, in
 a quote or in code is talking about the bot rather than to it, and an edited comment is not a new
-command. Anything else after the mention is a question, which is not answered yet: the bot points
-at help, once an hour.
+command. One word that is no command — `@<app> approve` — gets one line pointing at help, and
+thanks gets nothing.
+
+### Who may give commands
 
 Commands are taken from the repository's own people: whoever GitHub marks on the comment as its
 owner, a member of the organisation that owns it, or somebody invited to collaborate on it. Anybody
@@ -646,6 +651,24 @@ reaction, and skips *When*, drafts, the bots to review and the authors to skip �
 but not fork policy, the money or the throttles. On a pull request whose review is recorded in
 shadow a command is acted on and nothing is written to GitHub. Each is audited (`review.command`)
 with what it came to.
+
+### Questions to the reviewer
+
+`@<app>` followed by anything that is not a command — `@<app> is Add ever called without the
+lock?` — on the conversation is a question, answered there from the code. The default model is
+shown the pull request's title and description, what the latest review says (its score, its
+summary, and every finding with where it stands), and the diff, masked as a review's is and cut
+past 30,000 characters; it may read more with the reviewer's own read-only tools, four rounds at
+most. The answer is at most 1,200 characters, under a line naming the commit it read and saying it
+changed nothing: a question never withdraws, acknowledges or rechecks a finding, and an answer
+that finds one wrong points at its thread, where a reply does. In a finding's thread a question is
+a reply, and is answered as one.
+
+Questions are taken from the people commands are. On top of the commands' limit, one person gets
+five answered an hour and a pull request twenty a day; past either, one line an hour says so. Each
+holds $0.10 of the review budgets while it runs, its spend is charged to whoever asked, and its
+answer is audited (`review.replied`). On a pull request whose review is recorded in shadow nothing
+is asked or answered, and a review recorded in shadow is never described to a question.
 
 ### Pausing automatic reviews
 
@@ -668,7 +691,7 @@ follows. The API is `paused`, `paused_by` (`auto` or `member`) and `auto_reviews
 ## Replies in a finding's thread
 
 Replies are answered only on a pull request whose review is posted live. A reply to one of the
-review's inline comments is sorted, on the default model, into one of five kinds:
+review's inline comments is sorted, on the default model, into one of six kinds:
 
 - **thanks** gets a +1 reaction and nothing else.
 - **fixed** ("fixed in abc1234") gets no answer: the claim is recorded and shown in the summary, and
@@ -676,18 +699,45 @@ review's inline comments is sorted, on the default model, into one of five kinds
   *Fixed in* in its thread, or answered *Still present* once — or a person resolves its thread.
 - **remember** ("remember that we always …") proposes a rule on the finding's review type, from the
   repository's own people only. It does nothing until somebody accepts it under Reviews › Types.
+- **acknowledge** — intended, tracked separately, won't fix, out of this change's scope — accepts
+  the risk instead of disputing it ([acknowledging](#acknowledging-a-known-risk)).
 - **pushback** is judged on the review's model, reading the code at the head with read-only tools:
-  withdraw, downgrade, or keep. The answer opens with the verdict and ends with what happened to the
-  finding and the score now, both written by Go, so the model's words can explain a change but never
-  claim one that was not made. A second pushback that brings nothing new marks the finding
-  *disputed*, and it still counts until a person resolves the thread or a later review finds it
-  [fixed or gone](#when-a-push-fixes-a-finding).
+  withdraw, downgrade, or keep. A reply that refutes the trigger the finding names withdraws it; if
+  a narrower case may remain, the answer says so in a sentence and leaves it to `@<app> review`.
+  A downgrade is for a trigger that stands with a smaller impact. The answer opens with the verdict
+  and ends with what happened to the finding and the score now, both written by Go, so the model's
+  words can explain a change but never claim one that was not made. A second pushback that brings
+  nothing new marks the finding *disputed*; it still counts until a person resolves the thread or a
+  later review finds it [fixed or gone](#when-a-push-fixes-a-finding).
 - **question** is answered the same way, and never changes the finding.
 
-A reply is never answered to a bot, a thread gets three answers at most, a pull request twenty a
-day, and one person twenty an hour, or five for somebody who is not one of the repository's own
-people. Each answer holds $0.15 of the review budgets while it runs. Every change to a finding is
-audited (`review.finding_changed`, naming whose word it was), and the summary and the score follow.
+A verdict is never given twice. Once the bot has kept a finding, a pushback with nothing new gets
+one line — *Nothing new to weigh since my last reply — reply `intended` if this is a known,
+accepted risk* — and the next one no answer. A reply is never answered to a bot, a thread gets
+three answers at most, a pull request twenty a day, and one person twenty an hour, or five for
+somebody who is not one of the repository's own people. Each answer holds $0.15 of the review
+budgets while it runs. Every change to a finding is audited (`review.finding_changed`, naming whose
+word it was), and the summary and the score follow.
+
+### Acknowledging a known risk
+
+A reply that accepts the risk a finding names, rather than disputing it, acknowledges the finding,
+with no verdict to weigh: it leaves the score and the risk line, the summary lists it under
+*Acknowledged* with the reason the reply gave, in one line, and the bot answers once, briefly.
+Nothing more in the thread is answered, and later reviews do not raise it again. Acknowledging a P0
+or P1 takes what withdrawing one does ([who may](#who-may-withdraw-a-p0-or-p1)); anybody else is
+told so politely, and it still counts.
+
+### Rechecking a finding
+
+`@<app> recheck` in a finding's thread — or `check again`, `review this thread`, or a plain
+`@<app> review` there — looks at that finding again at the head, shown none of the thread: when its
+code changed since it was raised, first the check a push gets ([when a push fixes a
+finding](#when-a-push-fixes-a-finding)), then the review's verifier. Fixed closes it, refuted
+withdraws it, confirmed at a lower severity lowers it — a P0 or P1 only when the person asking may
+withdraw one — and anything else leaves it as it was; the score follows. Asked again before a push,
+it is answered from the same look for nothing. A bare mention in a thread gets the thread's short
+help. Both are replies, held to the same limits.
 
 ## Fixing a finding on the pull request
 
@@ -727,10 +777,11 @@ pushed may treat the App as a stranger.
 
 ### Who may withdraw a P0 or P1
 
-A P0 or P1 is withdrawn or downgraded only on a reply from one of the repository's own people, or
-from the author of a pull request opened from the same repository — never from a fork — and a
-withdrawal only on a verdict reached by reading the code at the head. Anybody else gets the
-reasoning and an unchanged finding. They can argue a P2 down, and then only when a second look at
+A P0 or P1 is withdrawn, downgraded or acknowledged as a known risk only on a reply from one of the
+repository's own people, or from the author of a pull request opened from the same repository —
+never from a fork — and a withdrawal only on a verdict reached by reading the code at the head.
+Anybody else gets the reasoning and an unchanged finding; a recheck they ask for says what it found
+and changes nothing. They can argue a P2 down, and then only when a second look at
 the code, shown the finding and the head and not a word of the thread, refutes it as well: a
 verdict reached reading a stranger's text must not rest on that text.
 
@@ -925,8 +976,8 @@ The finder runs on a type's own model when it has one, else on the settings' mod
 verifies; a cheaper finder is a type model set to the default model or a cheaper one offered to
 channels. Each further
 review type adds about one more finder pass. Max $ applies to the whole run, and types run in rule
-order, so one the money runs out on is listed under *Not reviewed*. A reply in a thread holds
-$0.15. The Start review dialog estimates one pull request's range before anything is spent.
+order, so one the money runs out on is listed under *Not reviewed*. A reply in a thread, or a
+recheck, holds $0.15, and a question $0.10. The Start review dialog estimates one pull request's range before anything is spent.
 
 ## Limits and throttles
 
@@ -935,6 +986,7 @@ $0.15. The Start review dialog estimates one pull request's range before anythin
 | Reviews a day | 8 on one pull request and 40 on one repository, counting commands, console starts and automatic reviews alike; past that a review is skipped as `throttle` |
 | Commands | 10 an hour from one person; a full review once per commit a day |
 | Replies answered | 3 in one thread, 20 on one pull request a day, 20 an hour from one person (5 from somebody who is not one of the repository's people) |
+| Questions answered | 5 an hour from one person, 20 on one pull request a day |
 | Files read | the 80 most relevant changed files; the rest are listed as not reviewed, which caps the score |
 | Inline comments | *Max comments* (8 by default, at most 20), of which at most 3 are P2s; a review of a later head adds at most one new P2 |
 | Pre-existing findings | 2 listed per review |
@@ -1040,7 +1092,6 @@ shadow, silence is the design.
 
 ## Not built yet
 
-- Answers to free-form questions put to `@<app>`.
 - `/v1` routes and MCP tools for reviews.
 - Recovering a command or a reply sent while the deployment was down.
 - Settings kept in a file in the repository.
