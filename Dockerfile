@@ -37,7 +37,7 @@ ARG VERSION="dev"
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -trimpath -ldflags="-s -w -X attesttag/internal/app.Version=${VERSION#v}" -o /attesttag ./cmd/attesttag
 
-FROM litestream/litestream:0.5.17 AS litestream
+FROM litestream/litestream:0.5.18 AS litestream
 
 FROM alpine:3.24
 RUN apk add --no-cache ca-certificates tzdata poppler-utils
