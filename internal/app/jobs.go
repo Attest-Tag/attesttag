@@ -616,7 +616,7 @@ func (r *JobRunner) finish(ctx context.Context, orgID, id int64, status string, 
 		r.store.AddTurn(ctx, j.TeamID, j.Channel, j.ThreadTS, "note", j.Requester, truncate(oneLine(note), 1500), "", 0, 0)
 	}
 	if status != JobSucceeded && r.agent != nil {
-		r.agent.alert(ctx, j.OrgID, fmt.Sprintf("job:%d:%s", id, status), fmt.Sprintf(":warning: Fix job #%d on %s %s %s: %s", id, j.Repo, where, status, truncate(j.Error, 200)))
+		r.agent.alert(ctx, j.OrgID, fmt.Sprintf("job:%d:%s", id, status), fmt.Sprintf(":warning: Fix job #%d on %s %s %s: %s", id, j.Repo, where, status, truncate(publicJobError(j.Error), 200)))
 	}
 	slog.Info("job finished", "job", id, "status", status, "repo", j.Repo, "pr", j.PRURL, "cost_usd", fmt.Sprintf("%.4f", j.CostUSD),
 		"in", j.TokensIn, "out", j.TokensOut, "error", j.Error)

@@ -224,7 +224,7 @@ func (a *Agent) jobsText(ctx context.Context, orgID int64, channel string) strin
 			line += " · <" + j.PRURL + "|PR>"
 		}
 		if j.Error != "" && (j.Status == JobFailed || j.Status == JobTimeout) {
-			line += " · " + truncate(oneLine(j.Error), 80)
+			line += " · " + truncate(oneLine(publicJobError(j.Error)), 80)
 		}
 		b.WriteString(line + "\n")
 	}

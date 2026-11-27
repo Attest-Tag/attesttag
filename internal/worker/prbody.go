@@ -20,8 +20,10 @@ func prTitle(spec app.JobSpec) string {
 	return t
 }
 
+// commitMessage is the commit's subject, the engine's summary and who asked. The summary is
+// app.PublicJobText's: a commit outlives every pull request it lands in.
 func commitMessage(spec app.JobSpec, summary string, jobID int64) string {
-	body := strings.TrimSpace(summary)
+	body := strings.TrimSpace(app.PublicJobText(summary))
 	if body == "" {
 		body = strings.TrimSpace(spec.Requirement)
 	}
@@ -202,7 +204,9 @@ func prBody(spec app.JobSpec, res *app.JobResult, summary string, recipe *app.Re
 			b.WriteString("- [ ] " + a + "\n")
 		}
 	}
-	b.WriteString("\n## Changes\n" + strings.TrimSpace(cut(summary, 4000)) + "\n")
+	// The engine's summary is its last words, and when a model call was refused those are the
+	// provider's, naming the account the call was made on; PublicJobText says why in plain words.
+	b.WriteString("\n## Changes\n" + strings.TrimSpace(cut(app.PublicJobText(summary), 4000)) + "\n")
 	if len(res.FilesChanged) > 0 {
 		b.WriteString("\nFiles:\n")
 		for i, f := range res.FilesChanged {
