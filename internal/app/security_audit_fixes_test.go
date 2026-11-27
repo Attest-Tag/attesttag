@@ -142,6 +142,9 @@ func TestH2_SSOSessionOrgBinding(t *testing.T) {
 	if s.allowsViaForOrg("sso", 10, 20) {
 		t.Fatal("SSO session for org 10 must be refused in org 20")
 	}
+	if !(Settings{AuthPolicy: AuthPolicyAny}).allowsViaForOrg("sso", 10, 20) {
+		t.Fatal("an organisation that takes any sign-in must take another organisation's SSO session")
+	}
 	tok, err := st.NewLoginChallengeForOrg(ctx, 42, "sso", 10)
 	if err != nil {
 		t.Fatal(err)
@@ -224,6 +227,7 @@ func TestH5_AWSQueryProtocolMutatingGETNeedsConfirmAndApproval(t *testing.T) {
 func TestH6_MCPLooksReadOnlyHardening(t *testing.T) {
 	for _, readName := range []string{
 		"get_issue", "get_message", "retrieve_block", "get_charge", "search_messages", "list_issues", "me", "look_up_user",
+		"query", "query_prometheus", "resolve-library-id", "getJiraIssue", "API-get-block-children",
 	} {
 		if !mcpLooksReadOnly(readName) {
 			t.Errorf("mcpLooksReadOnly(%q) = false, want true", readName)
@@ -236,7 +240,7 @@ func TestH6_MCPLooksReadOnlyHardening(t *testing.T) {
 	}
 	for _, writeName := range []string{
 		"direct_message", "kick_member", "ban_member", "listAndDelete",
-		"getOrCreateUser", "resolve_incident", "query_database", "sendMessage",
+		"getOrCreateUser", "resolve_incident", "resolveReviewThread", "resolve", "sendMessage",
 	} {
 		if mcpLooksReadOnly(writeName) {
 			t.Errorf("mcpLooksReadOnly(%q) = true, want false", writeName)
@@ -316,7 +320,8 @@ func TestM6_M7_M8_M9_M11_ProxyAndSSRFHardening(t *testing.T) {
 	if pathMatchesPrefix("/v1/items-admin", "/v1/items") {
 		t.Error("pathMatchesPrefix matched /v1/items-admin against /v1/items")
 	}
-	if !pathMatchesPrefix("/v1/items/42", "/v1/items") || !pathMatchesPrefix("/v1/items:list", "/v1/items") {
+	if !pathMatchesPrefix("/v1/items/42", "/v1/items") || !pathMatchesPrefix("/v1/items:list", "/v1/items") ||
+		!pathMatchesPrefix("/api/v2/tickets.json", "/api/v2/tickets") {
 		t.Error("pathMatchesPrefix rejected valid child or colon-verb path")
 	}
 	// M7: methodOverride HPP, case-insensitivity, and JSON unicode escape

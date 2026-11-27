@@ -147,12 +147,12 @@ func (d *dockerDispatcher) Start(ctx context.Context, j *Job, l JobLaunch) (stri
 	env = append(env, l.env("docker")...)
 
 	host := map[string]any{
-		"NanoCpus":        d.nanoCPUs,
-		"Memory":          d.memory,
-		"PidsLimit":       512,
-		"CapDrop":         []string{"ALL"},
-		"CapAdd":          []string{"CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"},
-		"SecurityOpt":     []string{"no-new-privileges:true"},
+		"NanoCpus":    d.nanoCPUs,
+		"Memory":      d.memory,
+		"PidsLimit":   512,
+		"CapDrop":     []string{"ALL"},
+		"CapAdd":      []string{"CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID", "KILL"},
+		"SecurityOpt": []string{"no-new-privileges:true"},
 		// A worker clones a repository and installs its dependencies into the container's own
 		// writable layer, so it needs no mount from the host and is given none.
 		"AutoRemove": false, // the exit code has to outlive the process for Status to read it

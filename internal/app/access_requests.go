@@ -549,17 +549,17 @@ func (b *Bot) mayApprove(ctx context.Context, sl *Chat, user string, r *AccessRe
 	if user == r.Requester && !b.settings.Get(ctx, r.OrgID).AllowSelfApprove {
 		return false, "You can't approve your own access request."
 	}
-	// Check live tier membership and coverage. Either the presser is one of the snapshotted
-	// approvers still holding the routed role, or they hold a strictly higher-rank tier whose
-	// bundle actually covers every call in this request. A peer tier at the same rank (or a
-	// higher tier without coverage) may never approve an unrelated request.
+	// Live tier membership, against the snapshot taken when the card went out: either the presser
+	// still holds the routed role and was one of the approvers it was sent to, or they hold a
+	// strictly higher tier — a higher tier covers everything a lower one can, so a super admin may
+	// answer a plain approver's request, and what runs is the routed tier's grants either way. A
+	// peer tier at the same rank never answers a request routed to another tier.
 	tiers := b.agent.tiers(ctx, r.OrgID, sl)
 	role, _ := b.store.ApprovalRole(ctx, r.OrgID, r.RoleID)
 	routedRank := -1
 	if role != nil {
 		routedRank = role.Rank
 	}
-	steps := stepsOf(r.Calls)
 	heldAny := false
 	maxRank := -1
 	authorized := false
@@ -576,7 +576,7 @@ func (b *Bot) mayApprove(ctx context.Context, sl *Chat, user string, r *AccessRe
 				authorized = true
 				break
 			}
-		} else if t.Role.Rank > routedRank && (len(steps) == 0 || b.agent.covers(t, steps)) {
+		} else if t.Role.Rank > routedRank {
 			authorized = true
 			break
 		}

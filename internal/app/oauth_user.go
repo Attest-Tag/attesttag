@@ -830,7 +830,6 @@ func (b *Bot) handleConnectPage(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, st.AuthURL+sep+q.Encode(), http.StatusFound)
 }
 
-
 // handleConnectCallback is where the provider sends the browser back. The browser-bound state
 // cookie plus the single-use state row together tie this callback to the browser and person who
 // started it, preventing OAuth account-binding CSRF.

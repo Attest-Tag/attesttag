@@ -254,13 +254,15 @@ func (s Settings) allowsVia(via string) bool {
 	return true
 }
 
-// allowsViaForOrg enforces both the destination organisation's auth policy and IdP-to-org
-// binding: an SSO session authenticated by one organisation's IdP may not act in another.
+// allowsViaForOrg is allowsVia for a session arriving in targetOrgID. An organisation that
+// requires single sign-on requires its own identity provider, so a session another
+// organisation's IdP proved does not meet that policy; one that takes any sign-in takes it like
+// any other, and a member who signed in through one organisation can still switch to it.
 func (s Settings) allowsViaForOrg(via string, ssoOrgID, targetOrgID int64) bool {
 	if !s.allowsVia(via) {
 		return false
 	}
-	if via == "sso" && ssoOrgID != 0 && ssoOrgID != targetOrgID {
+	if via == "sso" && s.AuthPolicy == AuthPolicySSO && ssoOrgID != 0 && ssoOrgID != targetOrgID {
 		return false
 	}
 	return true

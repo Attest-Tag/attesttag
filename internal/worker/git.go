@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -55,13 +56,12 @@ func gitAuthB64(token string) string {
 	return base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
 }
 
-func gitAuthEnv(token, repo string) []string {
-	b64 := gitAuthB64(token)
-	scope := "https://github.com/"
-	if repo != "" {
-		scope = "https://github.com/" + strings.TrimSuffix(repo, ".git") + ".git"
-	}
-	return []string{"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=http." + scope + ".extraheader", "GIT_CONFIG_VALUE_0=AUTHORIZATION: basic " + b64}
+// gitAuthEnv scopes the token's header to https://github.com/, so a url.insteadOf that sends a
+// fetch to another host sends it without the token. It is not narrowed to the job's repository:
+// a private submodule under the same owner needs it too, and github.com shows no repository's
+// owner the headers a clone arrived with.
+func gitAuthEnv(token string) []string {
+	return []string{"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=http.https://github.com/.extraheader", "GIT_CONFIG_VALUE_0=AUTHORIZATION: basic " + gitAuthB64(token)}
 }
 
 // gitPins is on every git command line. The repository's contents are untrusted, and the tests
@@ -70,6 +70,12 @@ func gitAuthEnv(token, repo string) []string {
 // repository could name. HOME is also the job's own, and GIT_CONFIG_GLOBAL points it at nothing,
 // so a ~/.gitconfig written by a test script changes nothing either. safe.directory covers the
 // worker committing files the sandbox user wrote.
+//
+// The token never meets the working clone's config: the clone and its fetches happen before the
+// sandbox user owns it, and every push, and every read of a branch that moved, runs in the clean
+// copy (pushViaCleanRepo). The http pins are on regardless. Proxy and CA settings are not pinned:
+// an empty http.sslCAInfo or http.sslCAPath makes every https remote fail certificate checks, and
+// an empty http.proxy turns off the HTTPS_PROXY a self-host behind an egress proxy depends on.
 var gitPins = []string{
 	"-c", "core.hooksPath=/dev/null",
 	"-c", "protocol.file.allow=user",
@@ -80,9 +86,6 @@ var gitPins = []string{
 	"-c", "core.fsmonitor=",
 	"-c", "credential.helper=",
 	"-c", "http.sslVerify=true",
-	"-c", "http.proxy=",
-	"-c", "http.sslCAInfo=",
-	"-c", "http.sslCAPath=",
 	// gpg.program runs on `git commit` when a planted commit.gpgSign=true is in the
 	// sandbox-owned .git/config, so pin the signer off and empty its program the same way the
 	// others are pinned: a repository must not choose the program a commit runs.
@@ -110,7 +113,7 @@ func cloneRepo(ctx context.Context, ws *Workspace, spec app.JobSpec, token, clon
 	if cloneURL == "" {
 		cloneURL = "https://github.com/" + spec.Repo + ".git"
 	}
-	g := &Repo{dir: ws.RepoDir, remoteURL: cloneURL, env: ws.Env, auth: gitAuthEnv(token, spec.Repo), name: spec.Repo}
+	g := &Repo{dir: ws.RepoDir, remoteURL: cloneURL, env: ws.Env, auth: gitAuthEnv(token), name: spec.Repo}
 	env := append(append([]string{}, ws.Env...), g.auth...)
 	args := append([]string{"clone", "-q", "--depth", "50", "--branch", spec.BaseBranch, "--single-branch"}, cloneURL, filepath.Base(ws.RepoDir))
 	out, err := runCmd(ctx, cmdSpec{Dir: filepath.Dir(ws.RepoDir), Env: env, Timeout: 5 * time.Minute,
@@ -152,7 +155,9 @@ func cloneRepo(ctx context.Context, ws *Workspace, spec app.JobSpec, token, clon
 // never runs inside a sandbox-owned process or against a sandbox-writable .git/config.
 func (g *Repo) snapshotPushRepo(ctx context.Context, pushDir, baseSHA string) error {
 	os.RemoveAll(pushDir)
-	if err := copyDirNoSymlinks(filepath.Join(g.dir, ".git"), pushDir); err != nil {
+	// LFS content and the submodules' own repositories stay behind: pushing the job's commit needs
+	// neither, and on Cloud Run the copy counts against the job's memory.
+	if err := copyDirNoSymlinks(filepath.Join(g.dir, ".git"), pushDir, "lfs", "modules"); err != nil {
 		return err
 	}
 	out, err := runCmd(ctx, cmdSpec{Dir: pushDir, Env: g.env, Timeout: 15 * time.Second,
@@ -165,7 +170,7 @@ func (g *Repo) snapshotPushRepo(ctx context.Context, pushDir, baseSHA string) er
 	return nil
 }
 
-func copyDirNoSymlinks(src, dst string) error {
+func copyDirNoSymlinks(src, dst string, skipTop ...string) error {
 	return filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -176,6 +181,9 @@ func copyDirNoSymlinks(src, dst string) error {
 		rel, err := filepath.Rel(src, path)
 		if err != nil {
 			return err
+		}
+		if d.IsDir() && slices.Contains(skipTop, rel) {
+			return filepath.SkipDir
 		}
 		target := filepath.Join(dst, rel)
 		if d.IsDir() {
@@ -426,6 +434,21 @@ func (g *Repo) runClean(ctx context.Context, timeout time.Duration, network bool
 	return runCmd(ctx, cmdSpec{Dir: g.pushDir, Argv: append(append([]string{"git"}, gitPins...), args...), Env: env, Timeout: timeout, Sandbox: false})
 }
 
+// maxVerifyBytes bounds what runCleanAll reads back: a listing of every changed path, or of the
+// whole tree, for the checks before a push.
+const maxVerifyBytes = 8 << 20
+
+// runCleanAll is runClean reading the whole output rather than its head and tail, since the checks
+// before a push must see every line; output past maxVerifyBytes is refused, never cut.
+func (g *Repo) runCleanAll(ctx context.Context, timeout time.Duration, args ...string) (procOut, error) {
+	out, err := runCmd(ctx, cmdSpec{Dir: g.pushDir, Argv: append(append([]string{"git"}, gitPins...), args...), Env: g.env,
+		Timeout: timeout, Head: maxVerifyBytes + 1, Tail: 1, Sandbox: false})
+	if err == nil && len(out.Output) > maxVerifyBytes {
+		return out, fmt.Errorf("the listing is over %d bytes", maxVerifyBytes)
+	}
+	return out, err
+}
+
 // pushViaCleanRepo carries the job's commit out of the sandbox-owned clone in a git bundle — made
 // without the repository token — stops whatever the sandbox left running, and pushes from the
 // root-owned clean copy, once it has checked there that the commit sits directly on parent and
@@ -452,7 +475,7 @@ func (g *Repo) pushViaCleanRepo(ctx context.Context, target, branch, parent stri
 	// Every path the commit touches, checked again where the sandbox cannot reach: it could have
 	// staged or committed anything in its own clone. --no-renames lists a renamed file's old path
 	// as well as its new one.
-	diffOut, err := g.runClean(ctx, 30*time.Second, false, "diff", "--name-only", "--no-renames", "-z", parent+".."+ref)
+	diffOut, err := g.runCleanAll(ctx, 30*time.Second, "diff", "--name-only", "--no-renames", "-z", parent+".."+ref)
 	if err != nil || diffOut.Code != 0 {
 		return procOut{}, stepErr("push_failed", "git diff verify failed: "+lastLines(diffOut.Output, 400))
 	}
@@ -469,7 +492,7 @@ func (g *Repo) pushViaCleanRepo(ctx context.Context, target, branch, parent stri
 	if len(changed) == 0 {
 		return procOut{}, stepErr("push_failed", "refusing to push an empty commit")
 	}
-	treeOut, err := g.runClean(ctx, 30*time.Second, false, "ls-tree", "-r", "-l", "-z", ref)
+	treeOut, err := g.runCleanAll(ctx, 30*time.Second, "ls-tree", "-r", "-l", "-z", ref)
 	if err != nil || treeOut.Code != 0 {
 		return procOut{}, stepErr("push_failed", "git ls-tree verify failed: "+lastLines(treeOut.Output, 400))
 	}
@@ -502,10 +525,9 @@ func notFastForward(out procOut) bool {
 // the commit that push sits on.
 //
 // The read off the network happens in the clean copy, and its new commits reach the working clone
-// in a bundle, so the token stays out of the sandbox here as in the push. Only when that cannot be
-// done — a branch rewritten past the commits the clone holds — does the working clone fetch for
-// itself, as every push did before the clean copy existed, and by then pushViaCleanRepo has
-// stopped whatever the sandbox left running.
+// in a bundle, so the token stays out of the sandbox here as in the push. A branch rewritten past
+// every commit the clone holds cannot be bundled that way, and the job then pushes nothing rather
+// than fetching with the token from the sandbox's own clone.
 func (g *Repo) fetchMoved(ctx context.Context, branch, remote, start string) (procOut, error) {
 	refspec := "+refs/heads/" + branch + ":" + remote
 	target := g.pushTarget()
@@ -516,12 +538,17 @@ func (g *Repo) fetchMoved(ctx context.Context, branch, remote, start string) (pr
 		}
 		bundlePath := filepath.Join(filepath.Dir(g.dir), "tmp", "moved.bundle")
 		defer os.Remove(bundlePath)
-		if out, err := g.runClean(ctx, 2*time.Minute, false, "bundle", "create", bundlePath, remote, "--not", start); err == nil && out.Code == 0 {
-			if out, err := g.git(ctx, 2*time.Minute, false, "fetch", "-q", bundlePath, "+"+remote+":"+remote); err == nil && out.Code == 0 {
-				return out, nil
-			}
+		if out, err := g.runClean(ctx, 2*time.Minute, false, "bundle", "create", bundlePath, remote, "--not", start); err != nil || out.Code != 0 {
+			return out, fmt.Errorf("bundle failed")
 		}
+		out, err = g.git(ctx, 2*time.Minute, false, "fetch", "-q", bundlePath, "+"+remote+":"+remote)
+		if err == nil && out.Code != 0 {
+			err = fmt.Errorf("fetch from bundle failed")
+		}
+		return out, err
 	}
+	// No clean copy (a Repo used outside a job, as the tests do): nothing was handed to the
+	// sandbox, so the clone may fetch for itself.
 	out, err := g.gitNet(ctx, 2*time.Minute, "fetch", "-q", "--depth", "50", target, refspec)
 	if err == nil && out.Code != 0 {
 		err = fmt.Errorf("fetch failed")

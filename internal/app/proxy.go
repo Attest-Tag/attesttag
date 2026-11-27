@@ -767,8 +767,8 @@ func hasDotSegment(u *url.URL) bool {
 }
 
 // pathMatchesPrefix enforces a segment boundary when matching a connection's PathPrefixes, so
-// "/v1/items" matches "/v1/items", "/v1/items/123", and Google's "/v1/items:list", but not
-// "/v1/items-admin".
+// "/v1/items" matches "/v1/items", "/v1/items/123", Google's "/v1/items:list" and the format
+// suffix older APIs take ("/v1/items.json"), but not "/v1/items-admin".
 func pathMatchesPrefix(path, pfx string) bool {
 	if pfx == "/" {
 		return strings.HasPrefix(path, "/")
@@ -776,7 +776,7 @@ func pathMatchesPrefix(path, pfx string) bool {
 	if strings.HasSuffix(pfx, "/") {
 		return strings.HasPrefix(path, pfx)
 	}
-	return path == pfx || strings.HasPrefix(path, pfx+"/") || strings.HasPrefix(path, pfx+":")
+	return path == pfx || strings.HasPrefix(path, pfx+"/") || strings.HasPrefix(path, pfx+":") || strings.HasPrefix(path, pfx+".")
 }
 
 // Match finds the rule (or credential-less domain) covering a URL. Returns the connection

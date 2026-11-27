@@ -203,8 +203,10 @@ func (d *k8sDispatcher) Start(ctx context.Context, j *Job, l JobLaunch) (string,
 				"allowPrivilegeEscalation": false,
 				"capabilities": map[string]any{
 					"drop": []string{"ALL"},
-					// SETUID/SETGID/CHOWN are required for the worker's root->sandbox uid drop.
-					"add": []string{"CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"},
+					// SETUID/SETGID/CHOWN are required for the worker's root->sandbox uid drop, and KILL
+					// for root to stop what runs as the sandbox user: a hung step, a cancel, and
+					// killSandboxProcesses before the push all signal another user's processes.
+					"add": []string{"CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID", "KILL"},
 				},
 				"seccompProfile": map[string]any{"type": "RuntimeDefault"},
 			},

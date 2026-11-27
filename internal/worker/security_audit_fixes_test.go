@@ -54,10 +54,15 @@ func TestC4_OptionsFromEnvUnsetsJobToken(t *testing.T) {
 }
 
 func TestC5_H9_GitAuthScopeAndStageRejectsPreStagedOrCommittedExcludedFiles(t *testing.T) {
-	env := gitAuthEnv("ghs_secret_token_123456", "acme/app")
+	env := gitAuthEnv("ghs_secret_token_123456")
 	joined := strings.Join(env, "\n")
-	if !strings.Contains(joined, "http.https://github.com/acme/app.git.extraheader") {
-		t.Fatalf("gitAuthEnv not scoped to single repo: %v", env)
+	if !strings.Contains(joined, "http.https://github.com/.extraheader") {
+		t.Fatalf("gitAuthEnv not scoped to github.com: %v", env)
+	}
+	for _, pin := range gitPins {
+		if strings.HasPrefix(pin, "http.sslCA") || strings.HasPrefix(pin, "http.proxy") {
+			t.Fatalf("git pin %q breaks https remotes or the egress proxy", pin)
+		}
 	}
 	s := newScrubber("ghs_secret_token_123456", gitAuthB64("ghs_secret_token_123456"))
 	if out := s.Clean("Authorization: Basic " + gitAuthB64("ghs_secret_token_123456")); strings.Contains(out, gitAuthB64("ghs_secret_token_123456")) {

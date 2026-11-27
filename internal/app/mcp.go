@@ -563,7 +563,7 @@ func mcpReadOnly(t *mcp.Tool) bool {
 var mcpWriteVerbs = []string{"create", "add", "insert", "update", "edit", "modify", "patch", "set", "put",
 	"delete", "remove", "destroy", "drop", "trash", "clear", "purge", "send", "post", "reply", "comment",
 	"write", "upload", "attach", "import", "move", "copy", "merge", "rename", "archive", "restore",
-	"assign", "unassign", "invite", "share", "publish", "approve", "close", "reopen", "resolve",
+	"assign", "unassign", "invite", "share", "publish", "approve", "close", "reopen",
 	"schedule", "start", "stop", "cancel", "run", "execute", "trigger", "apply", "mark", "unmark",
 	"label", "unlabel", "subscribe", "unsubscribe", "enable", "disable", "grant", "revoke",
 	"kick", "ban", "mute", "unblock", "pay",
@@ -577,11 +577,16 @@ var mcpWriteVerbs = []string{"create", "add", "insert", "update", "edit", "modif
 // Verbs that only look. Matched strictly as whole tokens; anything matching neither list is
 // treated as a write. "me" is only allowed as the entire tool name ("me" or "whoami"), never as
 // a prefix/token inside another name like "direct_message" or "kick_member".
-var mcpReadVerbs = []string{"get", "list", "search", "find", "read", "describe", "show", "count",
-	"aggregate", "explain", "ask", "fetch", "retrieve", "lookup", "check", "browse",
+var mcpReadVerbs = []string{"get", "list", "search", "find", "read", "query", "describe", "show", "count",
+	"aggregate", "explain", "ask", "fetch", "retrieve", "lookup", "check", "browse", "resolve",
 	"view", "inspect", "status", "summarize", "summarise", "filter", "download", "export", "discover",
 	"diff", "history", "info", "detail", "details", "schema", "preview", "sample", "stats", "usage",
 	"metrics", "report", "whoami", "ping", "help", "docs"}
+
+// mcpResolveCloses are the things "resolve" closes rather than looks up.
+var mcpResolveCloses = map[string]bool{"thread": true, "threads": true, "incident": true, "incidents": true,
+	"alert": true, "alerts": true, "issue": true, "issues": true, "comment": true, "comments": true,
+	"conversation": true, "conversations": true, "ticket": true, "tickets": true, "review": true}
 
 func splitToolTokens(name string) []string {
 	var out []string
@@ -617,6 +622,14 @@ func mcpLooksReadOnly(name string) bool {
 	tokens := splitToolTokens(name)
 	if len(tokens) == 0 {
 		return false
+	}
+	// "resolve" reads when it looks a name up (resolve-library-id, resolve_hostname) and writes
+	// when it closes something out (resolve_incident, resolve_thread): the word after it decides,
+	// and with nothing after it, it is a write.
+	for i, tok := range tokens {
+		if tok == "resolve" && (i+1 == len(tokens) || mcpResolveCloses[tokens[i+1]]) {
+			return false
+		}
 	}
 	hasToken := func(verbs []string) bool {
 		for _, tok := range tokens {

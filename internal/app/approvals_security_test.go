@@ -141,3 +141,39 @@ func TestUserByEmailCacheExpires(t *testing.T) {
 		t.Fatalf("fresh entry not cached: %q, %d calls", id, calls)
 	}
 }
+
+// A higher tier answers a lower tier's request; a peer tier at the same rank does not, and nor does
+// somebody added to the routed tier after the card went out.
+func TestMayApproveFollowsTheTierRanks(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+	orgID, approverID := approvalOrg(t, st)
+	peer := &ApprovalRole{Name: "Other approver", Rank: 1}
+	super := &ApprovalRole{Name: "Super admin", Rank: 2}
+	for _, r := range []*ApprovalRole{peer, super} {
+		if err := st.AddApprovalRole(ctx, orgID, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, m := range []struct {
+		role int64
+		user string
+	}{{approverID, "U_APP"}, {approverID, "U_LATE"}, {peer.ID, "U_PEER"}, {super.ID, "U_SUPER"}} {
+		if err := st.AddResolvedApprovalMember(ctx, orgID, m.role, strings.ToLower(m.user)+"@example.com", "T1", m.user); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"ok":true,"user":{"id":%q,"team_id":"T1","name":"x","profile":{}}}`, r.FormValue("user"))
+	}))
+	defer srv.Close()
+	sl := &Chat{t: &slackTransport{api: slack.New("xoxb-test", slack.OptionAPIURL(srv.URL+"/api/"))}, BotUserID: "UBOT", TeamID: "T1", OrgID: orgID}
+	b := &Bot{store: st, settings: newSettingsCache(st, Config{}), agent: &Agent{store: st}}
+	r := &AccessRequest{OrgID: orgID, TeamID: "T1", Requester: "U_ASK", RoleID: approverID, Approvers: []string{"U_APP"}}
+	for user, want := range map[string]bool{"U_APP": true, "U_SUPER": true, "U_PEER": false, "U_LATE": false} {
+		if ok, why := b.mayApprove(ctx, sl, user, r); ok != want {
+			t.Errorf("%s: mayApprove = %v (%q), want %v", user, ok, why, want)
+		}
+	}
+}
