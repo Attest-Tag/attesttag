@@ -830,10 +830,12 @@ func (b *Bot) handleConnectPage(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, st.AuthURL+sep+q.Encode(), http.StatusFound)
 }
 
-// handleConnectCallback is where the provider sends the browser back. Registered bare, with no
-// session and no CSRF token, for the reason the MCP callback is: the provider sends neither. The
-// single-use state row is what ties this request to the person who started it.
+// handleConnectCallback is where the provider sends the browser back. The browser-bound state
+// cookie plus the single-use state row together tie this callback to the browser and person who
+// started it, preventing OAuth account-binding CSRF.
 func (b *Bot) handleConnectCallback(w http.ResponseWriter, r *http.Request) {
+	c, _ := r.Cookie(connectStateCookie)
+	http.SetCookie(w, &http.Cookie{Name: connectStateCookie, Value: "", Path: "/connect/callback", MaxAge: -1})
 	if e := r.URL.Query().Get("error"); e != "" {
 		b.renderConnect(w, map[string]any{"Done": "Nothing was connected: " + e + ". You can close this page."})
 		return

@@ -160,7 +160,7 @@ func (r *Runner) Run(ctx context.Context) (code int) {
 		return 1
 	}
 	spec := claim.Job.Spec
-	r.scrub.add(claim.Secrets.GitHubToken, claim.Secrets.LLM.APIKey, claim.Secrets.EngineAPIKey)
+	r.scrub.add(claim.Secrets.GitHubToken, gitAuthB64(claim.Secrets.GitHubToken), claim.Secrets.LLM.APIKey, claim.Secrets.EngineAPIKey)
 	slog.Info("claimed", "job", claim.Job.ID, "repo", spec.Repo, "base", spec.BaseBranch, "branch", spec.Branch, "engine", spec.Constraints.Engine, "model", spec.Constraints.Model)
 
 	deadline := time.Now().Add(r.opts.MaxWall - 4*time.Minute)
@@ -273,12 +273,15 @@ func failWith(res *app.JobResult, err error) {
 func (r *Runner) execute(ctx context.Context, claim *app.JobClaim, rep *Reporter, res *app.JobResult, deadline time.Time) {
 	spec := claim.Job.Spec
 	jobDir := filepath.Join(r.opts.WorkDir, fmt.Sprintf("job-%d", claim.Job.ID))
+	pushDir := filepath.Join(r.opts.WorkDir, fmt.Sprintf(".push-%d.git", claim.Job.ID))
 	os.RemoveAll(jobDir)
+	os.RemoveAll(pushDir)
 	for _, d := range []string{"home", "tmp", ".cache"} {
 		os.MkdirAll(filepath.Join(jobDir, d), 0o700)
 	}
 	if !r.opts.KeepWork {
 		defer os.RemoveAll(jobDir)
+		defer os.RemoveAll(pushDir)
 	}
 	ws := &Workspace{JobDir: jobDir, RepoDir: filepath.Join(jobDir, "repo"), Env: baseEnv(jobDir, r.opts.WorkDir), Deadline: deadline, Reporter: rep, Scrub: r.scrub}
 	if err := configureSandbox(r.opts); err != nil {
@@ -318,6 +321,11 @@ func (r *Runner) execute(ctx context.Context, claim *app.JobClaim, rep *Reporter
 		return
 	}
 	baseSHA := repo.headSHA(ctx)
+	if err := repo.snapshotPushRepo(ctx, pushDir, baseSHA); err != nil {
+		rep.Phase("clone", "failed", err.Error())
+		failWith(res, stepErr("clone_failed", err.Error()))
+		return
+	}
 	rep.Phase("clone", "ok", "at "+cut(baseSHA, 12))
 	if prMode && spec.HeadSHA != "" && baseSHA != spec.HeadSHA {
 		// Somebody pushed between the request and the clone: the job fixes the branch as it is now.

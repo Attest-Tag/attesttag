@@ -9,7 +9,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
 	"syscall"
+	"time"
 )
 
 // The privilege split. The worker runs as root inside its own container and drops to the
@@ -76,5 +80,53 @@ func grantSandbox(paths ...string) {
 			}
 			return nil
 		})
+	}
+}
+
+// killSandboxProcesses terminates any background process owned by the sandbox user (such as
+// one detached with setsid during tests or the engine) before root touches git push or cache
+// packing. On Linux it scans /proc/<pid>/status for matching real/effective UIDs.
+func killSandboxProcesses() {
+	if !sandbox.active || runtime.GOOS != "linux" {
+		return
+	}
+	want := strconv.FormatUint(uint64(sandbox.uid), 10)
+	self := os.Getpid()
+	for round := 0; round < 3; round++ {
+		entries, err := os.ReadDir("/proc")
+		if err != nil {
+			return
+		}
+		killed := 0
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			pid, err := strconv.Atoi(e.Name())
+			if err != nil || pid <= 1 || pid == self {
+				continue
+			}
+			raw, err := os.ReadFile(filepath.Join("/proc", e.Name(), "status"))
+			if err != nil {
+				continue
+			}
+			for _, line := range strings.Split(string(raw), "\n") {
+				if !strings.HasPrefix(line, "Uid:") {
+					continue
+				}
+				for _, field := range strings.Fields(strings.TrimPrefix(line, "Uid:")) {
+					if field == want {
+						_ = syscall.Kill(pid, syscall.SIGKILL)
+						killed++
+						break
+					}
+				}
+				break
+			}
+		}
+		if killed == 0 {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }

@@ -254,6 +254,20 @@ func (s Settings) allowsVia(via string) bool {
 	return true
 }
 
+// allowsViaForOrg is allowsVia for a session arriving in targetOrgID. An organisation that
+// requires single sign-on requires its own identity provider, so a session another
+// organisation's IdP proved does not meet that policy; one that takes any sign-in takes it like
+// any other, and a member who signed in through one organisation can still switch to it.
+func (s Settings) allowsViaForOrg(via string, ssoOrgID, targetOrgID int64) bool {
+	if !s.allowsVia(via) {
+		return false
+	}
+	if via == "sso" && s.AuthPolicy == AuthPolicySSO && ssoOrgID != 0 && ssoOrgID != targetOrgID {
+		return false
+	}
+	return true
+}
+
 // validateSecuritySetting checks a sign-in policy value before it is stored. The lock-yourself-out
 // guard is not here: it needs to know who is asking, so it lives with the handler (admin_api.go).
 func validateSecuritySetting(k, v string) error {

@@ -227,8 +227,9 @@ func (b *Bot) proveIdentity(ctx context.Context, me *AdminUser, password, code s
 		}
 	case enrolled && code != "":
 		if step, ok := checkTOTP(secret, code, time.Now(), enrol.LastStep); ok {
-			b.store.SpendTOTPStep(ctx, me.ID, step)
-			return true, ""
+			if spent, serr := b.store.SpendTOTPStep(ctx, me.ID, step); serr == nil && spent {
+				return true, ""
+			}
 		}
 	case !acct.HasPassword() && !enrolled:
 		if age := me.sessionAge(); age >= 0 && age <= 10*time.Minute {
@@ -396,8 +397,9 @@ func (b *Bot) handleTwoFactorLogin(w http.ResponseWriter, r *http.Request) {
 	used := ""
 	if code := strings.TrimSpace(in.Code); code != "" {
 		if step, ok := checkTOTP(secret, code, time.Now(), enrol.LastStep); ok {
-			b.store.SpendTOTPStep(ctx, userID, step)
-			used = "code"
+			if spent, serr := b.store.SpendTOTPStep(ctx, userID, step); serr == nil && spent {
+				used = "code"
+			}
 		}
 	}
 	if used == "" && strings.TrimSpace(in.Recovery) != "" {
@@ -413,7 +415,7 @@ func (b *Bot) handleTwoFactorLogin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 401, map[string]any{"error": "That code is not right."})
 		return
 	}
-	via, err := b.store.loginChallengeVia(ctx, in.Challenge)
+	via, ssoOrgID, err := b.store.loginChallengeInfo(ctx, in.Challenge)
 	if err != nil {
 		fail(w, err)
 		return
@@ -433,10 +435,24 @@ func (b *Bot) handleTwoFactorLogin(w http.ResponseWriter, r *http.Request) {
 		}
 		http.SetCookie(w, &http.Cookie{Name: inviteCookie, Value: "", Path: "/", MaxAge: -1})
 	}
-	orgID, err := b.orgForSignIn(ctx, u, via)
-	if err != nil {
-		writeJSON(w, 403, map[string]any{"error": err.Error()})
-		return
+	var orgID int64
+	if via == "sso" && ssoOrgID != 0 {
+		m, merr := b.store.Membership(ctx, u.ID, ssoOrgID)
+		if merr != nil || m == nil {
+			writeJSON(w, 403, map[string]any{"error": "Your account is no longer a member of that organisation."})
+			return
+		}
+		if st := b.settings.Get(ctx, ssoOrgID); !st.allowsVia("sso") {
+			writeJSON(w, 403, map[string]any{"error": "Your organisation does not accept that way of signing in. " + signInHint(st.AuthPolicy)})
+			return
+		}
+		orgID = ssoOrgID
+	} else {
+		orgID, err = b.orgForSignIn(ctx, u, via)
+		if err != nil {
+			writeJSON(w, 403, map[string]any{"error": err.Error()})
+			return
+		}
 	}
 	slog.Info("two-factor accepted", "user", u.ID, "with", used)
 	b.startSession(w, r, u, orgID, via, true)
@@ -536,8 +552,9 @@ func (b *Bot) selfLockout(ctx context.Context, me *AdminUser, key, value string)
 			return errors.New("Register your identity provider and verify its domain first, under Security → Single sign-on. Until that is done nobody can sign in through it, including you.")
 		}
 		ids, _ := b.store.Identities(ctx, me.ID)
+		wantPrefix := ssoSubject(p.ProviderID, "")
 		for _, id := range ids {
-			if id.Provider == ProviderSSO {
+			if id.Provider == ProviderSSO && strings.HasPrefix(id.Subject, wantPrefix) {
 				return nil
 			}
 		}

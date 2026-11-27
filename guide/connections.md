@@ -103,10 +103,12 @@ in-process proxy that:
 2. Matches the URL against a connection's allowed hosts, path prefixes, and methods, or a
    credential-less domain. Anything else is refused with a reason the model can act on. A host
    matches exactly, or `*.example.com` matches any subdomain of `example.com` but not
-   `example.com` itself. A path prefix is compared as a literal string — there is no wildcard —
-   and a method without regard to case; an empty list of either allows everything. A path with a
-   `.` or `..` segment is refused rather than resolved, because the path that was checked has to
-   be the path that is sent. Two connections may share a host — Drive and Calendar are both
+   `example.com` itself. A path prefix covers whole segments — `/v1/items` covers `/v1/items`,
+   `/v1/items/42`, `/v1/items:list` and `/v1/items.json`, but not `/v1/items-admin`; a prefix
+   ending in `/` covers only what is below it — and there is no wildcard; a method is compared
+   without regard to case, and an empty list of either allows everything. A path with a `.` or
+   `..` segment, a backslash or a `;` is refused rather than resolved, because the path that was
+   checked has to be the path that is sent. Two connections may share a host — Drive and Calendar are both
    `www.googleapis.com` — so a rule that matches the host but not the path or the method is
    passed over rather than treated as the answer. Where several still match, the longest matching
    prefix wins (a trailing slash does not count), then the asker's own account over a shared

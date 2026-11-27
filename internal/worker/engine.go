@@ -312,13 +312,23 @@ func (fakeEngine) Run(ctx context.Context, ws *Workspace, b Brief) (EngineResult
 	if len(b.Spec.FilesHint) > 0 && b.Spec.FilesHint[0] != "" {
 		targets = b.Spec.FilesHint
 	}
+	root, err := os.OpenRoot(ws.RepoDir)
+	if err != nil {
+		return EngineResult{Stopped: "error"}, stepErr("engine_error", err.Error())
+	}
+	defer root.Close()
 	for _, target := range targets {
 		path := filepath.Join(ws.RepoDir, filepath.FromSlash(target))
-		if rel, err := filepath.Rel(ws.RepoDir, path); err != nil || strings.HasPrefix(rel, "..") {
+		rel, err := filepath.Rel(ws.RepoDir, path)
+		if err != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
 			return EngineResult{Stopped: "error"}, stepErr("engine_error", "hinted file is outside the repository")
 		}
-		os.MkdirAll(filepath.Dir(path), 0o755)
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if dir := filepath.Dir(rel); dir != "." {
+			if err := root.MkdirAll(dir, 0o755); err != nil {
+				return EngineResult{Stopped: "error"}, stepErr("engine_error", err.Error())
+			}
+		}
+		f, err := root.OpenFile(rel, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 		if err != nil {
 			return EngineResult{Stopped: "error"}, stepErr("engine_error", err.Error())
 		}

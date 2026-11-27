@@ -56,6 +56,9 @@ func optionsFromEnv() (Options, error) {
 	if o.Token == "" {
 		return o, errors.New(app.EnvJobToken + " is not set")
 	}
+	// Clear the job token from the process environment once read so it cannot be inherited or
+	// accidentally inspected by helper code.
+	os.Unsetenv(app.EnvJobToken)
 	o.Mode = strings.ToLower(env("WORKER_MODE", "local"))
 	if o.Mode != "local" && !strings.HasPrefix(o.BotURL, "https://") {
 		return o, fmt.Errorf("%s must be https outside local mode", app.EnvBotURL)

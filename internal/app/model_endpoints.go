@@ -137,7 +137,7 @@ func orgTransport() http.RoundTripper {
 	tr.Proxy = nil
 	tr.DialContext = dialPublic
 	tr.TLSHandshakeTimeout = 10 * time.Second
-	return httpsOnly{publicRoundTripper{tr}}
+	return httpsOnly{publicRoundTripper{base: tr}}
 }
 
 type httpsOnly struct{ base http.RoundTripper }

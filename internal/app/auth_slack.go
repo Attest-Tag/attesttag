@@ -179,7 +179,7 @@ func (b *Bot) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 			// password, sign out). Refusing them would be a locked door with the key inside.
 			if !strings.HasPrefix(r.URL.Path, "/api/auth/") && r.URL.Path != "/api/account" && !strings.HasPrefix(r.URL.Path, "/api/account/") {
 				ctx := r.Context()
-				if !b.settings.Get(ctx, u.OrgID).allowsVia(u.Via) {
+				if !b.settings.Get(ctx, u.OrgID).allowsViaForOrg(u.Via, u.SSOOrgID, u.OrgID) {
 					writeJSON(w, http.StatusForbidden, map[string]any{"error": "This organisation has changed which sign-in methods it accepts. Sign out and sign in again.", "reauth": true})
 					return
 				}

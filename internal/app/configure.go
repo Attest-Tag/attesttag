@@ -290,6 +290,7 @@ button.danger:hover{color:var(--bad);border-color:var(--bad)}
 <div class="id">{{.Scope.SlackID}}</div>
 <div class="tabs"><a class="{{if eq .Tab "general"}}on{{end}}" href="?t={{.Token}}&tab=general">General</a><a class="{{if eq .Tab "tools"}}on{{end}}" href="?t={{.Token}}&tab=tools">Tools and access</a><a class="{{if eq .Tab "memory"}}on{{end}}" href="?t={{.Token}}&tab=memory">Memory</a><a class="{{if eq .Tab "routines"}}on{{end}}" href="?t={{.Token}}&tab=routines">Routines</a></div>
 {{if .Saved}}<p class="saved">Saved.</p>{{end}}
+{{if .Refused}}<p class="bad">{{.Refused}}</p>{{end}}
 {{if eq .Tab "general"}}
 <form method="post" class="card">
 <input type="hidden" name="csrf" value="{{.CSRF}}">
@@ -478,6 +479,7 @@ func (b *Bot) handleConfigure(w http.ResponseWriter, r *http.Request) {
 		tab = "general"
 	}
 	saved := false
+	refused := ""
 	if r.Method == http.MethodPost && !readOnly {
 		r.ParseForm()
 		tab = r.FormValue("tab")
@@ -556,10 +558,17 @@ func (b *Bot) handleConfigure(w http.ResponseWriter, r *http.Request) {
 			}
 		case "routines":
 			id, _ := strconv.ParseInt(r.FormValue("routine"), 10, 64)
+			wantEnabled := r.FormValue("enabled") == "1"
 			if rs, _ := b.store.Routines(ctx, orgID, channel); rs != nil {
 				for _, rt := range rs {
 					if rt.ID == id {
-						b.store.SetRoutineEnabled(ctx, orgID, id, r.FormValue("enabled") == "1")
+						// Anyone in the channel may pause a noisy routine. Turning one back on is
+						// its owner's call: it runs with their own connected accounts.
+						if wantEnabled && rt.CreatedBy != "" && rt.CreatedBy != asUser {
+							refused = "Only the person who set up that routine can turn it back on, because it runs with their own connected accounts."
+							continue
+						}
+						b.store.SetRoutineEnabled(ctx, orgID, id, wantEnabled)
 						saved = true
 					}
 				}
@@ -665,7 +674,7 @@ func (b *Bot) handleConfigure(w http.ResponseWriter, r *http.Request) {
 	routineRounds, routineWall := routineBudget(b.settings.Get(ctx, orgID))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	configurePage.Execute(w, map[string]any{
-		"Bot": b.settings.Get(ctx, orgID).BotName, "Scope": sc, "Token": mintConfigureToken(teamID, channel, asUser, sc.LinkEpoch, time.Now()), "CSRF": csrf, "Tab": tab, "Saved": saved,
+		"Bot": b.settings.Get(ctx, orgID).BotName, "Scope": sc, "Token": mintConfigureToken(teamID, channel, asUser, sc.LinkEpoch, time.Now()), "CSRF": csrf, "Tab": tab, "Saved": saved, "Refused": refused,
 		"ReadOnly": readOnly, "SharedLink": sharedLink, "Access": rows, "Packs": packs, "Routines": routines, "AllowRules": allow,
 		"Personal": personal, "AsUser": asUser, "HasPersonal": hasPersonal,
 		"Memories": sharedRows, "MyNotes": mine, "SubMine": subMine,

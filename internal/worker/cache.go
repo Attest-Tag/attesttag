@@ -123,6 +123,8 @@ func (r *Runner) saveCache(ctx context.Context, claim *app.JobClaim, cacheDir st
 	if claim.Cache.PutURL == "" {
 		return
 	}
+	// Ensure no sandbox process is still running and able to race symlink swaps in cacheDir.
+	killSandboxProcesses()
 	max := claim.Cache.MaxBytes
 	if max <= 0 || max > app.JobCacheMaxBytes {
 		max = app.JobCacheMaxBytes
@@ -168,15 +170,21 @@ func (r *Runner) saveCache(ctx context.Context, claim *app.JobClaim, cacheDir st
 	slog.Info("cache saved", "key", claim.Cache.Key, "bytes", n)
 }
 
-// tarFrom packs the cache subdirectories into gzipped tar, stopping at max.
+// tarFrom packs the cache subdirectories into gzipped tar, stopping at max. Uses os.OpenRoot so
+// symlinks or races inside the sandbox-writable cache directory cannot read files outside root.
 func tarFrom(w io.Writer, root string, max int64) (int64, error) {
+	dirRoot, err := os.OpenRoot(root)
+	if err != nil {
+		return 0, err
+	}
+	defer dirRoot.Close()
 	counter := &countWriter{w: w}
 	gz := gzip.NewWriter(counter)
 	tw := tar.NewWriter(gz)
 	var written int64
 	for _, sub := range cacheSubdirs {
 		base := filepath.Join(root, sub)
-		if st, err := os.Stat(base); err != nil || !st.IsDir() {
+		if st, err := os.Lstat(base); err != nil || !st.IsDir() {
 			continue
 		}
 		err := filepath.Walk(base, func(path string, fi os.FileInfo, err error) error {
@@ -199,26 +207,47 @@ func tarFrom(w io.Writer, root string, max int64) (int64, error) {
 			} else if !fi.Mode().IsRegular() && !fi.IsDir() {
 				return nil
 			}
-			h, err := tar.FileInfoHeader(fi, link)
-			if err != nil {
-				return nil
-			}
-			h.Name = filepath.ToSlash(rel)
 			if link != "" {
+				// Carried as the link itself, never followed: cacheLink has said it stays inside
+				// the cache.
+				h, err := tar.FileInfoHeader(fi, link)
+				if err != nil {
+					return nil
+				}
+				h.Name = filepath.ToSlash(rel)
 				return tw.WriteHeader(h)
 			}
-			if err := tw.WriteHeader(h); err != nil {
-				return err
-			}
 			if fi.IsDir() {
-				return nil
+				h, err := tar.FileInfoHeader(fi, "")
+				if err != nil {
+					return nil
+				}
+				h.Name = filepath.ToSlash(rel)
+				return tw.WriteHeader(h)
 			}
-			f, err := os.Open(path)
+			// Opened through the root, not by path: the sandbox owns this directory and could swap
+			// the file for a link between the walk's Lstat and the open.
+			f, err := dirRoot.Open(rel)
 			if err != nil {
 				return nil
 			}
 			defer f.Close()
-			n, err := io.Copy(tw, f)
+			st, err := f.Stat()
+			if err != nil || !st.Mode().IsRegular() {
+				return nil
+			}
+			if written+st.Size() > max {
+				return nil
+			}
+			h, err := tar.FileInfoHeader(st, "")
+			if err != nil {
+				return nil
+			}
+			h.Name = filepath.ToSlash(rel)
+			if err := tw.WriteHeader(h); err != nil {
+				return err
+			}
+			n, err := io.Copy(tw, io.LimitReader(f, st.Size()))
 			written += n
 			return err
 		})
@@ -304,6 +333,9 @@ func untarInto(r io.Reader, root string) (total int64, err error) {
 		case tar.TypeDir:
 			os.MkdirAll(dest, 0o755)
 		case tar.TypeReg:
+			if total >= app.JobCacheMaxBytes {
+				return total, io.ErrShortWrite
+			}
 			if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 				continue
 			}
@@ -311,11 +343,16 @@ func untarInto(r io.Reader, root string) (total int64, err error) {
 			if err != nil {
 				continue
 			}
-			n, err := io.Copy(f, io.LimitReader(tr, app.JobCacheMaxBytes))
+			rem := app.JobCacheMaxBytes - total
+			n, err := io.Copy(f, io.LimitReader(tr, rem+1))
 			f.Close()
 			total += n
 			if err != nil {
 				return total, err
+			}
+			if n > rem {
+				os.Remove(dest)
+				return total, io.ErrShortWrite
 			}
 		}
 	}

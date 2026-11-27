@@ -93,6 +93,9 @@ func (a *Agent) proxied(ctx context.Context, c *Call, p ProxyRequest) (string, e
 		if c.Silent {
 			return c.silentRefusal(strings.ToUpper(p.Method) + " " + p.URL), nil
 		}
+		if !c.canHoldMore() {
+			return fmt.Sprintf("You already have %d writes waiting for confirmation in this turn. Finish replying so the user can confirm or cancel them first.", maxHeldPerTurn), nil
+		}
 		raw, _ := json.Marshal(p)
 		c.holdForGrant(raw)
 		return fmt.Sprintf("Held for approval: %s %s needs a named approver's OK, and it is not %s's to confirm. "+
@@ -155,6 +158,9 @@ func (a *Agent) proxied(ctx context.Context, c *Call, p ProxyRequest) (string, e
 		}
 		if c.Silent {
 			return c.silentRefusal(strings.ToUpper(p.Method) + " " + p.URL), nil
+		}
+		if !c.canHoldMore() {
+			return fmt.Sprintf("You already have %d writes waiting for confirmation in this turn. Finish replying so the user can confirm or cancel them first.", maxHeldPerTurn), nil
 		}
 		raw, _ := json.Marshal(p)
 		id, aerr := a.store.AddPendingWrite(ctx, c.OrgID, c.TeamID, c.Channel, c.ThreadTS, c.UserID, string(raw))
@@ -363,7 +369,7 @@ const clickupListTTL = 10 * time.Minute
 // getJSON runs a read through the proxy and decodes it, for tools that need several calls.
 func (a *Agent) getJSON(ctx context.Context, c *Call, url string, out any) error {
 	resp, err := a.proxy.Do(ctx, c.OrgID, c.Access, ProxyRequest{Method: "GET", URL: url, MaxBytes: proxyMaxRead},
-		callAudit(c), true)
+		callAudit(c), false)
 	if err != nil {
 		return err
 	}

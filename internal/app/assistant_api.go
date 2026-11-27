@@ -205,6 +205,7 @@ func decodeAssistant(r *http.Request) (assistantRequest, []consoleAttachment, er
 	if !strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
 		return req, nil, decode(r, &req)
 	}
+	r.Body = http.MaxBytesReader(nil, r.Body, assistantMaxTotal+(1<<20))
 	if err := r.ParseMultipartForm(assistantMaxTotal); err != nil {
 		return req, nil, err
 	}

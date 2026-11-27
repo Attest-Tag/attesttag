@@ -27,9 +27,20 @@ func billingCfg() Config {
 	}
 }
 
+// storeDaysFrom is the store's clock moved by days, for a test that needs a date in its past.
+func storeDaysFrom(days int) string {
+	t0, _ := time.Parse(time.DateTime, now())
+	return t0.AddDate(0, 0, days).Format(time.DateTime)
+}
+
 func billingBot(t *testing.T, cfg Config) (*Bot, *Store) {
 	t.Helper()
 	st := testStore(t)
+	// The Stripe fixtures carry fixed billing periods (2026-09-21 to 2026-10-21); read against the
+	// real clock, every allowance in them lapsed once that date passed.
+	saved := now
+	now = func() string { return "2026-10-01 12:00:00" }
+	t.Cleanup(func() { now = saved })
 	b := &Bot{cfg: cfg, store: st, settings: newSettingsCache(st, cfg), pay: NewPayments(cfg), mail: logMailer{}}
 	return b, st
 }

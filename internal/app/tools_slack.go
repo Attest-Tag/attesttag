@@ -19,7 +19,13 @@ import (
 // every member of the workspace can already read it. Anything else — a private channel, a DM,
 // a group DM — needs the asker to be a member.
 func (a *Agent) canRead(ctx context.Context, c *Call, channel string) error {
-	if channel == "" || channel == c.Channel {
+	if channel == "" {
+		return nil
+	}
+	// In a real channel or routine turn the call is already inside c.Channel; in the console
+	// playground (Preview) the caller picked c.Channel from a dropdown and must still prove
+	// membership before reading a private channel.
+	if channel == c.Channel && !c.Preview {
 		return nil
 	}
 	if c.SL == nil {
@@ -31,7 +37,9 @@ func (a *Agent) canRead(ctx context.Context, c *Call, channel string) error {
 	// The channel's name is only needed to explain a refusal, and costs a call, so it is
 	// resolved here rather than on the path where the read is allowed.
 	who := func() string { return c.SL.ChannelName(ctx, channel) }
-	if c.UserID == "" {
+	// Never check IsMember against the bot's own user id or a synthetic email requester: the
+	// bot is a member of every private channel it was invited to, which would otherwise pass.
+	if c.UserID == "" || c.UserID == c.SL.BotUserID || isEmailRequester(c.UserID) {
 		return fmt.Errorf("I can't tell who is asking, so I won't read #%s", who())
 	}
 	member, err := c.SL.IsMember(ctx, channel, c.UserID)

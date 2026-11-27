@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -50,6 +51,12 @@ type heldWrite struct {
 // maxHeldPerTurn bounds the cards one turn can put in a thread. A turn that wants to ask five
 // separate permissions has misunderstood the job.
 const maxHeldPerTurn = 3
+
+// canHoldMore reports whether this turn still has room for another confirmation card. Checked
+// before inserting into pending_writes so excess writes cannot be orphaned past maxHeldPerTurn.
+func (c *Call) canHoldMore() bool {
+	return len(c.held) < maxHeldPerTurn
+}
 
 // holdForConfirm records a write this turn is waiting on, so its card goes out with the reply.
 func (c *Call) holdForConfirm(id int64, summary string) {
@@ -348,6 +355,37 @@ func (b *Bot) mayConfirm(ctx context.Context, sl *Chat, user, requester string) 
 	return b.agent != nil && b.agent.rankOf(ctx, sl.OrgID, sl, user) >= 0
 }
 
+// pendingWriteUsesPersonalAuth reports whether a held HTTP write targets a per-person
+// oauth_user connection. An approver may confirm a channel-scoped write on someone else's
+// behalf, but never spend another person's personal OAuth token.
+func (b *Bot) pendingWriteUsesPersonalAuth(ctx context.Context, orgID int64, teamID, channel, raw string) bool {
+	if b.resolver == nil || b.proxy == nil || raw == "" {
+		return false
+	}
+	var req ProxyRequest
+	if json.Unmarshal([]byte(raw), &req) != nil || req.URL == "" {
+		return false
+	}
+	u, err := url.Parse(strings.TrimSpace(req.URL))
+	if err != nil {
+		return false
+	}
+	method := strings.ToUpper(req.Method)
+	if method == "" {
+		method = "GET"
+	}
+	var ver int64
+	if b.settings != nil {
+		ver = b.settings.Get(ctx, orgID).ConfigVersion
+	}
+	acc, err := b.resolver.Resolve(ctx, orgID, teamID, channel, ver)
+	if err != nil || acc == nil {
+		return false
+	}
+	conn, _ := b.proxy.MatchNamed(acc, method, u, req.Connection)
+	return conn != nil && conn.CredType == "oauth_user"
+}
+
 // confirmPressed runs a held write after someone pressed Confirm.
 func (b *Bot) confirmPressed(ctx context.Context, sl *Chat, channel, threadTS, card, user, summary string, id int64) {
 	requester, err := b.store.PendingWriteRequester(ctx, sl.OrgID, sl.TeamID, channel, id)
@@ -358,6 +396,12 @@ func (b *Bot) confirmPressed(ctx context.Context, sl *Chat, channel, threadTS, c
 	if !b.mayConfirm(ctx, sl, user, requester) {
 		sl.PostText(ctx, channel, threadTS, fmt.Sprintf("<@%s>, only <@%s> or an approver can confirm this one.", user, requester))
 		return
+	}
+	if user != requester {
+		if raw, _ := b.store.PendingWriteRequest(ctx, sl.OrgID, id); raw != "" && b.pendingWriteUsesPersonalAuth(ctx, sl.OrgID, sl.TeamID, channel, raw) {
+			sl.PostText(ctx, channel, threadTS, fmt.Sprintf("<@%s>, only <@%s> can confirm an action on their own connected account.", user, requester))
+			return
+		}
 	}
 	raw, err := b.store.TakePendingWriteByID(ctx, sl.OrgID, sl.TeamID, channel, id)
 	if err != nil || raw == "" {

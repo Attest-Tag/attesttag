@@ -936,6 +936,9 @@ func (a *Agent) fixJobTool(c *Call) Tool {
 					return fmt.Sprintf("Fix job #%d started on %s (pre-approved by the allow rule %q). A checklist message in this thread tracks it and the result is posted when it finishes. Tell the user it is running and stop; do not wait for it or call this tool again.", job.ID, job.Repo, rule), nil
 				}
 			}
+			if !c.canHoldMore() {
+				return fmt.Sprintf("You already have %d writes waiting for confirmation in this turn. Finish replying so the user can confirm or cancel them first.", maxHeldPerTurn), nil
+			}
 			held, _ := json.Marshal(map[string]any{"job": spec})
 			id, err := a.store.AddPendingWrite(ctx, c.OrgID, c.TeamID, c.Channel, c.ThreadTS, c.UserID, string(held))
 			if err != nil {
@@ -1038,13 +1041,17 @@ func (r *JobRunner) rememberRecipe(ctx context.Context, j *Job, res *JobResult) 
 	if err != nil || conn == nil || conn.Recipe != nil || strings.TrimSpace(conn.TestCmd) != "" {
 		return
 	}
-	stored := *res.Recipe
-	stored.Source = RecipeSourceDetected
-	if err := r.store.SetConnectionRecipe(ctx, j.OrgID, j.ConnectionID, &stored); err != nil {
+	validated, err := validateRecipeInput(res.Recipe)
+	if err != nil {
+		slog.Warn("ignoring invalid worker recipe", "job", j.ID, "connection", j.ConnectionID, "err", err)
+		return
+	}
+	validated.Source = RecipeSourceDetected
+	if err := r.store.SetConnectionRecipe(ctx, j.OrgID, j.ConnectionID, validated); err != nil {
 		slog.Warn("remember recipe", "job", j.ID, "connection", j.ConnectionID, "err", err)
 		return
 	}
-	slog.Info("recipe remembered", "connection", j.ConnectionID, "repo", j.Repo, "ecosystem", stored.Ecosystem, "recipe", stored.Describe())
+	slog.Info("recipe remembered", "connection", j.ConnectionID, "repo", j.Repo, "ecosystem", validated.Ecosystem, "recipe", validated.Describe())
 }
 
 // workerFor is which worker image this repository needs. It reads the ecosystem off whatever

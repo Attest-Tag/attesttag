@@ -2,11 +2,32 @@ package worker
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 )
+
+// readRepoFile reads a file strictly confined inside root via os.OpenRoot, refusing symlinks
+// that point outside the repository (such as /proc/self/environ) and capping bytes read.
+func readRepoFile(root, rel string, maxBytes int64) ([]byte, error) {
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	f, err := r.Open(filepath.FromSlash(rel))
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || !st.Mode().IsRegular() {
+		return nil, os.ErrInvalid
+	}
+	return io.ReadAll(io.LimitReader(f, maxBytes))
+}
 
 // What the engine is told about the repository itself, beyond the brief: a two-level map of the
 // tree and whatever the repository says about how to work in it. Both are cheap to produce and
@@ -45,6 +66,9 @@ func repoMap(root string, maxEntries int) string {
 			if strings.HasPrefix(name, ".") && name != ".attest" && name != ".github" {
 				continue
 			}
+			if e.Type()&os.ModeSymlink != 0 {
+				continue
+			}
 			if e.IsDir() && skipDir[name] {
 				continue
 			}
@@ -76,7 +100,7 @@ var conventionFiles = []string{"AGENTS.md", "CLAUDE.md", ".github/copilot-instru
 // instructions: a file in a repository is not a way to tell this worker what to do.
 func conventions(root string, max int) string {
 	for _, name := range conventionFiles {
-		raw, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(name)))
+		raw, err := readRepoFile(root, name, int64(max)+1024)
 		if err != nil || len(raw) == 0 {
 			continue
 		}

@@ -1051,6 +1051,11 @@ func (b *Bot) routes(mux *http.ServeMux, uiFS fs.FS) {
 			fail(w, err)
 			return
 		}
+		// Widening an oauth_user connection's hosts outside preset options would let existing
+		// personal tokens be sent to a host nobody consented to; revoke them immediately.
+		if cur.CredType == "oauth_user" && in.Options == nil && hostsWidened(cur.AllowedHosts, c.AllowedHosts) {
+			b.revokeAllUnder(r.Context(), orgOf(r), c.ID)
+		}
 		b.audit(r, "connection.updated", AuditEvent{TargetKind: "connection", TargetID: strconv.FormatInt(c.ID, 10), TargetName: c.Name,
 			Details: auditDetails(map[string]any{"secret_rotated": sec != nil, "preset": c.Preset, "allowed_hosts": c.AllowedHosts})})
 		// The credential may have just been rotated. Both caches keyed on this connection hold
@@ -1225,12 +1230,17 @@ func (b *Bot) routes(mux *http.ServeMux, uiFS fs.FS) {
 		}
 		// Cleaned here as well as inside Move, because the folders remembered below have to be
 		// the ones the document actually landed in.
+		from, err := cleanRel(in.From)
+		if err != nil {
+			bad(w, err)
+			return
+		}
 		to, err := cleanRel(in.To)
 		if err != nil {
 			bad(w, err)
 			return
 		}
-		if err := b.docs.For(orgOf(r)).Move(r.Context(), in.From, to); err != nil {
+		if err := b.docs.For(orgOf(r)).Move(r.Context(), from, to); err != nil {
 			fail(w, err)
 			return
 		}
@@ -1820,10 +1830,14 @@ func (b *Bot) routes(mux *http.ServeMux, uiFS fs.FS) {
 			fail(w, err)
 			return
 		}
-		if rs == nil {
-			rs = []Routine{}
+		me := adminFromCtx(r.Context())
+		out := make([]Routine, 0, len(rs))
+		for i := range rs {
+			if b.canSeeRoutine(r.Context(), me, &rs[i]) {
+				out = append(out, rs[i])
+			}
 		}
-		writeJSON(w, 200, rs)
+		writeJSON(w, 200, out)
 	}))
 	// A routine set up in the console rather than by asking for one in Slack. It takes the
 	// fields the editor writes plus the two only a creation can decide — the channel it posts
@@ -1900,15 +1914,20 @@ func (b *Bot) routes(mux *http.ServeMux, uiFS fs.FS) {
 			return
 		}
 		me := adminFromCtx(r.Context())
+		editedBy := me.UserID
+		if before := b.routineByID(r.Context(), orgOf(r), pathID(r, "id")); before != nil && before.TeamID != "" {
+			editedBy = ""
+			if self, ok := b.selfFor(r.Context(), me, before.TeamID); ok {
+				editedBy = self.SlackUserID
+			}
+		}
 		wasRunningAs, err := b.editRoutine(r.Context(), orgOf(r), pathID(r, "id"), routineEdit{
 			Enabled: in.Enabled, Cron: in.Cron, TZ: in.TZ, Prompt: in.Prompt, Channel: in.Channel, TeamID: in.TeamID,
 			Notify: in.Notify, NotifyWhen: in.NotifyWhen, Steps: in.Steps, Finish: in.Finish, Model: in.Model,
 			AutoConfirm: in.AutoConfirm,
-			// Who is making the change, so the store can decide whether the routine may go on
-			// running as the person who wrote it. Empty for a password session or an API key,
-			// which is the safe reading rather than a gap: neither one is anybody's Slack
-			// account, so neither can hand a run somebody's personal connections.
-			EditedBy: me.UserID,
+			// Who is making the change, matched to the routine's workspace so the store can
+			// decide whether the routine may go on running as the person who wrote it.
+			EditedBy: editedBy,
 		})
 		if err != nil {
 			bad(w, err)
@@ -1917,16 +1936,23 @@ func (b *Bot) routes(mux *http.ServeMux, uiFS fs.FS) {
 		if wasRunningAs != "" {
 			// Taken off the person who wrote it: said in the response so the console can show
 			// it, and to them by editRoutine, so they do not have to be looking.
-			writeJSON(w, 200, map[string]any{"ok": true, "runsAs": me.UserID, "wasRunningAs": wasRunningAs})
+			writeJSON(w, 200, map[string]any{"ok": true, "runsAs": editedBy, "wasRunningAs": wasRunningAs})
 			return
 		}
 		writeJSON(w, 200, map[string]any{"ok": true})
 	}))
-	// A routine's history, including the runs that decided to stay out of the channel. Readable
-	// by anyone who can see the routine itself, which is what GET /api/routines allows.
+	// A routine's history, including the runs that decided to stay out of the channel. Private DM
+	// routines belong only to the person who created them, so other console users cannot read
+	// their run outputs.
 	mux.HandleFunc("GET /api/routines/{id}/runs", b.requireAdmin(func(w http.ResponseWriter, r *http.Request) {
+		ctx, org, id := r.Context(), orgOf(r), pathID(r, "id")
+		rt := b.routineByID(ctx, org, id)
+		if rt == nil || !b.canSeeRoutine(ctx, adminFromCtx(ctx), rt) {
+			writeJSON(w, 404, map[string]any{"error": "no such routine"})
+			return
+		}
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-		runs, err := b.store.RoutineRuns(r.Context(), orgOf(r), pathID(r, "id"), limit)
+		runs, err := b.store.RoutineRuns(ctx, org, id, limit)
 		if err != nil {
 			fail(w, err)
 			return
@@ -1939,8 +1965,14 @@ func (b *Bot) routes(mux *http.ServeMux, uiFS fs.FS) {
 	}))
 	// One run with its output whole, the way a long tool result waits behind its own route.
 	mux.HandleFunc("GET /api/routine-runs/{id}", b.requireAdmin(func(w http.ResponseWriter, r *http.Request) {
-		run, err := b.store.RoutineRunByID(r.Context(), orgOf(r), pathID(r, "id"))
+		ctx, org := r.Context(), orgOf(r)
+		run, err := b.store.RoutineRunByID(ctx, org, pathID(r, "id"))
 		if err != nil {
+			writeJSON(w, 404, map[string]any{"error": "no such run"})
+			return
+		}
+		rt := b.routineByID(ctx, org, run.RoutineID)
+		if rt == nil || !b.canSeeRoutine(ctx, adminFromCtx(ctx), rt) {
 			writeJSON(w, 404, map[string]any{"error": "no such run"})
 			return
 		}
@@ -2767,7 +2799,7 @@ func (b *Bot) buildConnection(in *connectionInput, cur *Connection) (*Connection
 		h = strings.ToLower(strings.TrimSpace(h))
 		h = strings.TrimPrefix(strings.TrimPrefix(h, "https://"), "http://")
 		h = strings.TrimSuffix(h, "/")
-		if h == "" || h == "*" || strings.Contains(h, "/") {
+		if !validAllowedHost(h) {
 			return nil, nil, fmt.Errorf("invalid host %q: use a hostname, wildcard only as the leftmost label", h)
 		}
 		c.AllowedHosts[i] = h
@@ -2905,6 +2937,10 @@ func (b *Bot) buildConnection(in *connectionInput, cur *Connection) (*Connection
 		}
 	} else if cur == nil {
 		return nil, nil, fmt.Errorf("a credential is required")
+	} else if optHosts == nil && hostsWidened(cur.AllowedHosts, c.AllowedHosts) {
+		// Pointing a stored credential at a new host without re-entering it would let any
+		// connection manager exfiltrate the sealed secret to a server they control.
+		return nil, nil, fmt.Errorf("adding or widening allowed_hosts requires re-entering the credential")
 	}
 
 	// The ticked boxes changed but nobody retyped the credential — the ordinary way an admin
@@ -2926,6 +2962,78 @@ func (b *Bot) buildConnection(in *connectionInput, cur *Connection) (*Connection
 		}
 	}
 	return c, sec, nil
+}
+
+// canSeeRoutine reports whether me may view rt and its run history. Private DM routines belong
+// strictly to the person who created them (matched in the routine's workspace).
+func (b *Bot) canSeeRoutine(ctx context.Context, me *AdminUser, rt *Routine) bool {
+	if rt == nil || !isDirectConversation(rt.Channel) || rt.CreatedBy == "" {
+		return true
+	}
+	if me == nil {
+		return false
+	}
+	if rt.TeamID != "" {
+		if self, ok := b.selfFor(ctx, me, rt.TeamID); ok && self.SlackUserID == rt.CreatedBy {
+			return true
+		}
+		return false
+	}
+	return me.UserID != "" && me.UserID == rt.CreatedBy
+}
+
+// validAllowedHost accepts a concrete hostname or a leftmost wildcard with at least two labels
+// after "*." (e.g. "*.example.com"), rejecting degenerate wildcards such as "*." or "*.com".
+func validAllowedHost(h string) bool {
+	if h == "" || h == "*" || strings.ContainsAny(h, "/\\ \t\r\n:@?#") {
+		return false
+	}
+	if strings.HasPrefix(h, "*.") {
+		base := h[2:]
+		if strings.Contains(base, "*") || !strings.Contains(base, ".") {
+			return false
+		}
+		h = base
+	} else if strings.Contains(h, "*") {
+		return false
+	}
+	if strings.HasPrefix(h, ".") || strings.HasSuffix(h, ".") || strings.Contains(h, "..") {
+		return false
+	}
+	return true
+}
+
+// hostsWidened reports whether next allows any host not already covered by prev.
+func hostsWidened(prev, next []string) bool {
+	for _, nh := range next {
+		nh = strings.ToLower(strings.TrimSpace(nh))
+		if !hostPatternCovered(nh, prev) {
+			return true
+		}
+	}
+	return false
+}
+
+func hostPatternCovered(candidate string, allowed []string) bool {
+	if strings.HasPrefix(candidate, "*.") {
+		cBase := candidate[2:]
+		for _, p := range allowed {
+			p = strings.ToLower(strings.TrimSpace(p))
+			if p == candidate {
+				return true
+			}
+			if strings.HasPrefix(p, "*.") && strings.HasSuffix(cBase, p[1:]) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, p := range allowed {
+		if hostMatch(p, candidate) {
+			return true
+		}
+	}
+	return false
 }
 
 func validateSecret(credType string, s *Secret) error {

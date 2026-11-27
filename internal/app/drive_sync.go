@@ -141,6 +141,9 @@ func newDriveAPI(proxy *Proxy, conn *Connection, orgID int64) (*driveAPI, error)
 	if conn == nil {
 		return nil, errors.New("the credential this sync used has been deleted")
 	}
+	if conn.Status != "" && conn.Status != "active" {
+		return nil, fmt.Errorf("connection %q is not active", conn.Name)
+	}
 	// Google Workspace shares this host and would pass the allow-list check below, so the
 	// credential type is what turns it away: it holds one token per person, and a sync acts for
 	// nobody in particular. Caught here as well as in the picker, because the API takes an id.
@@ -156,6 +159,18 @@ func newDriveAPI(proxy *Proxy, conn *Connection, orgID int64) (*driveAPI, error)
 	// not against the constant, so it cannot pass for one host and then dial another.
 	if !hostAllowed(conn, host) {
 		return nil, fmt.Errorf("connection %q is not allowed to reach %s", conn.Name, host)
+	}
+	if len(conn.PathPrefixes) > 0 {
+		ok := false
+		for _, pfx := range conn.PathPrefixes {
+			if pathMatchesPrefix("/drive/v3/files", pfx) {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return nil, fmt.Errorf("connection %q is not allowed to reach /drive/v3", conn.Name)
+		}
 	}
 	return &driveAPI{proxy: proxy, conn: conn, orgID: orgID, scheme: scheme, host: host, client: client}, nil
 }
@@ -179,12 +194,12 @@ func (d *driveAPI) do(ctx context.Context, path string, q url.Values) (*http.Res
 	if err != nil {
 		return nil, err
 	}
-	if err := d.proxy.inject(ctx, d.orgID, d.conn, req, ProxyAudit{}, githubPurposeDefault); err != nil {
+	if _, err := d.proxy.inject(ctx, d.orgID, d.conn, req, ProxyAudit{}, githubPurposeDefault); err != nil {
 		return nil, fmt.Errorf("%w: %w", errCredential, err)
 	}
 	res, err := d.client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, safeTransportErr(http.MethodGet, d.host, err)
 	}
 	if res.StatusCode/100 != 2 {
 		body, _ := io.ReadAll(io.LimitReader(res.Body, 2<<10))

@@ -186,7 +186,11 @@ func describeHTTPWriteDestination(conn *Connection, req ProxyRequest) string {
 	if conn != nil {
 		via = fmt.Sprintf("connection %q (preset %s)", conn.Name, conn.Preset)
 	}
-	return fmt.Sprintf("HTTP %s %s via %s", strings.ToUpper(req.Method), req.URL, via)
+	dest := req.URL
+	if i := strings.IndexAny(dest, "?#"); i >= 0 {
+		dest = dest[:i]
+	}
+	return fmt.Sprintf("HTTP %s %s via %s", strings.ToUpper(req.Method), dest, via)
 }
 
 func describeMCPWriteDestination(conn *Connection, tool string) string {

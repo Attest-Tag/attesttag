@@ -577,20 +577,42 @@ func changesData(method string, u *url.URL) bool {
 // is therefore held unless the Action names a read; the default is write, the stance
 // mcpLooksReadOnly already takes for a tool whose verb it does not know. A GET with no Action is an
 // ordinary REST read (S3 GetObject travels as a path, not an Action) and is left alone.
+//
+// Every Action the query carries is read, under any spelling of the key: a second Action after a
+// read one must not ride through on the first. HEAD and OPTIONS are read verbs as much as GET.
 func awsGetActionWrites(conn *Connection, method string, u *url.URL) bool {
-	if conn == nil || conn.CredType != "aws_sigv4" || u == nil || strings.ToUpper(method) != "GET" {
+	if conn == nil || conn.CredType != "aws_sigv4" || u == nil || isWrite(method) {
 		return false
 	}
-	action := u.Query().Get("Action")
-	if action == "" {
+	for key, actions := range u.Query() {
+		if !strings.EqualFold(key, "Action") {
+			continue
+		}
+		for _, action := range actions {
+			if action = strings.TrimSpace(action); action != "" && !awsReadAction(action) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// awsReadAction is whether an Action names a read. The calls that mint a credential read like
+// reads — GetSessionToken, GetFederationToken — and answer with a fresh secret, so they are held.
+func awsReadAction(action string) bool {
+	if awsMintingActions[strings.ToLower(action)] {
 		return false
 	}
 	for _, read := range awsReadActionPrefixes {
 		if strings.HasPrefix(action, read) {
-			return false
+			return true
 		}
 	}
-	return true
+	return false
+}
+
+var awsMintingActions = map[string]bool{
+	"getsessiontoken": true, "getfederationtoken": true, "getauthorizationtoken": true, "getcredentialsforidentity": true,
 }
 
 // The verbs an AWS query-protocol read begins with. Everything else — Create, Delete, Terminate,
@@ -643,19 +665,59 @@ func methodOverride(req ProxyRequest, u *url.URL) (verb, where string) {
 		}
 	}
 	if u != nil {
-		q := u.Query()
-		for _, f := range methodOverrideFields {
-			if verb := writeVerb(q.Get(f)); verb != "" {
-				return verb, f + " in the query string"
+		for k, vals := range u.Query() {
+			for _, f := range methodOverrideFields {
+				if strings.EqualFold(k, f) {
+					for _, v := range vals {
+						if verb := writeVerb(v); verb != "" {
+							return verb, f + " in the query string"
+						}
+					}
+				}
 			}
 		}
 	}
-	if m := methodOverrideBody.FindStringSubmatch(req.Body); m != nil {
+	for _, m := range methodOverrideBody.FindAllStringSubmatch(req.Body, -1) {
 		if verb := writeVerb(m[1]); verb != "" {
 			return verb, "_method in the body"
 		}
 	}
+	if body := strings.TrimSpace(req.Body); strings.HasPrefix(body, "{") || strings.HasPrefix(body, "[") {
+		var parsed any
+		if json.Unmarshal([]byte(body), &parsed) == nil {
+			if verb := findJSONMethodOverride(parsed); verb != "" {
+				return verb, "_method in the body"
+			}
+		}
+	}
 	return "", ""
+}
+
+func findJSONMethodOverride(v any) string {
+	switch x := v.(type) {
+	case map[string]any:
+		for k, val := range x {
+			for _, f := range methodOverrideFields {
+				if strings.EqualFold(k, f) {
+					if s, ok := val.(string); ok {
+						if verb := writeVerb(s); verb != "" {
+							return verb
+						}
+					}
+				}
+			}
+			if verb := findJSONMethodOverride(val); verb != "" {
+				return verb
+			}
+		}
+	case []any:
+		for _, item := range x {
+			if verb := findJSONMethodOverride(item); verb != "" {
+				return verb
+			}
+		}
+	}
+	return ""
 }
 
 // ErrNeedsApproval is the stronger sibling of ErrNeedsConfirmation: this write is not the
@@ -684,12 +746,16 @@ func needsApproval(conn *Connection, method string, u *url.URL) bool {
 	return conn != nil && conn.AllowGrants && (isWrite(method) || awsGetActionWrites(conn, method, u))
 }
 
-// hasDotSegment reports a path carrying a "." or ".." segment, in either its plain or its
-// percent-encoded spelling. Nothing here resolves them, because resolving is the bug: the path
-// that is matched has to be the path that goes on the wire, and the server at the other end is
-// the one that collapses "..".
+// hasDotSegment reports a path carrying a "." or ".." segment, backslash or matrix parameter
+// separator (";"), in plain or percent-encoded spelling. Nothing here resolves them, because
+// resolving is the bug: the path matched has to be the path that goes on the wire.
 func hasDotSegment(u *url.URL) bool {
 	for _, raw := range []string{u.Path, u.EscapedPath()} {
+		low := strings.ToLower(raw)
+		if strings.Contains(raw, "\\") || strings.Contains(low, "%5c") ||
+			strings.Contains(raw, ";") || strings.Contains(low, "%3b") {
+			return true
+		}
 		for _, seg := range strings.Split(raw, "/") {
 			switch strings.ReplaceAll(strings.ToLower(seg), "%2e", ".") {
 			case ".", "..":
@@ -698,6 +764,19 @@ func hasDotSegment(u *url.URL) bool {
 		}
 	}
 	return false
+}
+
+// pathMatchesPrefix enforces a segment boundary when matching a connection's PathPrefixes, so
+// "/v1/items" matches "/v1/items", "/v1/items/123", Google's "/v1/items:list" and the format
+// suffix older APIs take ("/v1/items.json"), but not "/v1/items-admin".
+func pathMatchesPrefix(path, pfx string) bool {
+	if pfx == "/" {
+		return strings.HasPrefix(path, "/")
+	}
+	if strings.HasSuffix(pfx, "/") {
+		return strings.HasPrefix(path, pfx)
+	}
+	return path == pfx || strings.HasPrefix(path, pfx+"/") || strings.HasPrefix(path, pfx+":") || strings.HasPrefix(path, pfx+".")
 }
 
 // Match finds the rule (or credential-less domain) covering a URL. Returns the connection
@@ -815,7 +894,7 @@ func coveringConns(acc *Access, method string, u *url.URL) ([]coverage, string) 
 			if len(r.Conn.PathPrefixes) > 0 {
 				ok := false
 				for _, pfx := range r.Conn.PathPrefixes {
-					if strings.HasPrefix(u.Path, pfx) {
+					if pathMatchesPrefix(u.Path, pfx) {
 						ok = true
 						// Measured without a trailing slash. "/drive/v3/" claims nothing that
 						// "/drive/v3" does not, but counted as written it is one longer, and one
@@ -1068,8 +1147,10 @@ func (p *Proxy) Do(ctx context.Context, orgID int64, acc *Access, req ProxyReque
 		}
 		hr.Header.Set(k, v)
 	}
+	var wireSecrets []string
 	if conn != nil {
-		if err := p.inject(ctx, orgID, conn, hr, audit, req.Purpose); err != nil {
+		var err error
+		if wireSecrets, err = p.inject(ctx, orgID, conn, hr, audit, req.Purpose); err != nil {
 			// Nobody has signed in yet: that is not a credential fault, it is a person who has
 			// not been asked. Let it up untouched so the caller can send them a link.
 			if errors.Is(err, ErrNeedsUserAuth) {
@@ -1117,7 +1198,7 @@ func (p *Proxy) Do(ctx context.Context, orgID int64, acc *Access, req ProxyReque
 		text = cleanHTML(text)
 	}
 	if conn != nil {
-		text = p.scrubSecrets(conn, text)
+		text = p.scrubSecrets(conn, text, wireSecrets...)
 	}
 	if truncated && !req.Raw {
 		text += fmt.Sprintf("\n\n[truncated: the response is larger than %d bytes; narrow it with the API's own paging or filters]", limit)
@@ -1235,16 +1316,25 @@ func (p *Proxy) userConnection(ctx context.Context, orgID int64, conn *Connectio
 	return uc, nil
 }
 
-// scrubSecrets removes the connection's own credential values from a response body, in case
-// the service echoes them back (some debug endpoints do).
-func (p *Proxy) scrubSecrets(conn *Connection, text string) string {
-	s, err := p.secret(conn)
-	if err != nil {
-		return text
-	}
-	vals := []string{s.Token, s.Password, s.ClientSecret, s.AWSSecret, s.AWSSessionToken}
-	for _, v := range s.Headers {
-		vals = append(vals, v)
+// scrubSecrets removes the connection's own credential values — including minted tokens, Basic
+// Auth base64 blobs, and URL-encoded query values — from a response body, in case the service
+// echoes them back (some debug endpoints do).
+func (p *Proxy) scrubSecrets(conn *Connection, text string, extra ...string) string {
+	vals := append([]string{}, extra...)
+	if s, err := p.secret(conn); err == nil && s != nil {
+		vals = append(vals, s.Token, s.Password, s.ClientSecret, s.AWSSecret, s.AWSSessionToken)
+		if s.User != "" || s.Password != "" {
+			vals = append(vals, base64.StdEncoding.EncodeToString([]byte(s.User+":"+s.Password)))
+		}
+		if s.Token != "" {
+			vals = append(vals, url.QueryEscape(s.Token))
+		}
+		if s.OAuth != nil {
+			vals = append(vals, s.OAuth.AccessToken, s.OAuth.RefreshToken, s.OAuth.ClientSecret)
+		}
+		for _, v := range s.Headers {
+			vals = append(vals, v)
+		}
 	}
 	for _, v := range vals {
 		if len(v) >= 6 {
@@ -1268,10 +1358,11 @@ func (p *Proxy) secret(conn *Connection) (*Secret, error) {
 
 // inject sets the connection's credential on hr. purpose is ProxyRequest.Purpose, which only a
 // github_app connection's minted token can honour; Do refuses it for anything else before here.
-func (p *Proxy) inject(ctx context.Context, orgID int64, conn *Connection, hr *http.Request, audit ProxyAudit, purpose string) error {
+// It returns the tokens it minted on the way, so that Do can scrub them from the response too.
+func (p *Proxy) inject(ctx context.Context, orgID int64, conn *Connection, hr *http.Request, audit ProxyAudit, purpose string) ([]string, error) {
 	s, err := p.secret(conn)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if pr := presetByID(conn.Preset); pr != nil {
 		for k, v := range pr.StaticHeaders {
@@ -1283,6 +1374,7 @@ func (p *Proxy) inject(ctx context.Context, orgID int64, conn *Connection, hr *h
 	for name, val := range s.Headers { // extra secret headers (e.g. DD-APPLICATION-KEY)
 		hr.Header.Set(name, val)
 	}
+	var minted []string
 	switch conn.CredType {
 	case "bearer":
 		hr.Header.Set("Authorization", "Bearer "+s.Token)
@@ -1306,7 +1398,7 @@ func (p *Proxy) inject(ctx context.Context, orgID int64, conn *Connection, hr *h
 	case "query":
 		name := s.HeaderName
 		if name == "" {
-			return errors.New("query parameter name missing")
+			return nil, errors.New("query parameter name missing")
 		}
 		q := hr.URL.Query()
 		q.Set(name, s.Token)
@@ -1314,15 +1406,17 @@ func (p *Proxy) inject(ctx context.Context, orgID int64, conn *Connection, hr *h
 	case "gcp_sa":
 		tok, err := p.gcpToken(ctx, conn.ID, s)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		hr.Header.Set("Authorization", "Bearer "+tok)
+		minted = append(minted, tok)
 	case "oauth2_cc":
 		tok, err := p.clientCredentialsToken(ctx, conn.ID, s)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		hr.Header.Set("Authorization", "Bearer "+tok)
+		minted = append(minted, tok)
 	case "aws_sigv4":
 		// The signature covers the body, so read back what the request was built
 		// with rather than the string the caller happened to have.
@@ -1330,23 +1424,24 @@ func (p *Proxy) inject(ctx context.Context, orgID int64, conn *Connection, hr *h
 		if hr.GetBody != nil {
 			rc, err := hr.GetBody()
 			if err != nil {
-				return err
+				return nil, err
 			}
 			payload, err = io.ReadAll(rc)
 			rc.Close()
 			if err != nil {
-				return err
+				return nil, err
 			}
 		}
-		return signAWSv4(hr, payload, s, time.Now())
+		return nil, signAWSv4(hr, payload, s, time.Now())
 	case "github_app":
 		// No stored token: one is minted from the app key, scoped to this repository, and
 		// cached against the installation rather than this connection.
 		tok, err := p.installationToken(ctx, orgID, conn, s, purpose)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		hr.Header.Set("Authorization", "Bearer "+tok)
+		minted = append(minted, tok)
 	case "oauth_user":
 		// The asker's own token, never the channel's. The connection holds the organisation's
 		// OAuth client and nothing that can call anything; the credential belongs to the person
@@ -1354,17 +1449,18 @@ func (p *Proxy) inject(ctx context.Context, orgID int64, conn *Connection, hr *h
 		// through callAudit. An empty requester therefore means nobody, not everybody.
 		tok, err := p.userToken(ctx, orgID, conn, audit.TeamID, audit.Requester)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		hr.Header.Set("Authorization", "Bearer "+tok)
+		minted = append(minted, tok)
 	case "mcp":
 		if s.Token != "" {
 			hr.Header.Set("Authorization", "Bearer "+s.Token)
 		}
 	default:
-		return fmt.Errorf("unsupported credential type %q", conn.CredType)
+		return nil, fmt.Errorf("unsupported credential type %q", conn.CredType)
 	}
-	return nil
+	return minted, nil
 }
 
 // ---- token exchanges ----

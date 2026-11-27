@@ -260,9 +260,9 @@ func (b *Bot) microsoftIdentity(ctx context.Context, code, nonce, verifier, redi
 		return nil, errors.New("That sign-in was not issued by the organisation it names.")
 	case !(oidcClaims{Audience: claims.Audience}).audienceIs(b.cfg.MSTeamsAppID):
 		return nil, errors.New("That sign-in was issued for a different application.")
-	case claims.Nonce != nonce:
+	case claims.Nonce == "" || claims.Nonce != nonce:
 		return nil, errors.New("That sign-in could not be matched to this browser. Try again.")
-	case claims.Expiry > 0 && time.Now().After(time.Unix(claims.Expiry, 0).Add(2*time.Minute)):
+	case claims.Expiry <= 0 || time.Now().After(time.Unix(claims.Expiry, 0).Add(2*time.Minute)):
 		return nil, errors.New("That sign-in took too long. Try again.")
 	}
 	email := strings.TrimSpace(claims.Email)

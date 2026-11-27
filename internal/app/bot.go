@@ -1002,6 +1002,12 @@ func (b *Bot) confirmFlow(ctx context.Context, sl *Chat, kind, channel, threadTS
 		sl.PostText(ctx, channel, threadTS, fmt.Sprintf("<@%s>, only <@%s> or an approver can confirm this one.", user, requester))
 		return true
 	}
+	if user != requester {
+		if raw, _ := b.store.PendingWriteRequest(ctx, sl.OrgID, id); raw != "" && b.pendingWriteUsesPersonalAuth(ctx, sl.OrgID, sl.TeamID, channel, raw) {
+			sl.PostText(ctx, channel, threadTS, fmt.Sprintf("<@%s>, only <@%s> can confirm an action on their own connected account.", user, requester))
+			return true
+		}
+	}
 	raw, err := b.store.TakePendingWriteByID(ctx, sl.OrgID, sl.TeamID, channel, id)
 	if err != nil || raw == "" {
 		sl.PostText(ctx, channel, threadTS, "That request expired or was already answered.")
@@ -1063,9 +1069,22 @@ func (b *Bot) runStep(ctx context.Context, sl *Chat, orgID int64, acc *Access, a
 			who, held.Job.Repo, job.ID), 0, nil
 	}
 	if pend.MCP != 0 { // an MCP tool call
+		if acc == nil {
+			return "", 0, errors.New("I couldn't read this channel's connections just now, so I've not run it. Try again in a moment.")
+		}
+		allowed := false
+		for _, r := range acc.Rules {
+			if r.Conn != nil && r.Conn.ID == pend.MCP && r.Conn.Status == "active" {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return "", 0, errors.New("That connection is no longer allowed here, so I've not run it.")
+		}
 		conn, _ := b.store.Connection(ctx, orgID, pend.MCP)
-		if conn == nil {
-			return "", 0, errors.New("That connection no longer exists.")
+		if conn == nil || conn.Status != "active" {
+			return "", 0, errors.New("That connection is no longer active.")
 		}
 		out, err := b.agent.mcp.call(ctx, orgID, conn, pend.Tool, pend.Args, audit)
 		if err != nil {

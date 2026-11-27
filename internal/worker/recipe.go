@@ -242,7 +242,7 @@ func stepMissing(s *app.RecipeStep, root, workdir, path string) string {
 // error; malformed is, and the reason reaches the pull request so whoever wrote it finds out.
 func readRepoRecipe(root string) (*app.Recipe, error) {
 	for _, name := range recipeFiles {
-		raw, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(name)))
+		raw, err := readRepoFile(root, name, (64<<10)+1)
 		if err != nil {
 			continue
 		}

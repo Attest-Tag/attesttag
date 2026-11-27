@@ -160,11 +160,18 @@ func (a *Agent) registerAccessTools() {
 	})
 }
 
+type requestAccessCall struct {
+	Label  string `json:"label"`
+	Method string `json:"method"`
+	URL    string `json:"url"`
+	Body   string `json:"body"`
+}
+
 func (a *Agent) requestAccess(ctx context.Context, c *Call, args json.RawMessage) (string, error) {
 	var p struct {
-		What  string      `json:"what"`
-		Why   string      `json:"why"`
-		Calls []grantStep `json:"calls"`
+		What  string              `json:"what"`
+		Why   string              `json:"why"`
+		Calls []requestAccessCall `json:"calls"`
 	}
 	if err := json.Unmarshal(args, &p); err != nil {
 		return "", err
@@ -181,23 +188,41 @@ func (a *Agent) requestAccess(ctx context.Context, c *Call, args json.RawMessage
 		return fmt.Sprintf("%s already has %d access requests waiting for an answer. Ask them to chase "+
 			"those before raising another.", c.SL.UserName(ctx, c.UserID), n), nil
 	}
-	for i := range p.Calls {
-		if _, err := parseGrantURL(p.Calls[i].URL); err != nil {
+	// Decode into a dedicated HTTP-only input shape so the model cannot smuggle internal
+	// grantStep fields (mcp, tool, args, attach_files, job, conn) through request_access.
+	steps := make([]grantStep, len(p.Calls))
+	for i, in := range p.Calls {
+		method := strings.ToUpper(strings.TrimSpace(in.Method))
+		switch method {
+		case "GET", "POST", "PUT", "PATCH", "DELETE":
+		default:
+			return fmt.Sprintf("Step %d: method must be GET, POST, PUT, PATCH or DELETE", i+1), nil
+		}
+		if _, err := parseGrantURL(in.URL); err != nil {
 			return fmt.Sprintf("Step %d: %s", i+1, err.Error()), nil
+		}
+		steps[i] = grantStep{
+			Label:  in.Label,
+			Method: method,
+			URL:    strings.TrimSpace(in.URL),
+			Body:   in.Body,
 		}
 	}
 	// Route before recording. Validating against the tier that will actually run it is the point:
 	// otherwise an approver signs off on something that turns out not to match.
-	t, targets := a.routeTo(ctx, c, p.Calls)
+	t, targets := a.routeTo(ctx, c, steps)
 	if t == nil {
 		return "No approval tier can grant all of that — either the connection is not set up for access " +
 			"grants, or the hosts are outside every approver's bundle. Say so plainly and suggest they ask " +
 			"an admin, rather than trying a different URL.", nil
 	}
-	for i := range p.Calls {
-		step := &p.Calls[i]
+	for i := range steps {
+		step := &steps[i]
 		u, _ := parseGrantURL(step.URL)
-		conn, _ := a.proxy.Match(t.Access, strings.ToUpper(step.Method), u)
+		conn, why := a.proxy.Match(t.Access, strings.ToUpper(step.Method), u)
+		if why != "" || conn == nil {
+			return fmt.Sprintf("Step %d: %s", i+1, nonEmpty(why, "no matching connection")), nil
+		}
 		step.Conn = conn.ID
 		raw, _ := json.Marshal(step)
 		c.holdForGrant(raw)
@@ -251,14 +276,14 @@ func (a *Agent) postAccessRequest(ctx context.Context, c *Call) {
 	// The ordered plan request_access built, if there is one, and then one request per write that
 	// needs an answer of its own. Separate cards, separately answered.
 	if len(c.pendingGrants) > 0 {
-		a.raiseAccessRequest(ctx, c, c.pendingGrants, c.grantWhat, c.grantWhy)
+		a.raiseAccessRequest(ctx, c, c.pendingGrants, c.grantWhat, c.grantWhy, true)
 	}
 	for _, g := range c.soloGrants {
-		a.raiseAccessRequest(ctx, c, g.calls, g.what, "")
+		a.raiseAccessRequest(ctx, c, g.calls, g.what, "", false)
 	}
 }
 
-func (a *Agent) raiseAccessRequest(ctx context.Context, c *Call, calls []json.RawMessage, what, why string) {
+func (a *Agent) raiseAccessRequest(ctx context.Context, c *Call, calls []json.RawMessage, what, why string, usePresetRoute bool) {
 	if len(calls) == 0 {
 		return
 	}
@@ -269,9 +294,10 @@ func (a *Agent) raiseAccessRequest(ctx context.Context, c *Call, calls []json.Ra
 			"I've held that for an approver, but no approval tier can grant it, so I can't ask anyone. An admin can set that up on the Approvers page.")
 		return
 	}
-	if c.grantRole != 0 && c.grantRole != t.Role.ID {
-		// request_access already routed this turn; keep its answer rather than routing twice.
-		if picked, _ := a.store.ApprovalRole(ctx, c.OrgID, c.grantRole); picked != nil {
+	if usePresetRoute && c.grantRole != 0 && c.grantRole != t.Role.ID {
+		// request_access already routed this turn's pendingGrants; keep its answer rather than
+		// routing twice. Never apply c.grantRole/c.grantTargets to unrelated soloGrants.
+		if picked, _ := a.store.ApprovalRole(ctx, c.OrgID, c.grantRole); picked != nil && len(c.grantTargets) > 0 {
 			targets = c.grantTargets
 		}
 	}
@@ -457,6 +483,10 @@ func renderSteps(calls []json.RawMessage) string {
 		b.WriteString("\n")
 		if body := strings.TrimSpace(s.Body); body != "" {
 			fmt.Fprintf(&b, "```%s```\n", escapeCode(truncate(redact(body), 500)))
+		} else if s.MCP != 0 && len(s.Args) > 0 {
+			if rawArgs, err := json.Marshal(s.Args); err == nil {
+				fmt.Fprintf(&b, "```%s```\n", escapeCode(truncate(redact(string(rawArgs)), 500)))
+			}
 		}
 	}
 	return b.String()
@@ -519,17 +549,45 @@ func (b *Bot) mayApprove(ctx context.Context, sl *Chat, user string, r *AccessRe
 	if user == r.Requester && !b.settings.Get(ctx, r.OrgID).AllowSelfApprove {
 		return false, "You can't approve your own access request."
 	}
-	// A tier covers everything below it, so a super admin can answer a request routed to a plain
-	// approver. Both the snapshot taken when the card went out and the live configuration have to
-	// allow it: a later change cannot widen an open request, and removing somebody takes effect now.
-	rank := b.agent.rankOf(ctx, r.OrgID, sl, user)
-	if rank < 0 {
+	// Live tier membership, against the snapshot taken when the card went out: either the presser
+	// still holds the routed role and was one of the approvers it was sent to, or they hold a
+	// strictly higher tier — a higher tier covers everything a lower one can, so a super admin may
+	// answer a plain approver's request, and what runs is the routed tier's grants either way. A
+	// peer tier at the same rank never answers a request routed to another tier.
+	tiers := b.agent.tiers(ctx, r.OrgID, sl)
+	role, _ := b.store.ApprovalRole(ctx, r.OrgID, r.RoleID)
+	routedRank := -1
+	if role != nil {
+		routedRank = role.Rank
+	}
+	heldAny := false
+	maxRank := -1
+	authorized := false
+	for _, t := range tiers {
+		if !slices.Contains(t.Members, user) {
+			continue
+		}
+		heldAny = true
+		if t.Role.Rank > maxRank {
+			maxRank = t.Role.Rank
+		}
+		if r.RoleID != 0 && t.Role.ID == r.RoleID {
+			if len(r.Approvers) == 0 || slices.Contains(r.Approvers, user) {
+				authorized = true
+				break
+			}
+		} else if t.Role.Rank > routedRank {
+			authorized = true
+			break
+		}
+	}
+	if !heldAny {
 		return false, "You don't hold an approval role, so I can't act on this."
 	}
-	if role, _ := b.store.ApprovalRole(ctx, r.OrgID, r.RoleID); role != nil && rank < role.Rank {
-		return false, fmt.Sprintf("This one needs %s or above.", role.Name)
-	}
-	if len(r.Approvers) > 0 && !slices.Contains(r.Approvers, user) && rank == 0 {
+	if !authorized {
+		if role != nil && maxRank < role.Rank {
+			return false, fmt.Sprintf("This one needs %s or above.", role.Name)
+		}
 		return false, "You're not one of the approvers this request was sent to."
 	}
 	// Fresh, not cached: an approval is worth one API call to be sure the account still stands.
@@ -563,9 +621,13 @@ func (b *Bot) accessPressed(ctx context.Context, sl *Chat, user, channel, card s
 		return
 	}
 	if ok, why := b.mayApprove(ctx, sl, user, r); !ok {
-		// Say so on the card. Logging and returning, as the confirm path used to, leaves the
-		// approver watching the spinner clear with nothing to show for it.
-		sl.ResolveCard(ctx, channel, card, Card{}, why)
+		// On a shared channel origin card, do not strip the buttons for actual approvers: reply
+		// in the thread instead. Only resolve a personal DM card directly.
+		if channel == r.Channel {
+			sl.PostText(ctx, r.Channel, r.ThreadTS, fmt.Sprintf("<@%s> %s", user, why))
+		} else {
+			sl.ResolveCard(ctx, channel, card, Card{}, why)
+		}
 		return
 	}
 	if !approve {

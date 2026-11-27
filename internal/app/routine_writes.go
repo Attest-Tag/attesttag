@@ -83,6 +83,10 @@ type routineEdit struct {
 	// EditedBy is the editor's Slack id, empty for a password session or any API caller. It
 	// decides whether the routine goes on running as the person who wrote it (changesWhatItDoes).
 	EditedBy string
+	// ClearAutoConfirmOnChange is set by the developer API (/v1) and MCP server, where callers
+	// may never enable unattended writes: rewriting what an existing auto-confirm routine does
+	// must clear auto_confirm back to false rather than inheriting the previous setting.
+	ClearAutoConfirmOnChange bool
 }
 
 // editRoutine checks a change and applies it. wasRunningAs is the person the routine had been
@@ -121,6 +125,10 @@ func (b *Bot) editRoutine(ctx context.Context, org, id int64, e routineEdit) (wa
 	}
 	if ok {
 		patch.Steps = &steps
+	}
+	if e.ClearAutoConfirmOnChange && patch.changesWhatItDoes() {
+		off := false
+		patch.AutoConfirm = &off
 	}
 	// Everything is checked before anything is written, so a refused edit changes nothing —
 	// pausing included.

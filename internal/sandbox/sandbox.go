@@ -92,7 +92,12 @@ func Run(ctx context.Context, code, input string, lim Limits) (out string, err e
 	if err != nil {
 		return "", err
 	}
-	defer os.RemoveAll(jail)
+	// Make the empty jail read-only so guest code using QuickJS std/os cannot fill /tmp.
+	_ = os.Chmod(jail, 0o500)
+	defer func() {
+		_ = os.Chmod(jail, 0o700)
+		os.RemoveAll(jail)
+	}()
 
 	// When wazero tears the module down mid-call — which is how a deadline is enforced — the
 	// binding panics rather than returning, and panics again while closing. Both are contained

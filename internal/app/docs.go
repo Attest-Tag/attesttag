@@ -131,6 +131,9 @@ func (b *Bot) documentFolders(ctx context.Context, orgID int64) ([]string, error
 // travels alongside in "paths", one per file in the same order. "folder" is where in the tree the
 // whole batch lands.
 func (b *Bot) uploadDocuments(w http.ResponseWriter, r *http.Request, by string) {
+	// Cap the total request body size before ParseMultipartForm so an oversized upload cannot
+	// exhaust memory or temp disk on POST /api/documents (POST /v1/documents also shares this).
+	r.Body = http.MaxBytesReader(w, r.Body, (64<<20)+(1<<20))
 	if err := r.ParseMultipartForm(64 << 20); err != nil {
 		var tooBig *http.MaxBytesError
 		if errors.As(err, &tooBig) {
