@@ -385,7 +385,9 @@ func hasColumn(db *database, table, column string) (bool, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
-func now() string { return time.Now().UTC().Format(time.DateTime) }
+// now is the store's clock, a variable so that tests whose fixtures carry fixed dates can stand
+// inside them.
+var now = func() string { return time.Now().UTC().Format(time.DateTime) }
 
 // nowMinus and today are the same stamp for a moment in the past and for midnight this
 // morning. They exist so that no query has to say datetime('now','-5 minutes') or date('now'):

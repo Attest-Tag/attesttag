@@ -219,7 +219,7 @@ func TestALapsedAllowanceIsNotSpendable(t *testing.T) {
 	// Move the period into the past without touching anything else.
 	if _, err := st.db.ExecContext(ctx,
 		`update billing_accounts set allowance_period_end=? where org_id=?`,
-		time.Now().UTC().AddDate(0, 0, -1).Format(time.DateTime), org.ID); err != nil {
+		storeDaysFrom(-1), org.ID); err != nil {
 		t.Fatal(err)
 	}
 	if got := allowanceOf(t, st, org.ID); got != 0 {
@@ -341,7 +341,7 @@ func TestExpiringAllowancesIsHousekeepingAndNotThePolicy(t *testing.T) {
 	org := testOrg(t, st, "Sweep Ltd")
 	subscribedTo(t, st, org.ID, "cus_sweep", "upto_25")
 	st.SyncAllowance(ctx, org.ID, "upto_25",
-		time.Now().UTC().AddDate(0, 0, -1).Format(time.DateTime), usdToMicros(20))
+		storeDaysFrom(-1), usdToMicros(20))
 
 	// Before the sweep: stored, but not spendable.
 	if got := allowanceOf(t, st, org.ID); got != 0 {
