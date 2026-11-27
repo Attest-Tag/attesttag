@@ -163,9 +163,13 @@ func readDocument(ctx context.Context, docs DocStore, rel string) (string, error
 		return "", err
 	}
 	defer rc.Close()
-	b, err := io.ReadAll(rc)
+	const maxIndexDocBytes = 32 << 20
+	b, err := io.ReadAll(io.LimitReader(rc, maxIndexDocBytes+1))
 	if err != nil {
 		return "", err
+	}
+	if len(b) > maxIndexDocBytes {
+		return "", fmt.Errorf("document %q exceeds maximum indexable size (%d MB)", rel, maxIndexDocBytes>>20)
 	}
 	return readDocBytes(ctx, path.Base(rel), b)
 }

@@ -90,9 +90,22 @@ func TestMCPSignInFinishesOnlyWhereItStarted(t *testing.T) {
 		t.Fatalf("a callback without the start's cookie had its code exchanged: %v", exchanged)
 	}
 
+	// The right browser, but nobody signed in to the console in it any more: refused too, and the
+	// sign-in is left for the member who started it.
 	w = httptest.NewRecorder()
 	r = httptest.NewRequest("GET", callback+"thecode", nil)
 	r.AddCookie(bound)
+	mux.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden || len(exchanged) != 0 {
+		t.Fatalf("a callback with no console session got %d and exchanged %v, want 403 and nothing", w.Code, exchanged)
+	}
+
+	// A real browser carries its console session cookie back from the provider (SameSite=Lax
+	// rides a top-level navigation); the test signs the same request in with the start's token.
+	w = httptest.NewRecorder()
+	r = httptest.NewRequest("GET", callback+"thecode", nil)
+	r.AddCookie(bound)
+	r.Header.Set("Authorization", "Bearer "+token)
 	mux.ServeHTTP(w, r)
 	if w.Code != http.StatusFound || !strings.Contains(w.Header().Get("Location"), "connected="+strconv.FormatInt(connID, 10)) {
 		t.Fatalf("the starting browser's callback: %d %s %s", w.Code, w.Header().Get("Location"), w.Body.String())

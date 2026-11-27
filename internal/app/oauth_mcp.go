@@ -92,6 +92,9 @@ func discoverAuthServer(ctx context.Context, mcpURL string) (*asMetadata, string
 	if len(servers) == 0 {
 		servers = []string{origin} // fall back: the MCP host is its own authorization server
 	}
+	if len(servers) > 5 {
+		servers = servers[:5]
+	}
 	// 2. authorization server metadata
 	for _, as := range servers {
 		asu, err := url.Parse(as)
@@ -234,6 +237,9 @@ func (b *Bot) oauthCallback(ctx context.Context, state, code, redirectURI string
 	if err != nil {
 		return nil, err
 	}
+	if caller := adminFromCtx(ctx); caller != nil && (caller.ID != p.userID || caller.OrgID != p.orgID) {
+		return nil, errors.New("this OAuth sign-in belongs to a different user or organisation")
+	}
 	me := &AdminUser{ID: p.userID, OrgID: p.orgID}
 	b.permissionsFor(ctx, me)
 	if !me.Permissions[PermConnManage] {
@@ -359,7 +365,11 @@ func (b *Bot) oauthRoutes(mux *http.ServeMux) {
 		var in struct{ ClientID, ClientSecret, Scopes string }
 		decode(r, &in)
 		if in.ClientID != "" { // pre-registered client from the Advanced tab
-			sec, _ := b.proxy.secret(conn)
+			sec, err := b.proxy.secret(conn)
+			if err != nil {
+				writeJSON(w, 200, map[string]any{"ok": false, "error": "could not read stored connection secret"})
+				return
+			}
 			if sec.OAuth == nil {
 				sec.OAuth = &OAuthState{}
 			}
@@ -396,9 +406,18 @@ func (b *Bot) oauthRoutes(mux *http.ServeMux) {
 			http.Error(w, "This sign-in was started in a different browser. Start it again from the console, in this browser.", http.StatusForbidden)
 			return
 		}
+		// The cookie says which browser started this; the console session says who is in it now.
+		// oauthCallback holds the pending sign-in to that person, so a browser that changed hands
+		// in between cannot finish one member's connection under another's session.
+		me := b.authenticate(r)
+		if me == nil || !me.Permissions[PermConnManage] {
+			http.Error(w, "Sign in to the console in this browser to finish connecting this MCP server.", http.StatusForbidden)
+			return
+		}
 		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 		defer cancel()
-		conn, err := b.oauthCallback(ctx, r.URL.Query().Get("state"), r.URL.Query().Get("code"), b.baseURL(r)+"/api/oauth/callback")
+		ctx = context.WithValue(ctx, userKey, me)
+		conn, err := b.oauthCallback(ctx, state, r.URL.Query().Get("code"), b.baseURL(r)+"/api/oauth/callback")
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return

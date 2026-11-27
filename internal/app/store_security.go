@@ -49,11 +49,17 @@ func (s *Store) ConfirmTOTP(ctx context.Context, userID, step int64) error {
 	return err
 }
 
-// SpendTOTPStep remembers the window a code came from, so the same code cannot be used twice.
-func (s *Store) SpendTOTPStep(ctx context.Context, userID, step int64) error {
-	_, err := s.db.ExecContext(ctx, `update user_totp set last_step=? where user_id=? and last_step<?`,
+// SpendTOTPStep atomically records the time step a code came from and reports whether it won
+// the race. Returning false on RowsAffected() == 0 prevents two concurrent requests with the
+// same 6-digit TOTP code from both succeeding.
+func (s *Store) SpendTOTPStep(ctx context.Context, userID, step int64) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `update user_totp set last_step=? where user_id=? and last_step<?`,
 		step, userID, step)
-	return err
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 // DisableTOTP takes the second factor off an account, recovery codes and all.
@@ -141,42 +147,52 @@ const (
 // Slack or nothing, which made every single sign-on with a second factor a password sign-in — and
 // refused outright by an organisation that accepts single sign-on only.
 func (s *Store) NewLoginChallenge(ctx context.Context, userID int64, methods ...string) (string, error) {
-	if _, err := s.db.ExecContext(ctx, `delete from login_challenges where user_id=? or expires_at<=?`, userID, now()); err != nil {
-		return "", err
-	}
-	tok := randomToken()
 	via := "password"
 	if len(methods) > 0 && slices.Contains([]string{"slack", ProviderMicrosoft, "sso"}, methods[0]) {
 		via = methods[0]
 	}
-	_, err := s.db.ExecContext(ctx, `insert into login_challenges (token, user_id, expires_at, via) values (?, ?, ?, ?)`,
-		tok, userID, time.Now().Add(challengeTTL).UTC().Format(time.DateTime), via)
+	return s.NewLoginChallengeForOrg(ctx, userID, via, 0)
+}
+
+// NewLoginChallengeForOrg issues a two-factor challenge bound to the sign-in method and, for
+// SSO, the organisation whose IdP proved the first factor.
+func (s *Store) NewLoginChallengeForOrg(ctx context.Context, userID int64, via string, ssoOrgID int64) (string, error) {
+	if _, err := s.db.ExecContext(ctx, `delete from login_challenges where user_id=? or expires_at<=?`, userID, now()); err != nil {
+		return "", err
+	}
+	if !slices.Contains([]string{"password", "slack", ProviderMicrosoft, "sso"}, via) {
+		via = "password"
+	}
+	tok := randomToken()
+	_, err := s.db.ExecContext(ctx, `insert into login_challenges (token, user_id, expires_at, via, sso_org_id) values (?, ?, ?, ?, ?)`,
+		tok, userID, time.Now().Add(challengeTTL).UTC().Format(time.DateTime), via, ssoOrgID)
 	return tok, err
 }
 
-// LoginChallenge resolves a live challenge to the account it belongs to, counting the attempt.
-// It returns 0 for a token that is unknown, expired, or has been guessed at too often — the
-// caller cannot tell those apart, and neither can anybody trying them.
+// LoginChallenge atomically consumes one attempt on a live challenge and returns the account it
+// belongs to. Using a conditional UPDATE before reading ensures concurrent guesses cannot bypass
+// challengeTries.
 func (s *Store) LoginChallenge(ctx context.Context, tok string) (int64, error) {
 	if tok == "" {
 		return 0, nil
 	}
-	var userID int64
-	var tries int
-	err := s.db.QueryRowContext(ctx, `select user_id, tries from login_challenges where token=? and expires_at>?`,
-		tok, now()).Scan(&userID, &tries)
-	if err == sql.ErrNoRows {
-		return 0, nil
-	}
+	ts := now()
+	res, err := s.db.ExecContext(ctx, `update login_challenges set tries=tries+1 where token=? and expires_at>? and tries<?`,
+		tok, ts, challengeTries)
 	if err != nil {
 		return 0, err
 	}
-	if tries >= challengeTries {
-		s.DeleteLoginChallenge(ctx, tok)
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		s.db.ExecContext(ctx, `delete from login_challenges where token=? and (expires_at<=? or tries>=?)`, tok, ts, challengeTries)
 		return 0, nil
 	}
-	s.db.ExecContext(ctx, `update login_challenges set tries=tries+1 where token=?`, tok)
-	return userID, nil
+	var userID int64
+	err = s.db.QueryRowContext(ctx, `select user_id from login_challenges where token=? and expires_at>?`, tok, ts).Scan(&userID)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	return userID, err
 }
 
 func (s *Store) DeleteLoginChallenge(ctx context.Context, tok string) {
@@ -184,7 +200,13 @@ func (s *Store) DeleteLoginChallenge(ctx context.Context, tok string) {
 }
 
 func (s *Store) loginChallengeVia(ctx context.Context, tok string) (string, error) {
-	var via string
-	err := s.db.QueryRowContext(ctx, `select via from login_challenges where token=? and expires_at>?`, tok, now()).Scan(&via)
+	via, _, err := s.loginChallengeInfo(ctx, tok)
 	return via, err
+}
+
+func (s *Store) loginChallengeInfo(ctx context.Context, tok string) (string, int64, error) {
+	var via string
+	var ssoOrgID int64
+	err := s.db.QueryRowContext(ctx, `select via, coalesce(sso_org_id, 0) from login_challenges where token=? and expires_at>?`, tok, now()).Scan(&via, &ssoOrgID)
+	return via, ssoOrgID, err
 }

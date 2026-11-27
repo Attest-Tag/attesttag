@@ -53,12 +53,12 @@ var probes = []probe{
 // ---- helpers ----
 
 func isDir(dir, name string) bool {
-	st, err := os.Stat(filepath.Join(dir, name))
+	st, err := os.Lstat(filepath.Join(dir, name))
 	return err == nil && st.IsDir()
 }
 
 func readText(dir, name string) string {
-	raw, err := os.ReadFile(filepath.Join(dir, name))
+	raw, err := readRepoFile(dir, name, (1<<20)+1)
 	if err != nil || len(raw) > 1<<20 {
 		return ""
 	}

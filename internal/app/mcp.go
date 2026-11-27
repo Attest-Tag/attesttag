@@ -61,7 +61,7 @@ func (h *mcpHub) drop(id int64, mc *mcpConn) {
 }
 
 // mcpURLCheck is the SSRF guard applied to every MCP request; tests swap it to reach a loopback server.
-var mcpURLCheck = checkURL
+var mcpURLCheck = publicHTTPSURL
 
 // mcpBaseTransport is what carries the request once mcpURLCheck has passed it: the guarded
 // transport, which resolves a host once and refuses to dial anything that is not a public
@@ -331,7 +331,17 @@ func (h *mcpHub) tools(ctx context.Context, orgID int64, a *Agent, c *Connection
 				// MCP tools can mutate; reads go straight through, writes wait for a human. A write
 				// that did run says where what it made can be opened, the same as an http_request
 				// write: an id in a tool result is not something anyone in the thread can click.
-				if gate {
+				if gate || (c.AllowGrants && !mcpReadOnly(t)) {
+					// A grant-capable MCP connection requires a named approver and can never be
+					// bypassed by auto_confirm, allow rules, or an in-thread self-confirm card.
+					if c.AllowGrants && !mcpReadOnly(t) {
+						if call.Silent {
+							return call.silentRefusal("Tool " + t.Name + " on " + c.Name), nil
+						}
+						raw, _ := json.Marshal(map[string]any{"mcp": c.ID, "tool": t.Name, "args": m})
+						call.holdForGrant(raw)
+						return fmt.Sprintf("Tool %s on %s grants access and needs a named approver. Tell the user plainly what you asked for; an approval card will go to an approver.", t.Name, c.Name), nil
+					}
 					// A routine set up to act was told this once, when it was written; asking
 					// again on every run asks nobody. Same gate as an http_request write.
 					if call.autoConfirm {
@@ -355,6 +365,9 @@ func (h *mcpHub) tools(ctx context.Context, orgID int64, a *Agent, c *Connection
 					}
 					if call.Silent {
 						return call.silentRefusal("Tool " + t.Name + " on " + c.Name), nil
+					}
+					if !call.canHoldMore() {
+						return fmt.Sprintf("You already have %d writes waiting for confirmation in this turn. Finish replying so the user can confirm or cancel them first.", maxHeldPerTurn), nil
 					}
 					raw, _ := json.Marshal(map[string]any{"mcp": c.ID, "tool": t.Name, "args": m})
 					id, err := a.store.AddPendingWrite(ctx, call.OrgID, call.TeamID, call.Channel, call.ThreadTS, call.UserID, string(raw))
@@ -544,36 +557,87 @@ func mcpReadOnly(t *mcp.Tool) bool {
 	return mcpLooksReadOnly(t.Name)
 }
 
-// Verbs that change something. Checked first, so a name carrying both ("search_and_delete",
+// Verbs that change something. Checked first on exact word tokens (after splitting delimiters
+// and camelCase), so a name carrying both ("search_and_delete", "listAndDelete",
 // "get_or_create_list") counts as a write.
 var mcpWriteVerbs = []string{"create", "add", "insert", "update", "edit", "modify", "patch", "set", "put",
 	"delete", "remove", "destroy", "drop", "trash", "clear", "purge", "send", "post", "reply", "comment",
 	"write", "upload", "attach", "import", "move", "copy", "merge", "rename", "archive", "restore",
-	"assign", "unassign", "invite", "share", "publish", "approve", "close", "reopen", "resolve_thread",
+	"assign", "unassign", "invite", "share", "publish", "approve", "close", "reopen", "resolve",
 	"schedule", "start", "stop", "cancel", "run", "execute", "trigger", "apply", "mark", "unmark",
-	"label", "unlabel", "subscribe", "unsubscribe", "enable", "disable", "grant", "revoke"}
+	"label", "unlabel", "subscribe", "unsubscribe", "enable", "disable", "grant", "revoke",
+	"kick", "ban", "mute", "unblock", "pay",
+	"deploy", "rollback", "restart", "reboot", "kill", "terminate", "reset", "rotate", "mint"}
 
-// Verbs that only look. Anything matching neither list is treated as a write.
-var mcpReadVerbs = []string{"get", "list", "search", "find", "read", "query", "describe", "show", "count",
-	"aggregate", "explain", "ask", "fetch", "retrieve", "lookup", "look_up", "check", "browse", "resolve",
+// Words that are nouns as often as verbs — message, issue, block, charge, transfer, refund, sign —
+// are on neither list. A name holding one with no read verb is a write anyway (message_user,
+// issue_token, block_user), and listing them as writes turned get_issue, get_message and
+// retrieve_block into writes: a Confirm card on every read, and a refusal in a routine.
+
+// Verbs that only look. Matched strictly as whole tokens; anything matching neither list is
+// treated as a write. "me" is only allowed as the entire tool name ("me" or "whoami"), never as
+// a prefix/token inside another name like "direct_message" or "kick_member".
+var mcpReadVerbs = []string{"get", "list", "search", "find", "read", "describe", "show", "count",
+	"aggregate", "explain", "ask", "fetch", "retrieve", "lookup", "check", "browse",
 	"view", "inspect", "status", "summarize", "summarise", "filter", "download", "export", "discover",
 	"diff", "history", "info", "detail", "details", "schema", "preview", "sample", "stats", "usage",
-	"metrics", "report", "whoami", "me", "ping", "help", "docs"}
+	"metrics", "report", "whoami", "ping", "help", "docs"}
+
+func splitToolTokens(name string) []string {
+	var out []string
+	var cur strings.Builder
+	flush := func() {
+		if cur.Len() > 0 {
+			out = append(out, strings.ToLower(cur.String()))
+			cur.Reset()
+		}
+	}
+	isUpper := func(b byte) bool { return b >= 'A' && b <= 'Z' }
+	isLower := func(b byte) bool { return b >= 'a' && b <= 'z' }
+	isAlnum := func(b byte) bool { return isUpper(b) || isLower(b) || (b >= '0' && b <= '9') }
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if !isAlnum(c) {
+			flush()
+			continue
+		}
+		if i > 0 && isUpper(c) && (isLower(name[i-1]) || (i+1 < len(name) && isLower(name[i+1]) && isUpper(name[i-1]))) {
+			flush()
+		}
+		cur.WriteByte(c)
+	}
+	flush()
+	return out
+}
 
 func mcpLooksReadOnly(name string) bool {
-	n := strings.ToLower(name)
-	has := func(verbs []string) bool {
-		for _, v := range verbs {
-			if strings.HasPrefix(n, v) || strings.Contains(n, "_"+v) || strings.Contains(n, "-"+v) {
-				return true
+	if strings.EqualFold(strings.TrimSpace(name), "me") {
+		return true
+	}
+	tokens := splitToolTokens(name)
+	if len(tokens) == 0 {
+		return false
+	}
+	hasToken := func(verbs []string) bool {
+		for _, tok := range tokens {
+			for _, v := range verbs {
+				if tok == v {
+					return true
+				}
 			}
 		}
 		return false
 	}
-	if has(mcpWriteVerbs) {
+	if hasToken(mcpWriteVerbs) {
 		return false
 	}
-	return has(mcpReadVerbs)
+	// Multi-word read verb "look_up"
+	for i := 0; i+1 < len(tokens); i++ {
+		if tokens[i] == "look" && tokens[i+1] == "up" {
+			return true
+		}
+	}
+	return hasToken(mcpReadVerbs)
 }
 
 // audit carries who this call is for — workspace, channel, thread, requester. It used to be
@@ -619,8 +683,9 @@ func (h *mcpHub) call(ctx context.Context, orgID int64, c *Connection, tool stri
 		b.Write(raw)
 	}
 	h.proxy.store.TouchConnection(ctx, orgID, c.ID)
+	out := redact(h.proxy.scrubSecrets(c, b.String()))
 	if res.IsError {
-		return "", fmt.Errorf("%s", truncate(b.String(), 500))
+		return "", fmt.Errorf("%s", truncate(out, 500))
 	}
-	return b.String(), nil
+	return out, nil
 }

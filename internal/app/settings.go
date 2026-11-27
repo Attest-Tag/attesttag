@@ -254,6 +254,18 @@ func (s Settings) allowsVia(via string) bool {
 	return true
 }
 
+// allowsViaForOrg enforces both the destination organisation's auth policy and IdP-to-org
+// binding: an SSO session authenticated by one organisation's IdP may not act in another.
+func (s Settings) allowsViaForOrg(via string, ssoOrgID, targetOrgID int64) bool {
+	if !s.allowsVia(via) {
+		return false
+	}
+	if via == "sso" && ssoOrgID != 0 && ssoOrgID != targetOrgID {
+		return false
+	}
+	return true
+}
+
 // validateSecuritySetting checks a sign-in policy value before it is stored. The lock-yourself-out
 // guard is not here: it needs to know who is asking, so it lives with the handler (admin_api.go).
 func validateSecuritySetting(k, v string) error {

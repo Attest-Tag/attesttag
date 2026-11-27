@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -72,9 +73,14 @@ func (s *Store) SetupLinksForBundle(ctx context.Context, orgID, bundleID int64) 
 	return out, rows.Err()
 }
 
-func (s *Store) FinishSetupLink(ctx context.Context, orgID, connID int64, tok string) error {
-	_, err := s.db.ExecContext(ctx, `update setup_links set status='submitted', connection_id=? where org_id=? and token=?`, connID, orgID, tok)
-	return err
+func (s *Store) FinishSetupLink(ctx context.Context, orgID, connID int64, tok string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `update setup_links set status='submitted', connection_id=? where org_id=? and token=? and status='pending' and expires_at>?`,
+		connID, orgID, tok, now())
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 func (s *Store) RevokeSetupLink(ctx context.Context, orgID int64, tok string) error {
@@ -152,9 +158,16 @@ func (b *Bot) handleSetupPage(w http.ResponseWriter, r *http.Request) {
 				var id int64
 				id, err = b.store.InsertConnection(r.Context(), org, c, enc)
 				if err == nil {
-					b.store.FinishSetupLink(r.Context(), org, id, tok)
-					b.changed(r.Context(), org)
-					data["Done"] = true
+					won, ferr := b.store.FinishSetupLink(r.Context(), org, id, tok)
+					if ferr != nil || !won {
+						// Another submission beat us or the link expired/was revoked; clean up
+						// the duplicate connection so a single-use link never creates two rows.
+						b.store.DeleteConnection(r.Context(), org, id)
+						err = errors.New("this setup link has already been used or expired")
+					} else {
+						b.changed(r.Context(), org)
+						data["Done"] = true
+					}
 				}
 			}
 		}
@@ -168,7 +181,7 @@ func (b *Bot) handleSetupPage(w http.ResponseWriter, r *http.Request) {
 
 func (b *Bot) setupLinkRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /setup/{token}", b.handleSetupPage)
-	mux.HandleFunc("POST /setup/{token}", b.handleSetupPage)
+	mux.HandleFunc("POST /setup/{token}", sameSiteOnly(b.handleSetupPage))
 	mux.HandleFunc("GET /api/bundles/{id}/setup-links", b.requirePerm(PermConnManage, func(w http.ResponseWriter, r *http.Request) {
 		ls, err := b.store.SetupLinksForBundle(r.Context(), orgOf(r), pathID(r, "id"))
 		if err != nil {

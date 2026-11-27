@@ -432,7 +432,8 @@ func (b *Bot) apiV1Routes(mux *http.ServeMux) {
 			clearedAutoConfirm = before.AutoConfirm
 		}
 		e := routineEdit{Enabled: in.Enabled, Cron: in.Cron, TZ: in.Timezone, Prompt: in.Prompt, Notify: in.Notify,
-			NotifyWhen: in.NotifyWhen, Model: in.Model, Steps: in.Steps, Finish: in.Finish, AutoConfirm: autoConfirm}
+			NotifyWhen: in.NotifyWhen, Model: in.Model, Steps: in.Steps, Finish: in.Finish, AutoConfirm: autoConfirm,
+			ClearAutoConfirmOnChange: true}
 		if in.Channel != nil {
 			teamID := ""
 			if in.TeamID != nil {

@@ -198,7 +198,7 @@ var providerHosts = map[string]string{
 // webAPIClient is separate from httpClient: a rendered fetch takes longer than the twenty
 // seconds a plain GET is given, and a provider host is a fixed endpoint rather than something
 // the model chose, so there is no redirect to re-check.
-var webAPIClient = &http.Client{Transport: publicTransport(), Timeout: 90 * time.Second}
+var webAPIClient = &http.Client{Transport: publicHTTPSTransport(), Timeout: 90 * time.Second, CheckRedirect: rejectRedirect}
 
 // providerJSON calls a provider endpoint and decodes the reply into out. A nil body is a GET,
 // which is how Brave and Jina are reached; everything else posts JSON. The provider's own error

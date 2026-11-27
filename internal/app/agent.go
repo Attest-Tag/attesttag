@@ -1231,7 +1231,7 @@ func (a *Agent) turn(ctx context.Context, c *Call) error {
 			}
 			msg.ToolCalls = nil
 		}
-		if len(msg.ToolCalls) == 0 && !landed && !repaired {
+		if len(msg.ToolCalls) == 0 && !landed && !repaired && !c.NoTools {
 			// A call the model wrote into its content instead of returning. Treating that as a
 			// final answer posted the raw markup into the thread and ended the turn on it, billed
 			// as a success — the one shape of failure nothing here was watching for. Run it and
@@ -1401,6 +1401,9 @@ func (a *Agent) runTool(ctx context.Context, c *Call, name, rawArgs string) stri
 // around it would be noise, and a caller that decides whether to speak needs the outcome as a
 // value rather than as a sentence inside one.
 func (a *Agent) runToolRaw(ctx context.Context, c *Call, name, rawArgs string) (string, bool) {
+	if c.NoTools && !(c.Silent && (name == "report_now" || name == "stay_quiet")) {
+		return "error: tools are disabled for this turn", false
+	}
 	a.ensureTools(ctx, c)
 	t, ok := c.tools[name]
 	if !ok {

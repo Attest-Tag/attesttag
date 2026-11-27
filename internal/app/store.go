@@ -1026,6 +1026,15 @@ func (s *Store) SetRoutineEnabledInChannel(ctx context.Context, orgID int64, cha
 	return res.RowsAffected()
 }
 
+// ClearRoutineOwnersOnChannel clears created_by on routines in a channel owned by anyone other
+// than exceptUser, so a colleague's edits to channel instructions cannot steer another person's
+// personal OAuth connections.
+func (s *Store) ClearRoutineOwnersOnChannel(ctx context.Context, orgID int64, channel, exceptUser string) error {
+	_, err := s.db.ExecContext(ctx, `update routines set created_by='' where org_id=? and channel=? and created_by<>'' and created_by<>?`,
+		orgID, channel, exceptUser)
+	return err
+}
+
 // ---- doc chunks (RAG) ----
 
 type DocChunk struct {

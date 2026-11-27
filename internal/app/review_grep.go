@@ -199,7 +199,7 @@ func (c *reviewGitHub) Archive(ctx context.Context, sha string) (io.ReadCloser, 
 	hr.Header.Set("User-Agent", "attesttag/0.2 (+proxy)")
 	hr.Header.Set("Accept", "application/vnd.github+json")
 	hr.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	if err := p.inject(ctx, c.orgID, conn, hr, audit, githubPurposeReviewRead); err != nil {
+	if _, err := p.inject(ctx, c.orgID, conn, hr, audit, githubPurposeReviewRead); err != nil {
 		audit.Blocked = "credential error: " + err.Error()
 		p.store.LogProxy(ctx, c.orgID, audit)
 		return nil, fmt.Errorf("credential error for %s: %w", conn.Name, err)

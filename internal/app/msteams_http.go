@@ -492,6 +492,31 @@ func (b *Bot) msteamsLink(ctx context.Context, act msActivity, teamID, code stri
 			"account, so I've left it there. An admin of that account can disconnect it first.")
 		return
 	}
+	// Verify the redeemer is a genuine member of this Microsoft 365 tenant BEFORE persisting
+	// the team row or spending the link code, using a transient transport built from the
+	// activity's ServiceURL. This closes the race window where an unverified tenant row became
+	// visible to concurrent requests before rollback.
+	confirmed := false
+	if c != nil {
+		if uf, err := c.transport(teamID, act.ServiceURL).userFacts(ctx, act.From.AADObjectID); err == nil && !uf.Restricted && (uf.TeamID == "" || uf.TeamID == teamID) {
+			confirmed = true
+		}
+	}
+	if !confirmed {
+		slog.Warn("Teams link refused: redeemer not confirmed a member of this tenant", "team", teamID, "by", act.From.AADObjectID)
+		b.replyTo(ctx, act, teamID, "Only a member of this Microsoft Teams organisation can connect it, and I couldn't confirm this account is one. If you are a member of this Teams org, try the code again; otherwise ask an admin of it to run the code.")
+		return
+	}
+	// Atomically spend the link code before activating the team so two concurrent redeemers
+	// cannot both activate the team.
+	if _, err := b.store.SpendLinkCode(ctx, code, platformMSTeams, teamID); err != nil {
+		if !errors.Is(err, ErrLinkCode) {
+			slog.Error("spend a link code", "team", teamID, "err", err)
+		}
+		b.replyTo(ctx, act, teamID, "That code didn't work: it may have expired or already been used. "+
+			"Get a new one from the attest_tag console, under *Workspaces → Add workspace → Microsoft Teams*.")
+		return
+	}
 	name := nonEmpty(act.ChannelData.Team.Name, "Microsoft Teams")
 	if existing != nil && existing.Name != "" {
 		name = existing.Name
@@ -506,39 +531,6 @@ func (b *Bot) msteamsLink(ctx context.Context, act msActivity, teamID, code stri
 	if err != nil {
 		slog.Error("link a Teams tenant", "team", teamID, "err", err)
 		b.replyTo(ctx, act, teamID, "I couldn't finish connecting just now. Try the same code again in a minute.")
-		return
-	}
-	// Only a genuine member of this Microsoft 365 organisation may connect it — not a guest, and
-	// not someone from another tenant in a shared channel who could otherwise bind a tenant they
-	// do not belong to. The Bot Framework roster is the only signal available (it has no "team
-	// owner" role), so the bar is membership, and it is fail-closed: the link stands only on a
-	// positive confirmation that the redeemer is a member of this tenant. A lookup that cannot
-	// answer — a client that would not build, a roster call that errored — undoes the link rather
-	// than letting an unverified binding stand, because binding a tenant to the wrong account is
-	// the harm here. A transient failure just means the redeemer runs the code again.
-	// (The client is built from the saved row, so the check runs after SaveTeam and undoes it; the
-	// tenant is never usable in between, since this all happens in the one request.)
-	confirmed := false
-	if sl, err := b.slacks.For(ctx, teamID); err == nil {
-		if uf, err := sl.user(ctx, act.From.AADObjectID, false); err == nil && !uf.Restricted && (uf.TeamID == "" || uf.TeamID == teamID) {
-			confirmed = true
-		}
-	}
-	if !confirmed {
-		slog.Warn("Teams link refused: redeemer not confirmed a member of this tenant", "team", teamID, "by", act.From.AADObjectID)
-		b.undoTeamsLink(ctx, orgID, teamID, existing)
-		b.replyTo(ctx, act, teamID, "Only a member of this Microsoft Teams organisation can connect it, and I couldn't confirm this account is one. If you are a member of this Teams org, try the code again; otherwise ask an admin of it to run the code.")
-		return
-	}
-	// Spent only now that the link stands. Two redeemers of one code in the same moment can both get
-	// this far; the spend is the step only one of them wins, and the other undoes its link.
-	if _, err := b.store.SpendLinkCode(ctx, code, platformMSTeams, teamID); err != nil {
-		if !errors.Is(err, ErrLinkCode) {
-			slog.Error("spend a link code", "team", teamID, "err", err)
-		}
-		b.undoTeamsLink(ctx, orgID, teamID, existing)
-		b.replyTo(ctx, act, teamID, "That code didn't work: it may have expired or already been used. "+
-			"Get a new one from the attest_tag console, under *Workspaces → Add workspace → Microsoft Teams*.")
 		return
 	}
 	if _, err := b.store.UpsertScope(ctx, orgID, "team", teamID, teamID, name); err != nil {

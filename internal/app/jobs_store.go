@@ -379,13 +379,16 @@ func (s *Store) ClaimJob(ctx context.Context, orgID, id int64, workerInfo string
 		return nil, "cancelled", nil
 	case j.Status != jobStarting && j.Status != jobRunning && j.Status != jobStale:
 		return nil, "not dispatched", nil
-	case j.ClaimCount >= 3:
+	case j.ClaimCount >= 3 || j.LastSeq > 0:
 		return nil, "already claimed", nil
 	}
 	n := now()
+	// Refuse re-claims once the worker has started reporting events (last_seq > 0): retries
+	// only cover a lost /claim response before execution begins, never a second secret fetch
+	// after untrusted repository code has started running.
 	res, err := s.db.ExecContext(ctx, `update jobs set status='running', claimed_at=coalesce(nullif(claimed_at,''), ?),
 		started_at=coalesce(nullif(started_at,''), ?), claim_count=claim_count+1, last_event_at=?, worker_info=?
-		where org_id=? and id=? and status in ('starting','running','stale') and claim_count<3 and cancel_requested=0`, n, n, n, workerInfo, orgID, id)
+		where org_id=? and id=? and status in ('starting','running','stale') and claim_count<3 and last_seq=0 and cancel_requested=0`, n, n, n, workerInfo, orgID, id)
 	if err != nil {
 		return nil, "", err
 	}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"attesttag/internal/sandbox"
@@ -115,8 +116,15 @@ func (a *Agent) sandboxTool(desc string) Tool {
 			if p.Input != "" && !json.Valid([]byte(p.Input)) {
 				return "", errors.New("input must be JSON")
 			}
-			// Each run is its own JavaScript runtime with a 64 MiB heap. A handful at once is
-			// the instance's memory, so they queue for a slot rather than all starting.
+			// Each run is its own JavaScript runtime with a 64 MiB heap. A global cap protects
+			// instance memory, and a per-org cap keeps one tenant from starving every other.
+			orgSlots := orgSandboxSlots(c.OrgID)
+			select {
+			case orgSlots <- struct{}{}:
+				defer func() { <-orgSlots }()
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
 			select {
 			case sandboxSlots <- struct{}{}:
 				defer func() { <-sandboxSlots }()
@@ -144,5 +152,22 @@ func (a *Agent) sandboxTool(desc string) Tool {
 	}
 }
 
-// sandboxSlots bounds how many run_js runtimes exist at once across every organisation.
-var sandboxSlots = make(chan struct{}, 4)
+// sandboxSlots bounds how many run_js runtimes exist at once across every organisation, while
+// orgSandboxSlots caps each organisation to at most 2 concurrent runtimes so no single tenant
+// can starve the shared pool.
+var (
+	sandboxSlots   = make(chan struct{}, 4)
+	sandboxOrgMu   sync.Mutex
+	sandboxOrgPool = map[int64]chan struct{}{}
+)
+
+func orgSandboxSlots(orgID int64) chan struct{} {
+	sandboxOrgMu.Lock()
+	defer sandboxOrgMu.Unlock()
+	ch, ok := sandboxOrgPool[orgID]
+	if !ok {
+		ch = make(chan struct{}, 2)
+		sandboxOrgPool[orgID] = ch
+	}
+	return ch
+}

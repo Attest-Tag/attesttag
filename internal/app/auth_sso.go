@@ -66,8 +66,8 @@ type oidcConfig struct {
 // Both are variables for the same reason mcpURLCheck is: a test's IdP listens on loopback, and
 // relaxing the check alone is not enough — the transport refuses to dial it too.
 var (
-	ssoURLCheck = checkURL
-	ssoClient   = &http.Client{Transport: publicTransport(), Timeout: 20 * time.Second, CheckRedirect: rejectRedirect}
+	ssoURLCheck = publicHTTPSURL
+	ssoClient   = &http.Client{Transport: publicHTTPSTransport(), Timeout: 20 * time.Second, CheckRedirect: rejectRedirect}
 )
 
 var (
@@ -199,7 +199,16 @@ func (b *Bot) handleSSOStart(w http.ResponseWriter, r *http.Request) {
 		// nothing more: what comes back is checked against the domain regardless.
 		"login_hint": {normalEmail(in.Email)},
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"url": cfg.AuthURL + "?" + q.Encode()})
+	authURL, err := url.Parse(cfg.AuthURL)
+	if err != nil || ssoURLCheck(authURL) != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": "Your identity provider's authorization endpoint is not a valid address."})
+		return
+	}
+	sep := "?"
+	if strings.Contains(cfg.AuthURL, "?") {
+		sep = "&"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"url": cfg.AuthURL + sep + q.Encode()})
 }
 
 func pkceChallenge(verifier string) string {
@@ -304,7 +313,7 @@ func (b *Bot) handleSSOCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if e != nil && e.Confirmed {
-		tok, err := b.store.NewLoginChallenge(ctx, acct.ID, "sso")
+		tok, err := b.store.NewLoginChallengeForOrg(ctx, acct.ID, "sso", p.OrgID)
 		if err != nil {
 			loginFailed(w, r, "Could not start two-factor sign-in.")
 			return
@@ -381,10 +390,10 @@ func (b *Bot) ssoIdentity(ctx context.Context, p *SSOProvider, code, nonce, veri
 	if !claims.audienceIs(p.ClientID) {
 		return nil, errors.New("That sign-in was issued for a different application.")
 	}
-	if claims.Nonce != "" && claims.Nonce != nonce {
+	if claims.Nonce == "" || claims.Nonce != nonce {
 		return nil, errors.New("That sign-in could not be matched to this browser. Try again.")
 	}
-	if claims.Expiry > 0 && time.Now().After(time.Unix(claims.Expiry, 0).Add(2*time.Minute)) {
+	if claims.Expiry <= 0 || time.Now().After(time.Unix(claims.Expiry, 0).Add(2*time.Minute)) {
 		return nil, errors.New("That sign-in took too long. Try again.")
 	}
 	if claims.Subject == "" {

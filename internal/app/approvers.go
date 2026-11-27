@@ -211,6 +211,12 @@ func (a *Agent) covers(t tier, calls []grantStep) bool {
 			}
 			continue
 		}
+		if s.MCP != 0 {
+			if !tierHasConn(t, s.MCP) {
+				return false
+			}
+			continue
+		}
 		// Plain parse, not parseGrantURL: routing asks "can this tier reach it", and mixing the
 		// SSRF check in here would report a blocked host as "nobody can approve that". The guard
 		// runs once before anything is recorded, and again in the proxy before anything is sent.
@@ -235,6 +241,20 @@ func tierHasRepo(t tier, repo string) bool {
 	}
 	for _, r := range t.Access.Rules {
 		if r.Conn != nil && strings.EqualFold(r.Conn.Repo, repo) {
+			return true
+		}
+	}
+	return false
+}
+
+// tierHasConn reports whether one of a tier's active connections is connID. Used for escalated
+// MCP calls, which are matched by connection id rather than URL.
+func tierHasConn(t tier, connID int64) bool {
+	if t.Access == nil || connID == 0 {
+		return false
+	}
+	for _, r := range t.Access.Rules {
+		if r.Conn != nil && r.Conn.ID == connID && r.Conn.Status == "active" {
 			return true
 		}
 	}

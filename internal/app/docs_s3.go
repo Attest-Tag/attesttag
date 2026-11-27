@@ -223,9 +223,13 @@ func (s *s3Docs) Get(ctx context.Context, rel string) (io.ReadCloser, error) {
 }
 
 func (s *s3Docs) Put(ctx context.Context, name string, r io.Reader, by, scope string) error {
-	b, err := io.ReadAll(r)
+	const maxS3DocBytes = 64 << 20
+	b, err := io.ReadAll(io.LimitReader(r, maxS3DocBytes+1))
 	if err != nil {
 		return err
+	}
+	if len(b) > maxS3DocBytes {
+		return fmt.Errorf("document %q exceeds maximum size (%d MB)", name, maxS3DocBytes>>20)
 	}
 	rel, err := cleanRel(name)
 	if err != nil {
@@ -249,8 +253,8 @@ func (s *s3Docs) Put(ctx context.Context, name string, r io.Reader, by, scope st
 	return s.store.UpsertDocument(ctx, s.orgID, Document{Path: rel, Name: path.Base(rel), Size: int64(len(b)), UploadedBy: by, Scope: scope, Status: "pending"})
 }
 
-func (s *s3Docs) Delete(ctx context.Context, rel string) error {
-	k, err := s.key(rel)
+func (s *s3Docs) deleteObject(ctx context.Context, clean string) error {
+	k, err := s.key(clean)
 	if err != nil {
 		return err
 	}
@@ -260,10 +264,21 @@ func (s *s3Docs) Delete(ctx context.Context, rel string) error {
 	}
 	// S3 answers 204 whether or not the object was there, which is the semantics wanted here.
 	if resp.StatusCode/100 != 2 && resp.StatusCode != 404 {
-		return fmt.Errorf("deleting %q: %s %s", rel, resp.Status, drain(resp))
+		return fmt.Errorf("deleting %q: %s %s", clean, resp.Status, drain(resp))
 	}
 	resp.Body.Close()
 	return nil
+}
+
+func (s *s3Docs) Delete(ctx context.Context, rel string) error {
+	clean, err := cleanRel(rel)
+	if err != nil {
+		return err
+	}
+	if err := s.deleteObject(ctx, clean); err != nil {
+		return err
+	}
+	return s.store.DeleteDocument(ctx, s.orgID, clean)
 }
 
 func (s *s3Docs) Exists(ctx context.Context, rel string) (bool, error) {
@@ -289,22 +304,16 @@ func (s *s3Docs) Exists(ctx context.Context, rel string) (bool, error) {
 // that is already taken, which the interface requires and a bare copy would not give — a copy
 // onto an existing key overwrites it silently.
 func (s *s3Docs) Move(ctx context.Context, from, to string) error {
-	if from == to {
-		return nil
-	}
-	taken, err := s.Exists(ctx, to)
+	src, dst, err := moveEnds(ctx, s, from, to)
 	if err != nil {
 		return err
-	}
-	if taken {
-		return fmt.Errorf("%q already exists", to)
 	}
 	// The copy source is bucket-qualified and escaped the same way the path is.
-	fromKey, err := s.key(from)
+	fromKey, err := s.key(src)
 	if err != nil {
 		return err
 	}
-	toKey, err := s.key(to)
+	toKey, err := s.key(dst)
 	if err != nil {
 		return err
 	}
@@ -317,15 +326,13 @@ func (s *s3Docs) Move(ctx context.Context, from, to string) error {
 		return err
 	}
 	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("copying %q to %q: %s %s", from, to, resp.Status, drain(resp))
+		return fmt.Errorf("copying %q to %q: %s %s", src, dst, resp.Status, drain(resp))
 	}
 	resp.Body.Close()
-	if err := s.Delete(ctx, from); err != nil {
+	if err := s.deleteObject(ctx, src); err != nil {
 		return err
 	}
 	// Carry the documents row across with the object, exactly as the local and GCS backends do.
-	// Without this the row still points at the old key with its scope, the reindex then re-adds the
-	// new key with an empty scope, and rag.go treats an empty scope as visible in every channel —
-	// so a channel-restricted document would silently become readable org-wide on a rename.
-	return s.store.MoveDocument(ctx, s.orgID, from, to)
+	// Using canonical src/dst from moveEnds ensures the stored scope row is matched and moved.
+	return s.store.MoveDocument(ctx, s.orgID, src, dst)
 }

@@ -214,3 +214,104 @@ func TestPushOntoRefusesAnyOtherTarget(t *testing.T) {
 		t.Error("main moved")
 	}
 }
+
+// prRepoClean is prRepo as a real job builds it: the clean copy is taken before the change, so
+// every push goes out from there rather than from the working clone.
+func prRepoClean(t *testing.T, origin string) (*Repo, string) {
+	t.Helper()
+	ctx := context.Background()
+	jobDir := t.TempDir()
+	for _, d := range []string{"home", "tmp", ".cache"} {
+		os.MkdirAll(filepath.Join(jobDir, d), 0o700)
+	}
+	ws := &Workspace{JobDir: jobDir, RepoDir: filepath.Join(jobDir, "repo"), Env: baseEnv(jobDir, jobDir)}
+	repo, err := cloneRepo(ctx, ws, app.JobSpec{Repo: "local/test", BaseBranch: "feature"}, "t", "file://"+origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := repo.headSHA(ctx)
+	if err := repo.snapshotPushRepo(ctx, filepath.Join(t.TempDir(), "push.git"), start); err != nil {
+		t.Fatal(err)
+	}
+	f, _ := os.OpenFile(filepath.Join(ws.RepoDir, "README.md"), os.O_WRONLY|os.O_APPEND, 0o644)
+	f.WriteString("the job's line\n")
+	f.Close()
+	if _, _, err := repo.stage(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.commit(ctx, "the job's change"); err != nil {
+		t.Fatal(err)
+	}
+	return repo, start
+}
+
+// The replay works through the clean copy too: what was pushed meanwhile is read there and handed
+// to the working clone in a bundle, and the replayed commit goes out from the clean copy.
+func TestPushOntoReplaysThroughTheCleanCopy(t *testing.T) {
+	origin := seedRepo(t, "")
+	seedBranch(t, origin, "feature")
+	repo, start := prRepoClean(t, origin)
+	theirs := pushToBranch(t, origin, "feature", "feature.txt", "their line")
+	moved, err := repo.pushOnto(context.Background(), "feature", "main", start)
+	if err != nil {
+		t.Fatalf("pushOnto: %v", err)
+	}
+	if moved != theirs {
+		t.Errorf("moved = %q, want their commit %s", moved, theirs)
+	}
+	tip := gitCmd(t, origin, "rev-parse", "feature")
+	if parent := gitCmd(t, origin, "rev-parse", tip+"^"); parent != theirs {
+		t.Errorf("the job's commit sits on %s, not on their %s", parent, theirs)
+	}
+	if tip != repo.headSHA(context.Background()) {
+		t.Errorf("origin's tip %s is not the working clone's HEAD", tip)
+	}
+	if got := gitCmd(t, origin, "show", "feature:README.md"); !strings.Contains(got, "the job's line") {
+		t.Errorf("README at the tip: %q", got)
+	}
+}
+
+// After a force-push the branch no longer holds the head the job began from; the replay still
+// lands on whatever it holds now, through the clean copy.
+func TestPushOntoReplaysThroughTheCleanCopyAfterAForcePush(t *testing.T) {
+	origin := seedRepo(t, "")
+	seedBranch(t, origin, "feature")
+	repo, start := prRepoClean(t, origin)
+	scratch := t.TempDir()
+	gitCmd(t, scratch, "clone", "-q", "--branch", "main", origin, ".")
+	os.WriteFile(filepath.Join(scratch, "rewritten.txt"), []byte("rewritten\n"), 0o644)
+	gitCmd(t, scratch, "add", "-A")
+	gitCmd(t, scratch, "commit", "-q", "-m", "rewritten")
+	gitCmd(t, scratch, "push", "-q", "--force", "origin", "HEAD:refs/heads/feature")
+	rewritten := gitCmd(t, scratch, "rev-parse", "HEAD")
+	moved, err := repo.pushOnto(context.Background(), "feature", "main", start)
+	if err != nil {
+		t.Fatalf("pushOnto: %v", err)
+	}
+	if moved != rewritten {
+		t.Errorf("moved = %q, want the rewritten head %s", moved, rewritten)
+	}
+	tip := gitCmd(t, origin, "rev-parse", "feature")
+	if parent := gitCmd(t, origin, "rev-parse", tip+"^"); parent != rewritten {
+		t.Errorf("the job's commit sits on %s, not on the rewritten head %s", parent, rewritten)
+	}
+}
+
+// A commit the sandbox made touching an excluded path is refused at the clean copy, whatever the
+// working clone's index said.
+func TestPushViaCleanRepoRefusesAnExcludedPath(t *testing.T) {
+	origin := seedRepo(t, "")
+	seedBranch(t, origin, "feature")
+	repo, start := prRepoClean(t, origin)
+	os.MkdirAll(filepath.Join(repo.dir, ".github", "workflows"), 0o755)
+	os.WriteFile(filepath.Join(repo.dir, ".github", "workflows", "x.yml"), []byte("on: push\n"), 0o644)
+	gitCmd(t, repo.dir, "add", "-f", ".github/workflows/x.yml")
+	gitCmd(t, repo.dir, "commit", "-q", "--amend", "--no-edit")
+	_, err := repo.pushOnto(context.Background(), "feature", "main", start)
+	if err == nil || !strings.Contains(err.Error(), "excluded path") {
+		t.Fatalf("err = %v, want a refusal naming the excluded path", err)
+	}
+	if got := gitCmd(t, origin, "rev-parse", "feature"); got == repo.headSHA(context.Background()) {
+		t.Error("the commit holding the excluded path reached origin")
+	}
+}

@@ -498,6 +498,12 @@ func (b *Bot) handleConfigure(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			b.store.UpdateScope(ctx, orgID, sc.ID, instructions, dm, sc.MemberEdits)
+			// Channel instructions steer every routine running in this channel. If someone other
+			// than a routine's owner rewrites them, strip personal ownership so the modified
+			// instructions cannot run against a colleague's personal OAuth connections.
+			if instructions != sc.Instructions {
+				b.store.ClearRoutineOwnersOnChannel(ctx, orgID, channel, asUser)
+			}
 			b.store.SetScopeReadAll(ctx, orgID, sc.ID, r.FormValue("read_all"))
 			// Only ever "off". Turning email intake on means answering mail from outside the
 			// company, and this link is shared under every reply — anyone who can see the channel
@@ -556,10 +562,16 @@ func (b *Bot) handleConfigure(w http.ResponseWriter, r *http.Request) {
 			}
 		case "routines":
 			id, _ := strconv.ParseInt(r.FormValue("routine"), 10, 64)
+			wantEnabled := r.FormValue("enabled") == "1"
 			if rs, _ := b.store.Routines(ctx, orgID, channel); rs != nil {
 				for _, rt := range rs {
 					if rt.ID == id {
-						b.store.SetRoutineEnabled(ctx, orgID, id, r.FormValue("enabled") == "1")
+						// Anyone in the channel may pause a noisy routine, but re-enabling
+						// someone else's personal routine via a shared link is refused.
+						if wantEnabled && rt.CreatedBy != "" && rt.CreatedBy != asUser {
+							continue
+						}
+						b.store.SetRoutineEnabled(ctx, orgID, id, wantEnabled)
 						saved = true
 					}
 				}

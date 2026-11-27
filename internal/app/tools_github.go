@@ -66,15 +66,24 @@ type githubTrees struct {
 	m  map[string]cachedTree
 }
 
-// scopeQualifierRe matches the qualifiers that choose which repositories a search covers.
-// Deliberately not fork:, language:, path: or in: — those narrow a search inside the scope we
-// set, which is the model's business. These four choose the scope itself, which is not.
-var scopeQualifierRe = regexp.MustCompile(`(?i)(^|\s)-?(repo|org|user|owner)\s*:\s*[^\s]+`)
+// scopeQualifierRe matches the qualifiers that choose which repositories a search covers,
+// including inside parenthesised groups like "(repo:secret/repo)" or after boolean operators.
+var scopeQualifierRe = regexp.MustCompile(`(?i)(^|[\s(])-?(repo|org|user|owner)\s*:\s*[^\s)]+`)
 
-// stripRepoScope removes the model's own repository scoping from a query and tidies what is
-// left. Whatever it wrote about which repositories to search is not an instruction we take.
+// stripRepoScope removes the model's own repository scoping and boolean OR/parentheses that
+// could break out of the appended repo: scope, then tidies what is left.
 func stripRepoScope(q string) string {
-	return strings.Join(strings.Fields(scopeQualifierRe.ReplaceAllString(q, " ")), " ")
+	s := scopeQualifierRe.ReplaceAllString(q, " ")
+	s = strings.NewReplacer("(", " ", ")", " ").Replace(s)
+	fields := strings.Fields(s)
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if f == "OR" {
+			continue
+		}
+		out = append(out, f)
+	}
+	return strings.Join(out, " ")
 }
 
 // repoTargets is the list of repositories a GitHub search may touch on this turn, narrowest
@@ -149,7 +158,7 @@ func (r ghResult) limited(what string) error {
 // connection, and which one answers decides what the search can see.
 func (a *Agent) getJSONFrom(ctx context.Context, c *Call, conn *Connection, url string, out any) (ghResult, error) {
 	resp, err := a.proxy.Do(ctx, c.OrgID, c.Access,
-		ProxyRequest{Method: "GET", URL: url, Connection: conn.Name, MaxBytes: proxyMaxRead}, callAudit(c), true)
+		ProxyRequest{Method: "GET", URL: url, Connection: conn.Name, MaxBytes: proxyMaxRead}, callAudit(c), false)
 	if err != nil {
 		return ghResult{}, err
 	}
@@ -394,7 +403,7 @@ func (a *Agent) githubReadFile(ctx context.Context, c *Call, base, want, path, r
 		u += "?ref=" + url.QueryEscape(ref)
 	}
 	resp, err := a.proxy.Do(ctx, c.OrgID, c.Access, ProxyRequest{Method: "GET", URL: u, Connection: conn.Name,
-		Headers: map[string]string{"Accept": "application/vnd.github.raw"}, MaxBytes: githubRawMax}, callAudit(c), true)
+		Headers: map[string]string{"Accept": "application/vnd.github.raw"}, MaxBytes: githubRawMax}, callAudit(c), false)
 	if err != nil {
 		return "", err
 	}

@@ -199,9 +199,18 @@ func (d *k8sDispatcher) Start(ctx context.Context, j *Job, l JobLaunch) (string,
 			"name":  "worker",
 			"image": image,
 			"env":   env,
+			"securityContext": map[string]any{
+				"allowPrivilegeEscalation": false,
+				"capabilities": map[string]any{
+					"drop": []string{"ALL"},
+					// SETUID/SETGID/CHOWN are required for the worker's root->sandbox uid drop.
+					"add": []string{"CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"},
+				},
+				"seccompProfile": map[string]any{"type": "RuntimeDefault"},
+			},
 			"resources": map[string]any{
 				"requests": map[string]string{"cpu": d.cpu, "memory": d.mem},
-				"limits":   map[string]string{"memory": d.mem},
+				"limits":   map[string]string{"cpu": d.cpu, "memory": d.mem, "ephemeral-storage": "10Gi"},
 			},
 		}},
 	}

@@ -13,8 +13,29 @@ import (
 // Resolve once, reject non-public results, then dial that exact IP. No proxy or
 // second DNS resolution may bypass the decision (including on redirects).
 func publicIP(ip net.IP) bool {
-	return ip != nil && ip.IsGlobalUnicast() && !ip.IsPrivate() && !ip.IsLoopback() && !ip.IsLinkLocalUnicast() &&
-		!net.ParseIP("100.64.0.0").Equal(ip) && !inCIDR(ip, "100.64.0.0/10") && !inCIDR(ip, "198.18.0.0/15") && !inCIDR(ip, "192.0.0.0/24") && !inCIDR(ip, "240.0.0.0/4") && !inCIDR(ip, "64:ff9b::/96") && !inCIDR(ip, "0.0.0.0/8")
+	if ip == nil || !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+		return false
+	}
+	for _, cidr := range []string{
+		"0.0.0.0/8", "100.64.0.0/10", "192.0.0.0/24", "198.18.0.0/15", "240.0.0.0/4",
+		"::/96", "64:ff9b::/96", "64:ff9b:1::/48", "100::/64", "2001::/32", "2001:2::/48",
+		"2001:db8::/32", "2002::/16", "fec0::/10",
+	} {
+		if inCIDR(ip, cidr) {
+			return false
+		}
+	}
+	return true
+}
+
+func publicHTTPSURL(u *url.URL) error {
+	if err := publicURL(u); err != nil {
+		return err
+	}
+	if u.Scheme != "https" {
+		return errors.New("an https URL is required")
+	}
+	return nil
 }
 func inCIDR(ip net.IP, cidr string) bool { _, n, _ := net.ParseCIDR(cidr); return n.Contains(ip) }
 func publicURL(u *url.URL) error {
@@ -61,10 +82,17 @@ func dialPublic(ctx context.Context, network, address string) (net.Conn, error) 
 	return nil, err
 }
 
-type publicRoundTripper struct{ base http.RoundTripper }
+type publicRoundTripper struct {
+	base      http.RoundTripper
+	httpsOnly bool
+}
 
 func (t publicRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
-	if err := publicURL(r.URL); err != nil {
+	if t.httpsOnly {
+		if err := publicHTTPSURL(r.URL); err != nil {
+			return nil, err
+		}
+	} else if err := publicURL(r.URL); err != nil {
 		return nil, err
 	}
 	return t.base.RoundTrip(r)
@@ -75,13 +103,21 @@ func publicTransport() http.RoundTripper {
 	tr.DialContext = dialPublic
 	tr.TLSHandshakeTimeout = 10 * time.Second
 	tr.ResponseHeaderTimeout = 20 * time.Second
-	return publicRoundTripper{tr}
+	return publicRoundTripper{base: tr}
+}
+func publicHTTPSTransport() http.RoundTripper {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.Proxy = nil
+	tr.DialContext = dialPublic
+	tr.TLSHandshakeTimeout = 10 * time.Second
+	tr.ResponseHeaderTimeout = 20 * time.Second
+	return publicRoundTripper{base: tr, httpsOnly: true}
 }
 func rejectRedirect(r *http.Request, via []*http.Request) error {
 	return errors.New("redirects are not allowed for credential exchanges")
 }
 
-var oauthHTTPClient = &http.Client{Transport: publicTransport(), Timeout: 20 * time.Second, CheckRedirect: rejectRedirect}
+var oauthHTTPClient = &http.Client{Transport: publicHTTPSTransport(), Timeout: 20 * time.Second, CheckRedirect: rejectRedirect}
 
 func sameOrigin(a, b *url.URL) bool {
 	port := func(u *url.URL) string {

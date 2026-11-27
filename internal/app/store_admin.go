@@ -965,6 +965,9 @@ type AdminUser struct {
 	// The organisation's sign-in policy and its two-factor requirement are both read against it,
 	// so it has to survive on the session rather than being asked again per request.
 	Via string `json:"via"`
+	// SSOOrgID is the organisation whose IdP minted this session when Via == "sso"; zero otherwise.
+	// An SSO session may only act in the organisation whose IdP authenticated it.
+	SSOOrgID int64 `json:"-"`
 	// APIKeyID is the key a /v1 request authenticated with, and zero for a session. The audit
 	// log records it, so what a key did can be tied to the key after it is rotated or revoked.
 	APIKeyID int64 `json:"-"`
@@ -992,9 +995,9 @@ func (u *AdminUser) sessionAge() time.Duration {
 // with its own audit line, not a query parameter anyone can vary.
 func (s *Store) CreateAdminSession(ctx context.Context, u AdminUser, ttl time.Duration) (string, error) {
 	tok := randomToken()
-	_, err := s.db.ExecContext(ctx, `insert into admin_sessions (token, id, user_id, org_id, name, email, via, expires_at, mfa_verified)
-		values (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		hashSessionToken(tok), u.ID, u.UserID, u.OrgID, u.Name, u.Email, u.Via, time.Now().Add(ttl).UTC().Format(time.DateTime), u.MFAVerified)
+	_, err := s.db.ExecContext(ctx, `insert into admin_sessions (token, id, user_id, org_id, name, email, via, sso_org_id, expires_at, mfa_verified)
+		values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		hashSessionToken(tok), u.ID, u.UserID, u.OrgID, u.Name, u.Email, u.Via, u.SSOOrgID, time.Now().Add(ttl).UTC().Format(time.DateTime), u.MFAVerified)
 	return tok, err
 }
 
@@ -1015,11 +1018,11 @@ func (s *Store) MarkSessionMFA(ctx context.Context, token string, userID int64) 
 func (s *Store) AdminSession(ctx context.Context, tok string) (*AdminUser, error) {
 	var u AdminUser
 	err := s.db.QueryRowContext(ctx, `select coalesce(a.id,0), coalesce(a.org_id,0), coalesce(a.user_id,''),
-		coalesce(a.name,''), coalesce(a.email,''), coalesce(o.name,''), coalesce(o.slug,''), coalesce(a.via,''), a.mfa_verified, coalesce(a.created_at,''),
+		coalesce(a.name,''), coalesce(a.email,''), coalesce(o.name,''), coalesce(o.slug,''), coalesce(a.via,''), coalesce(a.sso_org_id,0), a.mfa_verified, coalesce(a.created_at,''),
 		coalesce(usr.public_id,''), coalesce(o.public_id,'')
 		from admin_sessions a left join orgs o on o.id = a.org_id left join users usr on usr.id = a.id
 		where a.token=? and a.expires_at > ?`, hashSessionToken(tok), now()).
-		Scan(&u.ID, &u.OrgID, &u.UserID, &u.Name, &u.Email, &u.OrgName, &u.OrgSlug, &u.Via, &u.MFAVerified, &u.CreatedAt,
+		Scan(&u.ID, &u.OrgID, &u.UserID, &u.Name, &u.Email, &u.OrgName, &u.OrgSlug, &u.Via, &u.SSOOrgID, &u.MFAVerified, &u.CreatedAt,
 			&u.PublicID, &u.OrgPublic)
 	if err == sql.ErrNoRows {
 		return nil, nil

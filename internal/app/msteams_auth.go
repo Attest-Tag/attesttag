@@ -84,7 +84,7 @@ func newMSTeamsClient(cfg Config, store *Store) *msteamsClient {
 	if !cfg.msteamsConfigured() {
 		return nil
 	}
-	hc := &http.Client{Timeout: 20 * time.Second, Transport: publicTransport()}
+	hc := &http.Client{Timeout: 20 * time.Second, Transport: publicHTTPSTransport(), CheckRedirect: rejectRedirect}
 	authority := cfg.MSTeamsTenantID
 	if cfg.MSTeamsAppType == msteamsMultiTenant {
 		// A multi-tenant bot's tokens come from the Bot Framework's own directory. None can be

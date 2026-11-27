@@ -37,6 +37,9 @@ var secretRes = []struct {
 	{[]string{"github_pat_"}, regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{22,}`)}, // fine-grained GitHub tokens
 	{[]string{"atj1."}, regexp.MustCompile(`\batj1\.[0-9]+\.[A-Za-z0-9_-]{40,}`)},   // fix-job worker tokens (jobs.go)
 	{[]string{"atk1."}, regexp.MustCompile(`\batk1\.[A-Za-z0-9_-]{40,}`)},           // developer API keys (api_keys.go): 32 random bytes, base64url
+	{[]string{"ato1.", "atr1.", "atc1."}, regexp.MustCompile(`\bat[orc]1\.[A-Za-z0-9_-]{20,}`)}, // MCP OAuth access, refresh and code tokens (mcp_oauth.go)
+	{[]string{"mcps_"}, regexp.MustCompile(`\bmcps_[A-Za-z0-9_-]{20,}`)},                         // MCP OAuth client secrets
+	{[]string{"ya29."}, regexp.MustCompile(`\bya29\.[A-Za-z0-9_-]{20,}`)},                       // Google OAuth access tokens
 	{[]string{"private key-----"}, regexp.MustCompile(`(?i)-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----`)},
 	{[]string{"eyj"}, regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}`)}, // JWT
 }

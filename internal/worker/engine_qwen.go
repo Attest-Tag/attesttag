@@ -129,7 +129,7 @@ func (e *qwenEngine) Run(ctx context.Context, ws *Workspace, b Brief) (EngineRes
 	if remaining < 2*time.Minute {
 		return EngineResult{Stopped: "timeout"}, nil
 	}
-	prompt := briefText(b)
+	prompt := ws.Scrub.Clean(briefText(b))
 	os.WriteFile(filepath.Join(ws.JobDir, "brief.md"), []byte(prompt), 0o600)
 	argv := append(qwenArgv(e.bin), "-p", prompt, "--yolo", "--output-format", "stream-json",
 		"--max-session-turns", strconv.Itoa(e.maxRounds), "--max-tool-calls", strconv.Itoa(e.maxRounds*3),

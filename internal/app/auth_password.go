@@ -440,8 +440,12 @@ func (b *Bot) passwordUsableBy(ctx context.Context, u *User) bool {
 // startSession is the one place a session is minted, so the cookie flags, the CSRF token and the
 // audit line cannot drift between the three ways in.
 func (b *Bot) startSession(w http.ResponseWriter, r *http.Request, u *User, orgID int64, via string, mfa ...bool) {
+	var ssoOrgID int64
+	if via == "sso" {
+		ssoOrgID = orgID
+	}
 	tok, err := b.store.CreateAdminSession(r.Context(), AdminUser{
-		ID: u.ID, Name: u.Name, Email: u.Email, OrgID: orgID, Via: via, MFAVerified: len(mfa) > 0 && mfa[0],
+		ID: u.ID, Name: u.Name, Email: u.Email, OrgID: orgID, Via: via, SSOOrgID: ssoOrgID, MFAVerified: len(mfa) > 0 && mfa[0],
 		UserID: b.slackIDOf(r.Context(), u, orgID),
 	}, sessionTTL)
 	if err != nil {
@@ -902,7 +906,7 @@ func (b *Bot) handleSwitchOrg(w http.ResponseWriter, r *http.Request) {
 	}
 	// Membership is not enough: the destination decides which credentials it accepts, and this
 	// session was made with one of them. Otherwise switching would be the way around a policy.
-	if !b.settings.Get(r.Context(), org.ID).allowsVia(me.Via) {
+	if !b.settings.Get(r.Context(), org.ID).allowsViaForOrg(me.Via, me.SSOOrgID, org.ID) {
 		writeJSON(w, 403, map[string]any{"error": "That organisation does not accept the way you signed in. Sign out and sign in again to open it."})
 		return
 	}

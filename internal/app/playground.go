@@ -167,14 +167,19 @@ func (b *Bot) handlePlayground(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Whose access this runs with. A console session carries a Slack id only when it signed in
-	// that way, and there is deliberately no "run as" field: connections that belong to one
-	// person are exactly the thing an admin must not be able to borrow from a test page.
+	// that way (matched to this workspace), and there is deliberately no "run as" field:
+	// connections that belong to one person are exactly the thing an admin must not be able to
+	// borrow from a test page. Never fall back to sl.BotUserID, because canRead would then ask
+	// Slack whether the bot itself is in a private channel.
 	userID := ""
 	if u := adminFromCtx(ctx); u != nil {
-		userID = u.UserID
-	}
-	if userID == "" {
-		userID = sl.BotUserID
+		if self, ok := b.selfFor(ctx, u, sc.TeamID); ok {
+			userID = self.SlackUserID
+		} else if u.UserID != "" {
+			if teams, _ := b.store.Teams(ctx, orgID); len(teams) <= 1 {
+				userID = u.UserID
+			}
+		}
 	}
 
 	// Every limit a turn in the channel would meet, met here too: the per-person hourly rate
