@@ -86,6 +86,10 @@ var gitPins = []string{
 	"-c", "core.fsmonitor=",
 	"-c", "credential.helper=",
 	"-c", "http.sslVerify=true",
+	// No detached gc or maintenance: a job's clones are thrown away, and one left running after a
+	// fetch writes into a directory that is being removed.
+	"-c", "gc.auto=0",
+	"-c", "maintenance.auto=false",
 	// gpg.program runs on `git commit` when a planted commit.gpgSign=true is in the
 	// sandbox-owned .git/config, so pin the signer off and empty its program the same way the
 	// others are pinned: a repository must not choose the program a commit runs.
